@@ -1,100 +1,58 @@
-# VoIP MVP (Client + Server)
+# VoIP Server Branch
 
-This repository now includes:
+This branch contains the backend-only VoIP server package for VPS deployment.
 
-- `backend`: Control plane (REST + WS) and media plane (UDP mixer) with SQLite persistence.
-- `primer_front`: Next.js client UI integrated with backend APIs and real-time WS events.
-- `voice-client`: Desktop-side voice engine module (UDP encrypted media transport interface).
-- `desktop-client`: Electron shell with IPC bridge to native voice service.
-- `docker-compose.yml`: One-command local run for backend + frontend.
+## Includes
 
-## Current Model
+- `backend`: Fastify control plane + WebSocket events + UDP media mixer.
+- `docker-compose.yml`: production-oriented compose that pulls a prebuilt image.
+- `.env.example`: required runtime environment variables.
 
-- Server-authoritative state for profile, room membership, mute/deafen/speaking.
-- Nickname is persisted on backend per `serverId + clientId`.
-- Persistent text chat history stored on backend with pagination.
-- Voice quality telemetry is exposed in desktop UI (`ping/jitter p99 and p999`, packet loss).
-- Desktop app exposes audio device selection (`input/output`) via Electron IPC.
-
-## Run with Docker Compose
-
-Create `.env` (or copy from `.env.example`) and set superuser password:
+## Quick Install on VPS
 
 ```bash
+git clone <your-repo-url> voip-server
+cd voip-server
 cp .env.example .env
-# edit SUPERUSER_PASSWORD
+# edit .env values (minimum: TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST)
+docker compose pull
+docker compose up -d
 ```
+
+Ports (default):
+
+- HTTP/WS: `18080/tcp`
+- UDP media: `50010/udp`
+
+## Environment
+
+- `VOIP_BACKEND_IMAGE`: container image tag to pull (default `ghcr.io/kyratin/voip-backend:latest`).
+- `TOKEN_SECRET`: required signing secret for auth/media tokens.
+- `SUPERUSER_PASSWORD`: required password to grant the `admin` role on join.
+- `PUBLIC_UDP_HOST`: public VPS IP/domain clients should use for UDP.
+- `BACKEND_HTTP_PORT`: external HTTP/WS port.
+- `BACKEND_UDP_PORT`: external UDP media port.
+
+## Superuser / Admin
+
+- Client joins using normal server password.
+- If client also sends `superuserPassword` equal to `SUPERUSER_PASSWORD`, backend grants built-in `admin` role.
+- Only `admin` users can access server settings operations (channels/roles management).
+
+## Build and Publish Your Own Image
+
+From repository root:
 
 ```bash
-docker compose up --build
+docker build -t your-registry/voip-backend:latest ./backend
+docker push your-registry/voip-backend:latest
 ```
 
-Services:
+Then update `.env`:
 
-- Frontend: `http://localhost:3000`
-- Backend HTTP/WS: `http://localhost:18080`
-- Backend UDP media: `localhost:50010/udp`
-
-## Run Desktop Client (Phase 1)
-
-```bash
-cd voice-client && npm install && npm run build
-cd ../desktop-client && npm install && npm run build && npm run start
+```env
+VOIP_BACKEND_IMAGE=your-registry/voip-backend:latest
 ```
-
-Desktop client opens your UI in Electron and exposes `window.electronVoice` bridge for connect/join/mute/deafen actions.
-
-## Build Binary (Desktop)
-
-From `desktop-client`:
-
-```bash
-npm install
-npm run build
-npm run pack
-```
-
-For installer artifacts:
-
-```bash
-npm run dist
-```
-
-Expected outputs are created under `desktop-client/release/`:
-- Linux: `AppImage`, `deb`
-- Windows: `nsis` installer (`Kyratin VoIP-<version>-win-x64.exe`)
-
-## Windows Build And Run
-
-Preferred (native Windows host):
-
-```powershell
-cd <repo>\voice-client
-npm install
-npm run build
-
-cd ..\desktop-client
-npm install
-npm run build
-npm run dist:win
-```
-
-Artifact:
-- `desktop-client/release/Kyratin VoIP-0.1.0-win-x64.exe`
-
-Optional (from WSL/Linux via Docker builder image with wine):
-
-```bash
-docker run --rm \
-  -v "$PWD":/project \
-  -w /project/desktop-client \
-  -v "$HOME/.cache/electron":/root/.cache/electron \
-  -v "$HOME/.cache/electron-builder":/root/.cache/electron-builder \
-  electronuserland/builder:wine \
-  /bin/bash -lc "npm install && npm run build && npm run dist:win"
-```
-
-## Windows Troubleshooting
 
 - If microphone/headphones list is empty, allow microphone access in Windows privacy settings and restart the app.
 - If call quality is unstable, allow app traffic in Windows Firewall for both TCP/UDP.
