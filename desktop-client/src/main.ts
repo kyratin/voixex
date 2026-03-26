@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron"
+import { app, BrowserWindow, globalShortcut, ipcMain } from "electron"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { join } from "node:path"
@@ -9,6 +9,36 @@ const voice = new VoiceService()
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
 const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000"
 const bundledUiPath = join(__dirname, "../ui/index.html")
+type HotkeyAction = "toggle_mute" | "toggle_deafen" | "push_to_talk"
+type KeybindConfig = { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }
+let keybinds: KeybindConfig = {
+  toggleMute: "CommandOrControl+Shift+M",
+  toggleDeafen: "CommandOrControl+Shift+D",
+  pushToTalk: "CommandOrControl+Shift+V"
+}
+
+function emitHotkeyAction(action: HotkeyAction) {
+  const payload = { action }
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send("voice:hotkeyAction", payload)
+  }
+}
+
+function registerHotkeys() {
+  globalShortcut.unregisterAll()
+  const mappings: Array<{ accelerator: string | null; action: HotkeyAction }> = [
+    { accelerator: keybinds.toggleMute, action: "toggle_mute" },
+    { accelerator: keybinds.toggleDeafen, action: "toggle_deafen" },
+    { accelerator: keybinds.pushToTalk, action: "push_to_talk" }
+  ]
+  for (const item of mappings) {
+    if (!item.accelerator) continue
+    const ok = globalShortcut.register(item.accelerator, () => emitHotkeyAction(item.action))
+    if (!ok) {
+      console.warn(`Failed to register hotkey: ${item.accelerator}`)
+    }
+  }
+}
 
 function isLegacyWindows10() {
   if (process.platform !== "win32") return false
@@ -61,6 +91,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  registerHotkeys()
   voice.setOnIncomingPcm16((pcm16Base64) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("voice:pcm16Frame", pcm16Base64)
@@ -102,6 +133,23 @@ app.whenReady().then(() => {
   ipcMain.handle("voice:setAudioDevices", (_event, selection: { inputId: string | null; outputId: string | null }) => {
     return voice.setAudioDevices(selection)
   })
+  ipcMain.handle("voice:getKeybinds", () => {
+    return { ...keybinds }
+  })
+  ipcMain.handle("voice:setKeybinds", (_event, next: KeybindConfig) => {
+    keybinds = {
+      toggleMute: next.toggleMute?.trim() || null,
+      toggleDeafen: next.toggleDeafen?.trim() || null,
+      pushToTalk: next.pushToTalk?.trim() || null
+    }
+    registerHotkeys()
+    return { ...keybinds }
+  })
+  ipcMain.handle("voice:clearKeybinds", () => {
+    keybinds = { toggleMute: null, toggleDeafen: null, pushToTalk: null }
+    registerHotkeys()
+    return { ...keybinds }
+  })
   ipcMain.handle("voice:sendPcm16Frame", (_event, pcm16Base64: string) => {
     voice.sendPcm16Frame(pcm16Base64)
     return { ok: true }
@@ -111,5 +159,6 @@ app.whenReady().then(() => {
 })
 
 app.on("window-all-closed", () => {
+  globalShortcut.unregisterAll()
   if (process.platform !== "darwin") app.quit()
 })

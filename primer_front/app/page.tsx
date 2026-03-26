@@ -27,8 +27,10 @@ export default function VoIPApp() {
     captureCtx: AudioContext
     captureNode: ScriptProcessorNode
     captureSource: MediaStreamAudioSourceNode
+    micGainNode: GainNode
     playbackCtx: AudioContext
     playbackNode: ScriptProcessorNode
+    outputGainNode: GainNode
     queue: Int16Array[]
     txRemainder: Int16Array
     txResampleInput: Float32Array
@@ -69,7 +71,8 @@ export default function VoIPApp() {
   const [isSpeakingNow, setIsSpeakingNow] = useState(false)
   const [hasDesktopBridge, setHasDesktopBridge] = useState(false)
   const [showVoiceStatsPanel, setShowVoiceStatsPanel] = useState(false)
-  const [showAudioSettings, setShowAudioSettings] = useState(false)
+  const [showAppSettings, setShowAppSettings] = useState(false)
+  const [appSettingsTab, setAppSettingsTab] = useState<"voice" | "keybinds">("voice")
   const [audioDevices, setAudioDevices] = useState<{ input: AudioDevice[]; output: AudioDevice[] }>({ input: [], output: [] })
   const [selectedDevices, setSelectedDevices] = useState<{ inputId: string | null; outputId: string | null }>({
     inputId: null,
@@ -79,11 +82,25 @@ export default function VoIPApp() {
   const [wsReconnecting, setWsReconnecting] = useState(false)
   const [deviceError, setDeviceError] = useState("")
   const [audioDevicesRevision, setAudioDevicesRevision] = useState(0)
+  const [micVolumePct, setMicVolumePct] = useState(100)
+  const [outputVolumePct, setOutputVolumePct] = useState(100)
+  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true)
+  const [keybinds, setKeybinds] = useState<{ toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }>({
+    toggleMute: null,
+    toggleDeafen: null,
+    pushToTalk: null
+  })
+  const [keybindDraft, setKeybindDraft] = useState<{ toggleMute: string; toggleDeafen: string; pushToTalk: string }>({
+    toggleMute: "",
+    toggleDeafen: "",
+    pushToTalk: ""
+  })
   const [canManageServer, setCanManageServer] = useState(false)
   const client = useMemo(() => new VoipClient(), [])
   const voicePipelineRef = useRef<VoicePipelineRuntime | null>(null)
   const mutedRef = useRef(isMuted)
   const deafenedRef = useRef(isDeafened)
+  const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const currentUser = useMemo(
     () => ({
@@ -129,6 +146,57 @@ export default function VoIPApp() {
   }, [])
 
   useEffect(() => {
+    const raw = localStorage.getItem("voip-audio-settings")
+    if (!raw) return
+    try {
+      const parsed = JSON.parse(raw) as { micVolumePct?: number; outputVolumePct?: number; noiseSuppressionEnabled?: boolean }
+      if (typeof parsed.micVolumePct === "number") setMicVolumePct(Math.max(0, Math.min(200, Math.round(parsed.micVolumePct))))
+      if (typeof parsed.outputVolumePct === "number") setOutputVolumePct(Math.max(0, Math.min(200, Math.round(parsed.outputVolumePct))))
+      if (typeof parsed.noiseSuppressionEnabled === "boolean") setNoiseSuppressionEnabled(parsed.noiseSuppressionEnabled)
+    } catch {
+      // ignore broken localStorage payload
+    }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem(
+      "voip-audio-settings",
+      JSON.stringify({ micVolumePct, outputVolumePct, noiseSuppressionEnabled })
+    )
+  }, [micVolumePct, outputVolumePct, noiseSuppressionEnabled])
+
+  useEffect(() => {
+    if (!hasDesktopBridge || !window.electronVoice) return
+    void window.electronVoice.getKeybinds().then((value) => {
+      const next = {
+        toggleMute: value.toggleMute ?? null,
+        toggleDeafen: value.toggleDeafen ?? null,
+        pushToTalk: value.pushToTalk ?? null
+      }
+      setKeybinds(next)
+      setKeybindDraft({
+        toggleMute: next.toggleMute ?? "",
+        toggleDeafen: next.toggleDeafen ?? "",
+        pushToTalk: next.pushToTalk ?? ""
+      })
+    })
+    const unsub = window.electronVoice.onHotkeyAction((payload) => {
+      if (payload.action === "toggle_mute") {
+        const next = !mutedRef.current
+        applyMute(next)
+      } else if (payload.action === "toggle_deafen") {
+        const next = !deafenedRef.current
+        applyDeafen(next)
+      } else if (payload.action === "push_to_talk") {
+        applyMute(false)
+        if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+        pttTimerRef.current = setTimeout(() => applyMute(true), 1200)
+      }
+    })
+    return unsub
+  }, [hasDesktopBridge])
+
+  useEffect(() => {
     mutedRef.current = isMuted
   }, [isMuted])
 
@@ -142,7 +210,9 @@ export default function VoIPApp() {
     runtime.unsubscribeIncoming?.()
     runtime.captureNode.disconnect()
     runtime.captureSource.disconnect()
+    runtime.micGainNode.disconnect()
     runtime.playbackNode.disconnect()
+    runtime.outputGainNode.disconnect()
     void runtime.captureCtx.close()
     void runtime.playbackCtx.close()
     runtime.stream.getTracks().forEach((t) => t.stop())
@@ -260,19 +330,25 @@ export default function VoIPApp() {
       try {
         stopVoicePipeline()
         const selected = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: selected?.inputId
-            ? {
-                deviceId: { exact: selected.inputId },
-                channelCount: 1,
-                sampleRate: 48000,
-                sampleSize: 16,
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false
-              }
-            : { channelCount: 1, sampleRate: 48000, sampleSize: 16, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-        })
+        const preferredConstraints: MediaTrackConstraints = {
+          ...(selected?.inputId ? { deviceId: { exact: selected.inputId } } : {}),
+          channelCount: 1,
+          sampleRate: 48000,
+          sampleSize: 16,
+          echoCancellation: noiseSuppressionEnabled,
+          noiseSuppression: noiseSuppressionEnabled,
+          autoGainControl: noiseSuppressionEnabled
+        }
+        let stream: MediaStream
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: preferredConstraints })
+        } catch {
+          // Fallback if strict constraints are unsupported by the current audio stack.
+          stream = await navigator.mediaDevices.getUserMedia({ audio: selected?.inputId ? { deviceId: { exact: selected.inputId } } : true })
+          if (noiseSuppressionEnabled) {
+            setDeviceError("Noise suppression constraints are not supported on this device. Running without DSP constraints.")
+          }
+        }
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop())
           return
@@ -286,14 +362,20 @@ export default function VoIPApp() {
 
         const captureSource = captureCtx.createMediaStreamSource(stream)
         const captureNode = captureCtx.createScriptProcessor(1024, 1, 1)
+        const micGainNode = captureCtx.createGain()
+        micGainNode.gain.value = micVolumePct / 100
         const playbackNode = playbackCtx.createScriptProcessor(1024, 1, 1)
+        const outputGainNode = playbackCtx.createGain()
+        outputGainNode.gain.value = outputVolumePct / 100
         const runtime: VoicePipelineRuntime = {
           stream,
           captureCtx,
           captureNode,
           captureSource,
+          micGainNode,
           playbackCtx,
           playbackNode,
+          outputGainNode,
           queue: [],
           txRemainder: new Int16Array(0),
           txResampleInput: new Float32Array(0),
@@ -363,9 +445,11 @@ export default function VoIPApp() {
           }
         }) ?? null
 
-        captureSource.connect(captureNode)
+        captureSource.connect(micGainNode)
+        micGainNode.connect(captureNode)
         captureNode.connect(captureCtx.destination)
-        playbackNode.connect(playbackCtx.destination)
+        playbackNode.connect(outputGainNode)
+        outputGainNode.connect(playbackCtx.destination)
         await captureCtx.resume()
         await playbackCtx.resume()
         setStatus((prev) => {
@@ -382,13 +466,27 @@ export default function VoIPApp() {
       cancelled = true
       stopVoicePipeline()
     }
-  }, [hasDesktopBridge, isInVoice, currentVoiceChannel, audioDevicesRevision])
+  }, [hasDesktopBridge, isInVoice, currentVoiceChannel, audioDevicesRevision, noiseSuppressionEnabled, micVolumePct, outputVolumePct])
 
   useEffect(() => {
     if (isInVoice) {
       setShowVoiceStatsPanel(true)
     }
   }, [isInVoice])
+
+  const applyMute = (next: boolean) => {
+    setIsMuted(next)
+    client.setMute(next)
+    void window.electronVoice?.setMute(next)
+    setStatus(next ? "Microphone muted" : "Microphone unmuted")
+  }
+
+  const applyDeafen = (next: boolean) => {
+    setIsDeafened(next)
+    client.setDeafen(next)
+    void window.electronVoice?.setDeafen(next)
+    setStatus(next ? "Headphones deafened" : "Headphones undeafened")
+  }
 
   const handleSendMessage = (content: string) => {
     if (!activeServerId || !activeChannelId) return
@@ -437,11 +535,16 @@ export default function VoIPApp() {
     return `Ping1% ${voiceStats.ping1PctMs ?? 0}ms | Loss ${voiceStats.packetLossPct ?? 0}% | Jitter1% ${voiceStats.jitter1PctMs ?? 0}ms`
   }, [isInVoice, voiceStats])
 
-  const joinServer = async () => {
+  const connectAndJoin = async () => {
     try {
       setJoining(true)
       client.setApiBase(`http://${apiHost.trim()}:${apiPort.trim()}`)
       setError("")
+      setStatus(`Connecting API: ${apiHost}:${apiPort}`)
+      const health = await client.healthcheck()
+      if (!health.ok) throw new Error("server is not healthy")
+      setConnectedToApi(true)
+      setStatus("Joining server...")
       const clientId = localStorage.getItem("voip-client-id") || crypto.randomUUID()
       const join = await client.joinServer(serverPassword, clientId, displayNameInput, superuserPasswordInput || undefined)
       const joinedServerId = join.serverId
@@ -452,6 +555,7 @@ export default function VoIPApp() {
         if (!window.electronVoice) {
           throw new Error("Desktop voice bridge not available. Run inside voip-desktop-client.")
         }
+        setStatus("Connecting voice transport...")
         await window.electronVoice.connect({
           host: join.udp.host === "backend" ? apiHost.trim() : join.udp.host,
           port: join.udp.port,
@@ -479,27 +583,14 @@ export default function VoIPApp() {
         setStatus("Connected to server")
       }
     } catch (e) {
+      setConnectedToApi(false)
       setError(e instanceof Error ? e.message : "join server failed")
     } finally {
       setJoining(false)
     }
   }
 
-  const connectApi = async () => {
-    try {
-      setError("")
-      client.setApiBase(`http://${apiHost.trim()}:${apiPort.trim()}`)
-      const health = await client.healthcheck()
-      if (!health.ok) throw new Error("server is not healthy")
-      setConnectedToApi(true)
-      setStatus(`Backend connected: ${apiHost}:${apiPort}`)
-    } catch (e) {
-      setConnectedToApi(false)
-      setError(e instanceof Error ? e.message : "cannot connect to backend")
-    }
-  }
-
-  const openAudioSettings = async () => {
+  const openAppSettings = async () => {
     if (!window.electronVoice) return
     setDeviceError("")
     let list = (await window.electronVoice.listAudioDevices()) as AudioDevice[]
@@ -536,13 +627,37 @@ export default function VoIPApp() {
     const current = (await window.electronVoice.getAudioDevices()) as { inputId: string | null; outputId: string | null }
     setAudioDevices({ input, output })
     setSelectedDevices(current)
-    setShowAudioSettings(true)
+    setAppSettingsTab("voice")
+    setShowAppSettings(true)
   }
 
   const saveAudioSettings = async () => {
     await window.electronVoice?.setAudioDevices(selectedDevices)
     setAudioDevicesRevision((v) => v + 1)
-    setShowAudioSettings(false)
+    setShowAppSettings(false)
+  }
+
+  const saveKeybinds = async () => {
+    if (!window.electronVoice) return
+    const next = {
+      toggleMute: keybindDraft.toggleMute.trim() || null,
+      toggleDeafen: keybindDraft.toggleDeafen.trim() || null,
+      pushToTalk: keybindDraft.pushToTalk.trim() || null
+    }
+    const saved = (await window.electronVoice.setKeybinds(next)) as { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }
+    setKeybinds(saved)
+    setKeybindDraft({
+      toggleMute: saved.toggleMute ?? "",
+      toggleDeafen: saved.toggleDeafen ?? "",
+      pushToTalk: saved.pushToTalk ?? ""
+    })
+  }
+
+  const clearKeybinds = async () => {
+    if (!window.electronVoice) return
+    const saved = (await window.electronVoice.clearKeybinds()) as { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }
+    setKeybinds(saved)
+    setKeybindDraft({ toggleMute: "", toggleDeafen: "", pushToTalk: "" })
   }
 
   const saveProfile = async () => {
@@ -573,12 +688,14 @@ export default function VoIPApp() {
             <div className="mb-2 flex gap-2">
               <input className="w-40 rounded border px-2 py-1" value={apiHost} onChange={(e) => setApiHost(e.target.value)} placeholder="Backend host/ip" />
               <input className="w-20 rounded border px-2 py-1" value={apiPort} onChange={(e) => setApiPort(e.target.value)} placeholder="Port" />
-              <button className="rounded border px-2 py-1" onClick={connectApi}>Connect</button>
+              <button className="rounded border px-2 py-1" onClick={connectAndJoin} disabled={joining}>
+                {joining ? "Connecting..." : "Connect"}
+              </button>
             </div>
             <div className="mb-2 flex gap-2">
               <input className="w-28 rounded border px-2 py-1" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)} placeholder="Password" />
               <input className="w-28 rounded border px-2 py-1" value={displayNameInput} onChange={(e) => setDisplayNameInput(e.target.value)} placeholder="Nickname" />
-              <button className="rounded border px-2 py-1" onClick={joinServer} disabled={joining || !connectedToApi}>{joining ? "Joining..." : "Join"}</button>
+              <span className="rounded border px-2 py-1 text-muted-foreground">{connectedToApi ? "API OK" : "API ?"} </span>
             </div>
             <div className="mb-2 flex gap-2">
               <input
@@ -633,23 +750,18 @@ export default function VoIPApp() {
           voiceChannelName={voiceChannelName}
           onToggleMute={() => {
             const next = !isMuted
-            setIsMuted(next)
-            client.setMute(next)
-            void window.electronVoice?.setMute(next)
-            setStatus(next ? "Microphone muted" : "Microphone unmuted")
+            if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+            applyMute(next)
           }}
           onToggleDeafen={() => {
             const next = !isDeafened
-            setIsDeafened(next)
-            client.setDeafen(next)
-            void window.electronVoice?.setDeafen(next)
-            setStatus(next ? "Headphones deafened" : "Headphones undeafened")
+            applyDeafen(next)
           }}
           onToggleVoiceStats={() => setShowVoiceStatsPanel((v) => !v)}
           onDisconnect={handleDisconnect}
           voiceStatsSummary={voiceStatsSummary}
           onOpenSettings={() => {
-            void openAudioSettings()
+            void openAppSettings()
           }}
         />
       </div>
@@ -674,40 +786,131 @@ export default function VoIPApp() {
         </div>
       )}
 
-      {showAudioSettings && (
-        <div className="fixed bottom-24 left-[460px] z-20 w-[360px] rounded border border-border bg-card p-3 text-xs shadow-lg">
-          <div className="mb-2 flex items-center justify-between font-semibold">
-            <span>Audio devices</span>
-            <button className="rounded border px-2 py-0.5" onClick={() => setShowAudioSettings(false)}>Close</button>
+      {showAppSettings && (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
+          <div className="w-[760px] max-w-full rounded border border-border bg-card p-4 text-xs shadow-lg">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-sm font-semibold">User settings</div>
+              <button className="rounded border px-2 py-1" onClick={() => setShowAppSettings(false)}>
+                Close
+              </button>
+            </div>
+            <div className="mb-3 flex gap-2">
+              <button
+                className={`rounded border px-2 py-1 ${appSettingsTab === "voice" ? "bg-muted" : ""}`}
+                onClick={() => setAppSettingsTab("voice")}
+              >
+                Voice & Video
+              </button>
+              <button
+                className={`rounded border px-2 py-1 ${appSettingsTab === "keybinds" ? "bg-muted" : ""}`}
+                onClick={() => setAppSettingsTab("keybinds")}
+              >
+                Keybinds
+              </button>
+            </div>
+
+            {appSettingsTab === "voice" && (
+              <div className="space-y-3">
+                <div>
+                  <div className="mb-1 text-muted-foreground">Input device</div>
+                  <select
+                    className="w-full rounded border px-2 py-1"
+                    value={selectedDevices.inputId ?? ""}
+                    onChange={(e) => setSelectedDevices((prev) => ({ ...prev, inputId: e.target.value || null }))}
+                  >
+                    <option value="">Default</option>
+                    {audioDevices.input.map((d) => (
+                      <option key={d.id} value={d.id}>{d.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <div className="mb-1 text-muted-foreground">Output device</div>
+                  <select
+                    className="w-full rounded border px-2 py-1"
+                    value={selectedDevices.outputId ?? ""}
+                    onChange={(e) => setSelectedDevices((prev) => ({ ...prev, outputId: e.target.value || null }))}
+                  >
+                    <option value="">Default</option>
+                    {audioDevices.output.map((d) => (
+                      <option key={d.id} value={d.id}>{d.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <div className="mb-1 text-muted-foreground">Input volume: {micVolumePct}%</div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={200}
+                    step={1}
+                    value={micVolumePct}
+                    onChange={(e) => setMicVolumePct(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 text-muted-foreground">Output volume: {outputVolumePct}%</div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={200}
+                    step={1}
+                    value={outputVolumePct}
+                    onChange={(e) => setOutputVolumePct(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={noiseSuppressionEnabled}
+                    onChange={(e) => setNoiseSuppressionEnabled(e.target.checked)}
+                  />
+                  Active noise suppression (AEC/NS/AGC)
+                </label>
+                <button className="rounded border px-2 py-1" onClick={saveAudioSettings}>Apply</button>
+                {deviceError ? <div className="mt-2 text-destructive">{deviceError}</div> : null}
+              </div>
+            )}
+
+            {appSettingsTab === "keybinds" && (
+              <div className="space-y-3">
+                <div className="text-muted-foreground">Global OS shortcuts (Electron format, e.g. Ctrl+Shift+M)</div>
+                <div className="grid grid-cols-[180px_1fr] items-center gap-2">
+                  <div>Toggle Mute</div>
+                  <input
+                    className="rounded border px-2 py-1"
+                    value={keybindDraft.toggleMute}
+                    onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleMute: e.target.value }))}
+                    placeholder="Ctrl+Shift+M"
+                  />
+                  <div>Toggle Deafen</div>
+                  <input
+                    className="rounded border px-2 py-1"
+                    value={keybindDraft.toggleDeafen}
+                    onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleDeafen: e.target.value }))}
+                    placeholder="Ctrl+Shift+D"
+                  />
+                  <div>Push To Talk (pulse)</div>
+                  <input
+                    className="rounded border px-2 py-1"
+                    value={keybindDraft.pushToTalk}
+                    onChange={(e) => setKeybindDraft((prev) => ({ ...prev, pushToTalk: e.target.value }))}
+                    placeholder="Ctrl+Shift+V"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button className="rounded border px-2 py-1" onClick={saveKeybinds}>Save keybinds</button>
+                  <button className="rounded border px-2 py-1" onClick={clearKeybinds}>Clear</button>
+                </div>
+                <div className="text-muted-foreground">
+                  Active: mute={keybinds.toggleMute ?? "none"}, deafen={keybinds.toggleDeafen ?? "none"}, ptt={keybinds.pushToTalk ?? "none"}
+                </div>
+              </div>
+            )}
           </div>
-          <div className="mb-2">
-            <div className="mb-1 text-muted-foreground">Input device</div>
-            <select
-              className="w-full rounded border px-2 py-1"
-              value={selectedDevices.inputId ?? ""}
-              onChange={(e) => setSelectedDevices((prev) => ({ ...prev, inputId: e.target.value || null }))}
-            >
-              <option value="">Default</option>
-              {audioDevices.input.map((d) => (
-                <option key={d.id} value={d.id}>{d.label}</option>
-              ))}
-            </select>
-          </div>
-          <div className="mb-2">
-            <div className="mb-1 text-muted-foreground">Output device</div>
-            <select
-              className="w-full rounded border px-2 py-1"
-              value={selectedDevices.outputId ?? ""}
-              onChange={(e) => setSelectedDevices((prev) => ({ ...prev, outputId: e.target.value || null }))}
-            >
-              <option value="">Default</option>
-              {audioDevices.output.map((d) => (
-                <option key={d.id} value={d.id}>{d.label}</option>
-              ))}
-            </select>
-          </div>
-          <button className="rounded border px-2 py-1" onClick={saveAudioSettings}>Apply</button>
-          {deviceError ? <div className="mt-2 text-destructive">{deviceError}</div> : null}
         </div>
       )}
 
