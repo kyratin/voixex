@@ -13,11 +13,20 @@ const electronVoice = {
   listAudioDevices: () => ipcRenderer.invoke("voice:listAudioDevices"),
   getAudioDevices: () => ipcRenderer.invoke("voice:getAudioDevices"),
   setAudioDevices: (selection: { inputId: string | null; outputId: string | null }) => ipcRenderer.invoke("voice:setAudioDevices", selection),
+  getKeybinds: () => ipcRenderer.invoke("voice:getKeybinds"),
+  setKeybinds: (keybinds: { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }) =>
+    ipcRenderer.invoke("voice:setKeybinds", keybinds),
+  clearKeybinds: () => ipcRenderer.invoke("voice:clearKeybinds"),
   sendPcm16Frame: (pcm16Base64: string) => ipcRenderer.invoke("voice:sendPcm16Frame", pcm16Base64),
   onPcm16Frame: (listener: (pcm16Base64: string) => void) => {
     const handler = (_event: unknown, payload: string) => listener(payload)
     ipcRenderer.on("voice:pcm16Frame", handler)
     return () => ipcRenderer.removeListener("voice:pcm16Frame", handler)
+  },
+  onHotkeyAction: (listener: (payload: { action: "toggle_mute" | "toggle_deafen" | "push_to_talk" }) => void) => {
+    const handler = (_event: unknown, payload: { action: "toggle_mute" | "toggle_deafen" | "push_to_talk" }) => listener(payload)
+    ipcRenderer.on("voice:hotkeyAction", handler)
+    return () => ipcRenderer.removeListener("voice:hotkeyAction", handler)
   }
 }
 
