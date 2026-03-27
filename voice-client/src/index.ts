@@ -82,7 +82,9 @@ export class VoiceEngine {
         }
         this.lastTransitMs = transit
       }
-      this.onPcm16Frame?.(frame.payload)
+      if (frame.payload.length > 0) {
+        this.onPcm16Frame?.(frame.payload)
+      }
     })
     this.connected = true
   }
@@ -154,8 +156,10 @@ export class VoiceEngine {
       rxPackets: this.rxPackets,
       rxLostEstimated: this.rxLostEstimated,
       packetLossPct: Number(lossPct.toFixed(3)),
+      pingNowMs: this.lastTransitMs !== null ? Number(this.lastTransitMs.toFixed(3)) : 0,
       ping1PctMs: Number(percentile(this.delaySamplesMs, 0.99).toFixed(3)),
       ping01PctMs: Number(percentile(this.delaySamplesMs, 0.999).toFixed(3)),
+      jitterNowMs: Number(this.jitterMs.toFixed(3)),
       jitter1PctMs: Number(percentile(this.jitterSamplesMs, 0.99).toFixed(3)),
       jitter01PctMs: Number(percentile(this.jitterSamplesMs, 0.999).toFixed(3))
     }

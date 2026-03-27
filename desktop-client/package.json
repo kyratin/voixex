@@ -29,8 +29,8 @@
     "typescript": "^5.9.2"
   },
   "build": {
-    "appId": "com.kyratin.voipdesktop",
-    "productName": "Kyratin VoIP",
+    "appId": "com.voixex.desktop",
+    "productName": "Voixex",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release"
