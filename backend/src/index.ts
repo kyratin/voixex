@@ -111,6 +111,14 @@ function getRooms(serverId: string) {
   }>
 }
 
+function isLobbyVoiceRoom(serverId: string, roomId: string) {
+  const row = db
+    .prepare("SELECT kind, name FROM rooms WHERE server_id = ? AND id = ? LIMIT 1")
+    .get(serverId, roomId) as { kind: "voice" | "text"; name: string } | undefined
+  if (!row) return false
+  return row.kind === "voice" && row.name.toLowerCase() === "lobby"
+}
+
 function getMemberSnapshot(serverId: string, clientId: string) {
   return db
     .prepare(
@@ -581,13 +589,13 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     try {
       const event = JSON.parse(String(msg.data)) as WsClientEvent
       if (event.type === "join_room") {
-        db.prepare("UPDATE member_state SET room_id = ?, speaking = 0, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
-          event.roomId,
-          auth.serverId,
-          auth.clientId
-        )
+        const forceMutedInLobby = isLobbyVoiceRoom(auth.serverId, event.roomId)
+        db.prepare(
+          "UPDATE member_state SET room_id = ?, speaking = 0, muted = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?"
+        ).run(event.roomId, forceMutedInLobby ? 1 : 0, auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, event.roomId)
         setMemberSpeaking(auth.clientId, false)
+        setMemberFlags(auth.clientId, forceMutedInLobby, false)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           emitToServer(auth.serverId, {
@@ -622,7 +630,12 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           })
         }
       } else if (event.type === "set_mute") {
-        db.prepare("UPDATE member_state SET muted = ? WHERE server_id = ? AND client_id = ?").run(event.muted ? 1 : 0, auth.serverId, auth.clientId)
+        const room = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        const forceMutedInLobby = Boolean(room?.room_id && isLobbyVoiceRoom(auth.serverId, room.room_id))
+        const effectiveMuted = forceMutedInLobby ? true : event.muted
+        db.prepare("UPDATE member_state SET muted = ? WHERE server_id = ? AND client_id = ?").run(effectiveMuted ? 1 : 0, auth.serverId, auth.clientId)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           setMemberFlags(auth.clientId, Boolean(snap.muted), Boolean(snap.deafened))
