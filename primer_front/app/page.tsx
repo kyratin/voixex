@@ -9,6 +9,15 @@ import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient } from "@/lib/voip-client"
 
 export default function VoIPApp() {
+  type SavedServerProfile = {
+    serverId: string
+    serverName: string
+    apiHost: string
+    apiPort: string
+    serverPassword: string
+    displayName: string
+    superuserPassword?: string
+  }
   type VoiceRuntimeStats = {
     connected?: boolean
     roomId?: string | null
@@ -69,16 +78,15 @@ export default function VoIPApp() {
   const [joining, setJoining] = useState(false)
   const [connectedToApi, setConnectedToApi] = useState(false)
   const [showConnectPanel, setShowConnectPanel] = useState(false)
-  const [showServerSettings, setShowServerSettings] = useState(false)
-  const [serverSettingsTab, setServerSettingsTab] = useState<"general" | "channels" | "roles">("general")
   const [roomNameInput, setRoomNameInput] = useState("new-room")
   const [roomKindInput, setRoomKindInput] = useState<"voice" | "text">("voice")
+  const [creatingChannel, setCreatingChannel] = useState(false)
   const [voiceStats, setVoiceStats] = useState<VoiceRuntimeStats | null>(null)
   const [isSpeakingNow, setIsSpeakingNow] = useState(false)
   const [hasDesktopBridge, setHasDesktopBridge] = useState(false)
   const [showVoiceStatsPanel, setShowVoiceStatsPanel] = useState(false)
   const [showAppSettings, setShowAppSettings] = useState(false)
-  const [appSettingsTab, setAppSettingsTab] = useState<"voice" | "keybinds">("voice")
+  const [appSettingsTab, setAppSettingsTab] = useState<"voice" | "keybinds" | "server_general" | "server_channels" | "server_roles">("voice")
   const [audioDevices, setAudioDevices] = useState<{ input: AudioDevice[]; output: AudioDevice[] }>({ input: [], output: [] })
   const [selectedDevices, setSelectedDevices] = useState<{ inputId: string | null; outputId: string | null }>({
     inputId: null,
@@ -102,11 +110,13 @@ export default function VoIPApp() {
     pushToTalk: ""
   })
   const [canManageServer, setCanManageServer] = useState(false)
+  const [savedServers, setSavedServers] = useState<SavedServerProfile[]>([])
   const client = useMemo(() => new VoipClient(), [])
   const voicePipelineRef = useRef<VoicePipelineRuntime | null>(null)
   const mutedRef = useRef(isMuted)
   const deafenedRef = useRef(isDeafened)
   const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoConnectAttemptedRef = useRef(false)
 
   const currentUser = useMemo(
     () => ({
@@ -123,6 +133,11 @@ export default function VoIPApp() {
     const key = "voip-client-id"
     const existing = localStorage.getItem(key)
     if (!existing) localStorage.setItem(key, crypto.randomUUID())
+    const savedNick = localStorage.getItem("voip-last-display-name")
+    if (savedNick && savedNick.trim()) {
+      setDisplayNameInput(savedNick)
+      setProfileDisplayName(savedNick)
+    }
     const unsubscribe = client.subscribe((state) => {
       setCategories(client.toSidebarCategories())
       setVoiceUsers(client.toVoiceUsers())
@@ -132,8 +147,24 @@ export default function VoIPApp() {
         setProfileDisplayName(state.me.displayName)
       }
       setCanManageServer(Boolean(state.me?.permissions?.manage_server))
-      const roomUsers = currentVoiceChannel ? state.rosterByRoom[currentVoiceChannel] ?? [] : state.lobby
-      setMembers(roomUsers.map((u) => ({ id: u.clientId, name: u.displayName, avatar: u.displayName.slice(0, 1).toUpperCase(), status: "online", roles: [] })))
+      const onlineByClientId = new Map<string, { clientId: string; displayName: string }>()
+      for (const u of state.lobby) {
+        onlineByClientId.set(u.clientId, { clientId: u.clientId, displayName: u.displayName })
+      }
+      for (const users of Object.values(state.rosterByRoom)) {
+        for (const u of users) {
+          onlineByClientId.set(u.clientId, { clientId: u.clientId, displayName: u.displayName })
+        }
+      }
+      setMembers(
+        Array.from(onlineByClientId.values()).map((u) => ({
+          id: u.clientId,
+          name: u.displayName,
+          avatar: u.displayName.slice(0, 1).toUpperCase(),
+          status: "online",
+          roles: []
+        }))
+      )
       const activeMessages = client.getMessagesState(activeChannelId)
       setMessages(
         activeMessages.map((m) => ({
@@ -145,11 +176,53 @@ export default function VoIPApp() {
       )
     })
     return unsubscribe
-  }, [client, currentVoiceChannel, activeChannelId])
+  }, [client, activeChannelId])
+
+  useEffect(() => {
+    const raw = localStorage.getItem("voixex-saved-servers")
+    if (!raw) return
+    try {
+      const parsed = JSON.parse(raw) as SavedServerProfile[]
+      if (!Array.isArray(parsed)) return
+      const valid = parsed.filter(
+        (s) =>
+          typeof s.serverId === "string" &&
+          typeof s.serverName === "string" &&
+          typeof s.apiHost === "string" &&
+          typeof s.apiPort === "string" &&
+          typeof s.serverPassword === "string" &&
+          typeof s.displayName === "string"
+      )
+      if (valid.length === 0) return
+      setSavedServers(valid)
+      setServers(valid.map((s) => ({ id: s.serverId, name: s.serverName, icon: s.serverName.slice(0, 1).toUpperCase() || "S" })))
+      const lastServerId = localStorage.getItem("voixex-last-server-id")
+      const preferred = valid.find((s) => s.serverId === lastServerId) ?? valid[0]
+      setActiveServerId(preferred.serverId)
+      setApiHost(preferred.apiHost)
+      setApiPort(preferred.apiPort)
+      setServerPassword(preferred.serverPassword)
+      setDisplayNameInput(preferred.displayName)
+      setProfileDisplayName(preferred.displayName)
+      setSuperuserPasswordInput(preferred.superuserPassword ?? "")
+    } catch {
+      // ignore malformed saved server payload
+    }
+  }, [])
 
   useEffect(() => {
     setHasDesktopBridge(Boolean(window.electronVoice))
   }, [])
+
+  useEffect(() => {
+    if (!hasDesktopBridge) return
+    if (autoConnectAttemptedRef.current) return
+    if (savedServers.length === 0) return
+    const lastServerId = localStorage.getItem("voixex-last-server-id")
+    const preferred = savedServers.find((s) => s.serverId === lastServerId) ?? savedServers[0]
+    autoConnectAttemptedRef.current = true
+    void connectAndJoin(preferred)
+  }, [hasDesktopBridge, savedServers])
 
   useEffect(() => {
     const raw = localStorage.getItem("voip-audio-settings")
@@ -588,6 +661,7 @@ export default function VoIPApp() {
   const allChannels = categories.flatMap((c) => c.channels)
   const voiceChannelName = categories.flatMap((c) => c.channels).find((c) => c.id === currentVoiceChannel)?.name || ""
   const isTextChannel = activeChannel?.type === "text"
+  const canOpenServerSettings = Boolean(activeServerId && canManageServer)
   const qualityClass = useMemo(() => {
     const loss = voiceStats?.packetLossPct ?? 0
     const jitter = voiceStats?.jitter1PctMs ?? 0
@@ -600,21 +674,36 @@ export default function VoIPApp() {
     return `Ping1% ${voiceStats.ping1PctMs ?? 0}ms | Loss ${voiceStats.packetLossPct ?? 0}% | Jitter1% ${voiceStats.jitter1PctMs ?? 0}ms`
   }, [isInVoice, voiceStats])
 
-  const connectAndJoin = async () => {
+  const connectAndJoin = async (preset?: SavedServerProfile) => {
     try {
       setJoining(true)
-      client.setApiBase(`http://${apiHost.trim()}:${apiPort.trim()}`)
+      const host = (preset?.apiHost ?? apiHost).trim()
+      const port = (preset?.apiPort ?? apiPort).trim()
+      const password = preset?.serverPassword ?? serverPassword
+      const superPassword = preset?.superuserPassword ?? superuserPasswordInput
+      const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
+      if (preset) {
+        setApiHost(host)
+        setApiPort(port)
+        setServerPassword(password)
+        setSuperuserPasswordInput(superPassword)
+      }
+      setDisplayNameInput(normalizedDisplayName)
+      localStorage.setItem("voip-last-display-name", normalizedDisplayName)
+      client.setApiBase(`http://${host}:${port}`)
       setError("")
-      setStatus(`Connecting API: ${apiHost}:${apiPort}`)
+      setStatus(`Connecting API: ${host}:${port}`)
       const health = await client.healthcheck()
       if (!health.ok) throw new Error("server is not healthy")
       setConnectedToApi(true)
       setStatus("Joining server...")
       const clientId = localStorage.getItem("voip-client-id") || crypto.randomUUID()
-      const join = await client.joinServer(serverPassword, clientId, displayNameInput, superuserPasswordInput || undefined)
+      const join = await client.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
       const joinedServerId = join.serverId
       const joinedServerName = join.serverName ?? "Server"
       localStorage.setItem("voip-client-id", join.profile.clientId)
+      localStorage.setItem("voip-last-display-name", join.profile.displayName)
+      localStorage.setItem("voixex-last-server-id", joinedServerId)
       setProfileDisplayName(join.profile.displayName)
       if (join.mediaToken) {
         if (!window.electronVoice) {
@@ -622,7 +711,7 @@ export default function VoIPApp() {
         }
         setStatus("Connecting voice transport...")
         await window.electronVoice.connect({
-          host: join.udp.host === "backend" ? apiHost.trim() : join.udp.host,
+          host: join.udp.host === "backend" ? host : join.udp.host,
           port: join.udp.port,
           mediaToken: join.mediaToken
         })
@@ -631,7 +720,22 @@ export default function VoIPApp() {
       const rooms = await client.getRooms(joinedServerId)
       await client.getMe(joinedServerId)
       setActiveServerId(joinedServerId)
-      setServers([{ id: joinedServerId, name: joinedServerName, icon: joinedServerName.slice(0, 1).toUpperCase() || "S" }])
+      const updatedProfile: SavedServerProfile = {
+        serverId: joinedServerId,
+        serverName: joinedServerName,
+        apiHost: host,
+        apiPort: port,
+        serverPassword: password,
+        displayName: join.profile.displayName,
+        ...(superPassword ? { superuserPassword: superPassword } : {})
+      }
+      setSavedServers((prev) => {
+        const withoutSameHost = prev.filter((s) => !(s.apiHost === updatedProfile.apiHost && s.apiPort === updatedProfile.apiPort))
+        const next = [updatedProfile, ...withoutSameHost]
+        localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
+        setServers(next.map((s) => ({ id: s.serverId, name: s.serverName, icon: s.serverName.slice(0, 1).toUpperCase() || "S" })))
+        return next
+      })
       const text = rooms.find((r) => r.kind === "text")
       const voice = rooms.find((r) => r.kind === "voice")
       if (text) {
@@ -655,7 +759,7 @@ export default function VoIPApp() {
     }
   }
 
-  const openAppSettings = async () => {
+  const openAppSettings = async (initialTab: "voice" | "keybinds" | "server_general" | "server_channels" | "server_roles" = "voice") => {
     if (!window.electronVoice) return
     setDeviceError("")
     let list = (await window.electronVoice.listAudioDevices()) as AudioDevice[]
@@ -692,7 +796,7 @@ export default function VoIPApp() {
     const current = (await window.electronVoice.getAudioDevices()) as { inputId: string | null; outputId: string | null }
     setAudioDevices({ input, output })
     setSelectedDevices(current)
-    setAppSettingsTab("voice")
+    setAppSettingsTab(initialTab)
     setShowAppSettings(true)
   }
 
@@ -728,7 +832,49 @@ export default function VoIPApp() {
   const saveProfile = async () => {
     if (!activeServerId) return
     await client.updateProfile(activeServerId, profileDisplayName)
+    localStorage.setItem("voip-last-display-name", profileDisplayName)
+    setSavedServers((prev) => {
+      const next = prev.map((s) => (s.serverId === activeServerId ? { ...s, displayName: profileDisplayName } : s))
+      localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
+      return next
+    })
     setStatus("Profile updated")
+  }
+
+  const createChannelFromSettings = async () => {
+    if (!activeServerId || !canManageServer || creatingChannel) return
+    const name = roomNameInput.trim()
+    if (!name) {
+      setError("Channel name is required")
+      return
+    }
+    try {
+      setCreatingChannel(true)
+      setError("")
+      await client.createRoom(activeServerId, name, roomKindInput)
+      await client.getRooms(activeServerId)
+      setStatus(`Channel created: ${name}`)
+      setRoomNameInput("")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "create channel failed")
+    } finally {
+      setCreatingChannel(false)
+    }
+  }
+
+  const handleServerSelect = (serverId: string) => {
+    setActiveServerId(serverId)
+    localStorage.setItem("voixex-last-server-id", serverId)
+    const saved = savedServers.find((s) => s.serverId === serverId)
+    if (!saved) return
+    setApiHost(saved.apiHost)
+    setApiPort(saved.apiPort)
+    setServerPassword(saved.serverPassword)
+    setDisplayNameInput(saved.displayName)
+    setSuperuserPasswordInput(saved.superuserPassword ?? "")
+    if (!connectedToApi || !wsConnected) {
+      void connectAndJoin(saved)
+    }
   }
 
   return (
@@ -737,11 +883,11 @@ export default function VoIPApp() {
       <ServerSidebar
         servers={servers}
         activeServerId={activeServerId}
-        onServerSelect={setActiveServerId}
+        onServerSelect={handleServerSelect}
         onAddServer={() => setShowConnectPanel((v) => !v)}
-        onOpenServerSettings={() => {
-          if (!activeServerId || activeServerId === "home" || !canManageServer) return
-          setShowServerSettings(true)
+        onOpenSettings={() => {
+          const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
+          void openAppSettings(initialTab)
         }}
       />
 
@@ -776,10 +922,10 @@ export default function VoIPApp() {
               <button
                 className="rounded border px-2 py-1"
                 onClick={() => {
-                  if (!activeServerId || activeServerId === "home" || !canManageServer) return
-                  setShowServerSettings(true)
+                  if (!activeServerId || !canManageServer) return
+                  void openAppSettings("server_general")
                 }}
-                disabled={!activeServerId || activeServerId === "home" || !canManageServer}
+                disabled={!activeServerId || !canManageServer}
               >
                 Server settings
               </button>
@@ -800,13 +946,15 @@ export default function VoIPApp() {
             {error ? <div className="mt-1 text-destructive">{error}</div> : null}
           </div>
         )}
-        <ChannelSidebar
-          serverName={servers.find((s) => s.id === activeServerId)?.name || "No Server"}
-          categories={categories}
-          activeChannelId={activeChannelId}
-          onChannelSelect={handleChannelSelect}
-          voiceUsers={voiceUsers}
-        />
+        {activeServerId ? (
+          <ChannelSidebar
+            serverName={servers.find((s) => s.id === activeServerId)?.name || "No Server"}
+            categories={categories}
+            activeChannelId={activeChannelId}
+            onChannelSelect={handleChannelSelect}
+            voiceUsers={voiceUsers}
+          />
+        ) : null}
         <UserPanel
           user={currentUser}
           isMuted={isMuted}
@@ -856,7 +1004,7 @@ export default function VoIPApp() {
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
           <div className="w-[760px] max-w-full rounded border border-border bg-card p-4 text-xs shadow-lg">
             <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-semibold">User settings</div>
+              <div className="text-sm font-semibold">Settings</div>
               <button className="rounded border px-2 py-1" onClick={() => setShowAppSettings(false)}>
                 Close
               </button>
@@ -874,6 +1022,28 @@ export default function VoIPApp() {
               >
                 Keybinds
               </button>
+              {canOpenServerSettings && (
+                <>
+                  <button
+                    className={`rounded border px-2 py-1 ${appSettingsTab === "server_general" ? "bg-muted" : ""}`}
+                    onClick={() => setAppSettingsTab("server_general")}
+                  >
+                    Server: General
+                  </button>
+                  <button
+                    className={`rounded border px-2 py-1 ${appSettingsTab === "server_channels" ? "bg-muted" : ""}`}
+                    onClick={() => setAppSettingsTab("server_channels")}
+                  >
+                    Server: Channels
+                  </button>
+                  <button
+                    className={`rounded border px-2 py-1 ${appSettingsTab === "server_roles" ? "bg-muted" : ""}`}
+                    onClick={() => setAppSettingsTab("server_roles")}
+                  >
+                    Server: Roles
+                  </button>
+                </>
+              )}
             </div>
 
             {appSettingsTab === "voice" && (
@@ -976,41 +1146,8 @@ export default function VoIPApp() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
 
-      {showServerSettings && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
-          <div className="w-[720px] max-w-full rounded border border-border bg-card p-4 text-xs shadow-lg">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-semibold">Server settings</div>
-              <button className="rounded border px-2 py-1" onClick={() => setShowServerSettings(false)}>
-                Close
-              </button>
-            </div>
-            <div className="mb-3 flex gap-2">
-              <button
-                className={`rounded border px-2 py-1 ${serverSettingsTab === "general" ? "bg-muted" : ""}`}
-                onClick={() => setServerSettingsTab("general")}
-              >
-                General
-              </button>
-              <button
-                className={`rounded border px-2 py-1 ${serverSettingsTab === "channels" ? "bg-muted" : ""}`}
-                onClick={() => setServerSettingsTab("channels")}
-              >
-                Channels
-              </button>
-              <button
-                className={`rounded border px-2 py-1 ${serverSettingsTab === "roles" ? "bg-muted" : ""}`}
-                onClick={() => setServerSettingsTab("roles")}
-              >
-                Roles
-              </button>
-            </div>
-
-            {serverSettingsTab === "general" && (
+            {appSettingsTab === "server_general" && canOpenServerSettings && (
               <div className="space-y-2 text-muted-foreground">
                 <div>Server: {servers.find((s) => s.id === activeServerId)?.name ?? "Unknown"}</div>
                 <div>ID: {activeServerId}</div>
@@ -1018,7 +1155,7 @@ export default function VoIPApp() {
               </div>
             )}
 
-            {serverSettingsTab === "channels" && (
+            {appSettingsTab === "server_channels" && canOpenServerSettings && (
               <div className="space-y-3">
                 <div className="text-muted-foreground">
                   Room/channel creation moved here. Only admins can create/edit channels.
@@ -1029,19 +1166,23 @@ export default function VoIPApp() {
                     value={roomNameInput}
                     onChange={(e) => setRoomNameInput(e.target.value)}
                     placeholder="Channel name"
-                    disabled
+                    disabled={creatingChannel}
                   />
                   <select
                     className="w-24 rounded border px-2 py-1"
                     value={roomKindInput}
                     onChange={(e) => setRoomKindInput(e.target.value as "voice" | "text")}
-                    disabled
+                    disabled={creatingChannel}
                   >
                     <option value="voice">voice</option>
                     <option value="text">text</option>
                   </select>
-                  <button className="rounded border px-2 py-1" disabled>
-                    Create channel
+                  <button
+                    className="rounded border px-2 py-1 disabled:opacity-50"
+                    onClick={() => void createChannelFromSettings()}
+                    disabled={creatingChannel || roomNameInput.trim().length === 0}
+                  >
+                    {creatingChannel ? "Creating..." : "Create channel"}
                   </button>
                 </div>
                 <div className="max-h-52 overflow-auto rounded border p-2">
@@ -1061,7 +1202,7 @@ export default function VoIPApp() {
               </div>
             )}
 
-            {serverSettingsTab === "roles" && (
+            {appSettingsTab === "server_roles" && canOpenServerSettings && (
               <div className="text-muted-foreground">
                 Role permissions (channel access, moderation, speaking/mute controls) will be configured here.
               </div>
@@ -1070,8 +1211,27 @@ export default function VoIPApp() {
         </div>
       )}
 
-      {/* Chat Area */}
-      {activeServerId ? (
+      {/* Main Content */}
+      {!activeServerId ? (
+        <div className="flex flex-1 items-center justify-center bg-background text-sm text-muted-foreground">
+          Connect and join a server to open chat and voice channels.
+        </div>
+      ) : activeChannel?.type === "voice" ? (
+        <div className="flex h-full flex-1 flex-col bg-background">
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-border bg-card px-3">
+            <div className="text-sm font-medium text-foreground">{activeChannel.name}</div>
+            <button
+              onClick={() => setShowMemberList(!showMemberList)}
+              className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              {showMemberList ? "Hide members" : "Show members"}
+            </button>
+          </div>
+          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+            Voice channel selected. Text chat is available only in text channels.
+          </div>
+        </div>
+      ) : (
         <ChatArea
           channelName={activeChannel?.name || "general"}
           channelType={activeChannel?.type || "text"}
@@ -1081,14 +1241,10 @@ export default function VoIPApp() {
           showMemberList={showMemberList}
           onToggleMemberList={() => setShowMemberList(!showMemberList)}
         />
-      ) : (
-        <div className="flex flex-1 items-center justify-center bg-background text-sm text-muted-foreground">
-          Connect and join a server to open chat and voice channels.
-        </div>
       )}
 
       {/* Member List */}
-      {showMemberList && (
+      {showMemberList && activeServerId && (
         <MemberList members={members} roles={[]} />
       )}
     </main>

@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Plus, Users, Settings } from "lucide-react"
+import { Plus, Settings } from "lucide-react"
 
 interface Server {
   id: string
@@ -16,23 +16,12 @@ interface ServerSidebarProps {
   activeServerId: string
   onServerSelect: (serverId: string) => void
   onAddServer?: () => void
-  onOpenServerSettings?: () => void
+  onOpenSettings?: () => void
 }
 
-export function ServerSidebar({ servers, activeServerId, onServerSelect, onAddServer, onOpenServerSettings }: ServerSidebarProps) {
+export function ServerSidebar({ servers, activeServerId, onServerSelect, onAddServer, onOpenSettings }: ServerSidebarProps) {
   return (
     <div className="flex h-full w-16 flex-col border-r border-border bg-sidebar">
-      {/* Home Button */}
-      <button
-        onClick={() => onServerSelect("home")}
-        className={cn(
-          "flex h-12 w-full items-center justify-center border-b border-border text-muted-foreground hover:bg-sidebar-accent hover:text-foreground",
-          activeServerId === "home" && "bg-sidebar-accent text-foreground"
-        )}
-      >
-        <Users className="h-5 w-5" />
-      </button>
-
       {/* Server List */}
       <div className="flex flex-1 flex-col overflow-y-auto">
         {servers.map((server) => (
@@ -73,9 +62,8 @@ export function ServerSidebar({ servers, activeServerId, onServerSelect, onAddSe
 
       {/* Settings */}
       <button
-        onClick={onOpenServerSettings}
-        className="flex h-12 w-full items-center justify-center border-t border-border text-muted-foreground hover:bg-sidebar-accent hover:text-foreground disabled:opacity-50"
-        disabled={!activeServerId || activeServerId === "home"}
+        onClick={onOpenSettings}
+        className="flex h-12 w-full items-center justify-center border-t border-border text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
       >
         <Settings className="h-5 w-5" />
       </button>
