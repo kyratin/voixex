@@ -38,9 +38,29 @@ function emitToServer(serverId: string, event: WsServerEvent) {
 
 function ensureAdminRole(serverId: string) {
   const existing = db
-    .prepare("SELECT id FROM server_roles WHERE server_id = ? AND role_key = 'admin' LIMIT 1")
-    .get(serverId) as { id: string } | undefined
-  if (existing) return existing.id
+    .prepare("SELECT id, permissions_json FROM server_roles WHERE server_id = ? AND role_key = 'admin' LIMIT 1")
+    .get(serverId) as { id: string; permissions_json: string } | undefined
+  if (existing) {
+    let hasAllAdminPermissions = true
+    try {
+      const parsed = JSON.parse(existing.permissions_json) as Partial<PermissionMap>
+      for (const key of Object.keys(ADMIN_PERMISSIONS) as PermissionKey[]) {
+        if (!parsed[key]) {
+          hasAllAdminPermissions = false
+          break
+        }
+      }
+    } catch {
+      hasAllAdminPermissions = false
+    }
+    if (!hasAllAdminPermissions) {
+      db.prepare("UPDATE server_roles SET permissions_json = ?, name = 'Admin', is_system = 1 WHERE id = ?").run(
+        JSON.stringify(ADMIN_PERMISSIONS),
+        existing.id
+      )
+    }
+    return existing.id
+  }
   const id = randomUUID()
   db.prepare(
     "INSERT INTO server_roles(id, server_id, role_key, name, permissions_json, is_system) VALUES (?, ?, 'admin', 'Admin', ?, 1)"
@@ -180,60 +200,77 @@ async function issueJoinForServer(input: { serverId: string; clientId: string; d
     .get(input.serverId, input.clientId) as { display_name: string } | undefined
   const resolvedName = existingMember?.display_name ?? input.displayName
 
-  const currentlyOnline = db
-    .prepare("SELECT 1 FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
-    .get(input.serverId, input.clientId) as { 1: number } | undefined
-  let effectiveClientId = input.clientId
-  if (currentlyOnline) {
-    // Allow concurrent sessions even if clientId is reused (e.g. two local app instances).
-    effectiveClientId = `${input.clientId}-${randomUUID().slice(0, 8)}`
-  }
-
-  if (!existingMember && effectiveClientId === input.clientId) {
-    db.prepare("INSERT INTO server_members(server_id, client_id, display_name) VALUES (?, ?, ?)").run(
-      input.serverId,
-      input.clientId,
-      resolvedName
+  // Reuse the same logical identity on reconnect and clean up leaked suffix sessions
+  // from prior joins (<clientId>-xxxxxxxx), so roster does not duplicate one user.
+  const staleRows = db
+    .prepare(
+      `SELECT ms.client_id, sm.display_name, ms.muted, ms.deafened
+       FROM member_state ms
+       JOIN server_members sm ON sm.server_id = ms.server_id AND sm.client_id = ms.client_id
+       WHERE ms.server_id = ? AND (ms.client_id = ? OR ms.client_id LIKE ?)`
     )
+    .all(input.serverId, input.clientId, `${input.clientId}-%`) as Array<{
+    client_id: string
+    display_name: string
+    muted: number
+    deafened: number
+  }>
+  for (const stale of staleRows) {
+    db.prepare("DELETE FROM member_state WHERE server_id = ? AND client_id = ?").run(input.serverId, stale.client_id)
+    removeMember(stale.client_id)
+    emitToServer(input.serverId, {
+      type: "member_updated",
+      member: {
+        clientId: stale.client_id,
+        displayName: stale.display_name,
+        roomId: null,
+        muted: Boolean(stale.muted),
+        deafened: Boolean(stale.deafened),
+        speaking: false
+      }
+    })
   }
-  if (effectiveClientId !== input.clientId) {
-    const effectiveMember = db
-      .prepare("SELECT 1 FROM server_members WHERE server_id = ? AND client_id = ? LIMIT 1")
-      .get(input.serverId, effectiveClientId) as { 1: number } | undefined
-    if (!effectiveMember) {
-      db.prepare("INSERT INTO server_members(server_id, client_id, display_name) VALUES (?, ?, ?)").run(
-        input.serverId,
-        effectiveClientId,
-        resolvedName
-      )
-    }
-  }
+  db.prepare("DELETE FROM member_roles WHERE server_id = ? AND client_id LIKE ? AND client_id != ?").run(
+    input.serverId,
+    `${input.clientId}-%`,
+    input.clientId
+  )
+  db.prepare("DELETE FROM server_members WHERE server_id = ? AND client_id LIKE ? AND client_id != ?").run(
+    input.serverId,
+    `${input.clientId}-%`,
+    input.clientId
+  )
+  db.prepare(
+    `INSERT INTO server_members(server_id, client_id, display_name)
+     VALUES (?, ?, ?)
+     ON CONFLICT(server_id, client_id) DO UPDATE SET display_name = excluded.display_name, updated_at = datetime('now')`
+  ).run(input.serverId, input.clientId, resolvedName)
 
   db.prepare(
     `INSERT INTO member_state(server_id, room_id, client_id, display_name, muted, deafened, speaking, last_seen)
      VALUES (?, NULL, ?, ?, 0, 0, 0, datetime('now'))
      ON CONFLICT(server_id, client_id) DO UPDATE SET last_seen = datetime('now')`
-  ).run(input.serverId, effectiveClientId, resolvedName)
+  ).run(input.serverId, input.clientId, resolvedName)
 
   if (input.superuserPassword && input.superuserPassword === config.superuserPassword) {
     const adminRoleId = ensureAdminRole(input.serverId)
-    ensureMemberHasRole(input.serverId, effectiveClientId, adminRoleId)
+    ensureMemberHasRole(input.serverId, input.clientId, adminRoleId)
   }
 
   const mediaSeed = randomBytes(32).toString("base64")
   const authToken = makeAuthToken(
-    { serverId: input.serverId, clientId: effectiveClientId, displayName: resolvedName, mediaSeed },
+    { serverId: input.serverId, clientId: input.clientId, displayName: resolvedName, mediaSeed },
     config.tokenSecret
   )
   const mediaToken = makeMediaToken(
-    { serverId: input.serverId, clientId: effectiveClientId, displayName: resolvedName, mediaSeed },
+    { serverId: input.serverId, clientId: input.clientId, displayName: resolvedName, mediaSeed },
     config.tokenSecret
   )
   return {
     serverId: input.serverId,
     authToken,
     mediaToken,
-    profile: { clientId: effectiveClientId, displayName: resolvedName },
+    profile: { clientId: input.clientId, displayName: resolvedName },
     udp: { host: config.publicUdpHost, port: config.udpPort }
   }
 }
