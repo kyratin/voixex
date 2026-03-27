@@ -56,7 +56,7 @@ if (isLegacyWindows10()) {
 
 function loadFallbackErrorPage(win: BrowserWindow, error: string, target: string) {
   const html = `<!doctype html><html><body style="font-family:sans-serif;padding:24px;background:#111;color:#eee">
-  <h2>Kyratin VoIP: UI load failed</h2>
+  <h2>Voixex: UI load failed</h2>
   <p>Cannot open frontend source:</p><pre>${target}</pre>
   <p>Error:</p><pre>${error}</pre>
   <p>Tip: for packaged app, ensure bundled UI exists. For dev mode, set FRONTEND_URL.</p>
