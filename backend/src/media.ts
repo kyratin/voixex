@@ -34,6 +34,7 @@ type MemberSession = {
   lastReportAtMs: number
   speaking: boolean
   lastSpeakingSignalAtMs: number
+  lastProbeAckAtMs: number
 }
 
 type FrameEntry = {
@@ -212,7 +213,8 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
         jitterSamplesMs: [],
         lastReportAtMs: Date.now(),
         speaking: desiredSpeakingByClient.get(payload.clientId) ?? false,
-        lastSpeakingSignalAtMs: 0
+        lastSpeakingSignalAtMs: 0,
+        lastProbeAckAtMs: 0
       })
       logger.info(
         { clientId: payload.clientId, remoteAddress: rinfo.address, remotePort: rinfo.port },
@@ -261,6 +263,17 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
           pushSample(session.jitterSamplesMs, session.jitterMs)
         }
         session.lastTransitMs = transit
+      }
+
+      // Return lightweight encrypted probe-acks so clients can compute RTT
+      // even when there are no other speakers in the room.
+      const nowMs = Date.now()
+      if (session.roomId && decoded.roomId === session.roomId && nowMs - session.lastProbeAckAtMs >= 1000) {
+        const probeAck = encryptFrame(session.key, session.seqOut++, decoded.ts, decoded.roomId, Buffer.alloc(0))
+        socket.send(probeAck, session.remote.port, session.remote.address)
+        session.txPackets += 1
+        session.txBytes += probeAck.length
+        session.lastProbeAckAtMs = nowMs
       }
 
       if (!session.roomId || session.roomId !== decoded.roomId || session.muted) {

@@ -16,8 +16,10 @@ export default function VoIPApp() {
     rxPackets?: number
     rxLostEstimated?: number
     packetLossPct?: number
+    pingNowMs?: number
     ping1PctMs?: number
     ping01PctMs?: number
+    jitterNowMs?: number
     jitter1PctMs?: number
     jitter01PctMs?: number
   }
@@ -28,8 +30,10 @@ export default function VoIPApp() {
     captureNode: ScriptProcessorNode
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
+    captureSinkNode: MediaStreamAudioDestinationNode
     playbackCtx: AudioContext
     playbackNode: ScriptProcessorNode
+    playbackFilterNode: BiquadFilterNode
     outputGainNode: GainNode
     queue: Int16Array[]
     txRemainder: Int16Array
@@ -38,6 +42,8 @@ export default function VoIPApp() {
     playbackSampleRate: number
     bufferedSamples: number
     unsubscribeIncoming: (() => void) | null
+    lastIncomingAudioAtMs: number
+    playbackIdleTimer: ReturnType<typeof setInterval> | null
   }
 
   const [activeServerId, setActiveServerId] = useState("")
@@ -211,8 +217,14 @@ export default function VoIPApp() {
     runtime.captureNode.disconnect()
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
+    runtime.captureSinkNode.disconnect()
     runtime.playbackNode.disconnect()
+    runtime.playbackFilterNode.disconnect()
     runtime.outputGainNode.disconnect()
+    if (runtime.playbackIdleTimer) {
+      clearInterval(runtime.playbackIdleTimer)
+      runtime.playbackIdleTimer = null
+    }
     void runtime.captureCtx.close()
     void runtime.playbackCtx.close()
     runtime.stream.getTracks().forEach((t) => t.stop())
@@ -289,6 +301,29 @@ export default function VoIPApp() {
     return out
   }
 
+  const applyPlaybackNoiseGate = (frame: Int16Array) => {
+    if (frame.length === 0) return frame
+    let peak = 0
+    let sumSq = 0
+    for (let i = 0; i < frame.length; i += 1) {
+      const abs = Math.abs(frame[i])
+      if (abs > peak) peak = abs
+      sumSq += abs * abs
+    }
+    const rms = Math.sqrt(sumSq / frame.length)
+    const gateThreshold = 96
+    // If the whole frame is near-noise floor, mute it completely.
+    if (peak < gateThreshold || rms < gateThreshold * 0.6) {
+      return new Int16Array(frame.length)
+    }
+    const out = new Int16Array(frame.length)
+    for (let i = 0; i < frame.length; i += 1) {
+      const sample = frame[i]
+      out[i] = Math.abs(sample) < gateThreshold ? 0 : sample
+    }
+    return out
+  }
+
   const normalizeLatencyMs = (value: number | undefined) => {
     if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) return 0
     if (value < 0) return 0
@@ -306,6 +341,7 @@ export default function VoIPApp() {
       if (stats) {
         const normalized: VoiceRuntimeStats = {
           ...stats,
+          pingNowMs: normalizeLatencyMs(stats.pingNowMs),
           ping1PctMs: normalizeLatencyMs(stats.ping1PctMs),
           ping01PctMs: normalizeLatencyMs(stats.ping01PctMs)
         }
@@ -364,7 +400,12 @@ export default function VoIPApp() {
         const captureNode = captureCtx.createScriptProcessor(1024, 1, 1)
         const micGainNode = captureCtx.createGain()
         micGainNode.gain.value = micVolumePct / 100
+        const captureSinkNode = captureCtx.createMediaStreamDestination()
         const playbackNode = playbackCtx.createScriptProcessor(1024, 1, 1)
+        const playbackFilterNode = playbackCtx.createBiquadFilter()
+        playbackFilterNode.type = "highpass"
+        playbackFilterNode.frequency.value = 85
+        playbackFilterNode.Q.value = 0.707
         const outputGainNode = playbackCtx.createGain()
         outputGainNode.gain.value = outputVolumePct / 100
         const runtime: VoicePipelineRuntime = {
@@ -373,8 +414,10 @@ export default function VoIPApp() {
           captureNode,
           captureSource,
           micGainNode,
+          captureSinkNode,
           playbackCtx,
           playbackNode,
+          playbackFilterNode,
           outputGainNode,
           queue: [],
           txRemainder: new Int16Array(0),
@@ -382,7 +425,9 @@ export default function VoIPApp() {
           txResamplePos: 0,
           playbackSampleRate: playbackCtx.sampleRate,
           bufferedSamples: 0,
-          unsubscribeIncoming: null
+          unsubscribeIncoming: null,
+          lastIncomingAudioAtMs: 0,
+          playbackIdleTimer: null
         }
         voicePipelineRef.current = runtime
 
@@ -436,7 +481,19 @@ export default function VoIPApp() {
 
         runtime.unsubscribeIncoming = window.electronVoice?.onPcm16Frame((pcm16Base64) => {
           const frame48k = decodePcm16Base64(pcm16Base64)
-          const frame = resampleInt16Frame(frame48k, 48000, runtime.playbackSampleRate)
+          const frame = applyPlaybackNoiseGate(resampleInt16Frame(frame48k, 48000, runtime.playbackSampleRate))
+          let hasSignal = false
+          for (let i = 0; i < frame.length; i += 1) {
+            if (frame[i] !== 0) {
+              hasSignal = true
+              break
+            }
+          }
+          if (!hasSignal) return
+          runtime.lastIncomingAudioAtMs = Date.now()
+          if (runtime.playbackCtx.state !== "running") {
+            void runtime.playbackCtx.resume()
+          }
           runtime.queue.push(frame)
           runtime.bufferedSamples += frame.length
           if (runtime.queue.length > 300) {
@@ -447,11 +504,19 @@ export default function VoIPApp() {
 
         captureSource.connect(micGainNode)
         micGainNode.connect(captureNode)
-        captureNode.connect(captureCtx.destination)
-        playbackNode.connect(outputGainNode)
+        // Keep ScriptProcessor running without routing mic signal to speakers.
+        captureNode.connect(captureSinkNode)
+        playbackNode.connect(playbackFilterNode)
+        playbackFilterNode.connect(outputGainNode)
         outputGainNode.connect(playbackCtx.destination)
+        runtime.playbackIdleTimer = setInterval(() => {
+          const idleForMs = Date.now() - runtime.lastIncomingAudioAtMs
+          if (runtime.bufferedSamples === 0 && idleForMs > 700 && runtime.playbackCtx.state === "running") {
+            void runtime.playbackCtx.suspend()
+          }
+        }, 300)
         await captureCtx.resume()
-        await playbackCtx.resume()
+        await playbackCtx.suspend()
         setStatus((prev) => {
           if (prev.includes("Voice I/O active")) return prev
           return prev.includes("In room:") ? `${prev} | Voice I/O active` : "Voice I/O active"
@@ -777,6 +842,7 @@ export default function VoIPApp() {
               <div>Voice: {voiceStats.connected ? "connected" : "disconnected"} | Speaking now: {isSpeakingNow ? "yes" : "no"}</div>
               <div>TX: {voiceStats.txPackets ?? 0} | RX: {voiceStats.rxPackets ?? 0}</div>
               <div>Lost: {voiceStats.rxLostEstimated ?? 0} ({voiceStats.packetLossPct ?? 0}%)</div>
+              <div className={qualityClass}>Ping now: {voiceStats.pingNowMs ?? 0} ms | Jitter now: {voiceStats.jitterNowMs ?? 0} ms</div>
               <div className={qualityClass}>Ping 1%: {voiceStats.ping1PctMs ?? 0} ms | Ping 0.1%: {voiceStats.ping01PctMs ?? 0} ms</div>
               <div className={qualityClass}>Jitter 1%: {voiceStats.jitter1PctMs ?? 0} ms | Jitter 0.1%: {voiceStats.jitter01PctMs ?? 0} ms</div>
             </div>
