@@ -7,9 +7,9 @@ const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Kyratin VoIP",
+  title: "Voixex",
   description: "Secure voice and text communication client",
-  generator: "kyratin-voip",
+  generator: "voixex",
   icons: {
     icon: [
       {
