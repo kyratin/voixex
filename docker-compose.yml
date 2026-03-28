@@ -1,39 +1,10 @@
+# Next.js dev/preview only — backend must run separately (see `server` branch or deployed API).
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    environment:
-      HOST: 0.0.0.0
-      PORT: 8080
-      UDP_HOST: 0.0.0.0
-      UDP_PORT: 50010
-      PUBLIC_UDP_HOST: backend
-      TOKEN_SECRET: super-secret-change-this
-      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:-change-me-superuser}
-      DB_PATH: /data/voip.sqlite
-      MEDIA_RATE_LIMIT_PER_SEC: 6000
-      UPLOAD_DIR: /data/uploads
-      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-50}
-      SCREEN_MAX_FPS: ${SCREEN_MAX_FPS:-5}
-      SCREEN_MAX_CHUNK_BYTES: ${SCREEN_MAX_CHUNK_BYTES:-1200}
-      SCREEN_LOG: ${SCREEN_LOG:-0}
-    ports:
-      - "18080:8080"
-      - "50010:50010/udp"
-    volumes:
-      - voip_data:/data
-
-  frontend:
+  primer_front:
     build:
       context: ./primer_front
       dockerfile: Dockerfile
     environment:
-      NEXT_PUBLIC_API_BASE: http://localhost:18080
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:18080}
     ports:
       - "3000:3000"
-    depends_on:
-      - backend
-
-volumes:
-  voip_data:
