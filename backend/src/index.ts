@@ -35,6 +35,8 @@ const clients = new Map<string, Set<WebSocket>>()
 /** Map WebSocket → client for targeted broadcast (screen chunks). */
 const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string }>()
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
+/** First chunk after share start; used to bootstrap late viewers' MSE. */
+const screenBootstrapChunkByClient = new Map<string, { serverId: string; roomId: string; chunkBase64: string }>()
 const screenWsRateByClient = new Map<string, { sec: number; count: number }>()
 let screenRelayLogCounter = 0
 
@@ -132,6 +134,24 @@ function notifyActiveScreenSharerToResync(serverId: string, joinedRoomId: string
     const ws = findOpenSocketForClient(serverId, sharerId)
     if (!ws) continue
     ws.send(JSON.stringify({ type: "screen_share_resync_request", roomId: joinedRoomId } satisfies WsServerEvent))
+  }
+}
+
+function sendScreenBootstrapChunkToViewer(serverId: string, roomId: string, viewerSocket: WebSocket, viewerClientId: string) {
+  if (viewerSocket.readyState !== viewerSocket.OPEN) return
+  for (const [sharerId, share] of screenShareStateByClient.entries()) {
+    if (sharerId === viewerClientId) continue
+    if (share.serverId !== serverId || !share.active || share.roomId !== roomId) continue
+    const bootstrap = screenBootstrapChunkByClient.get(sharerId)
+    if (!bootstrap) continue
+    if (bootstrap.serverId !== serverId || bootstrap.roomId !== roomId) continue
+    viewerSocket.send(
+      JSON.stringify({
+        type: "screen_chunk",
+        fromClientId: sharerId,
+        chunkBase64: bootstrap.chunkBase64
+      } satisfies WsServerEvent)
+    )
   }
 }
 
@@ -929,6 +949,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         emitToServer(auth.serverId, { type: "roster_snapshot", roomId: event.roomId, members: getRoster(auth.serverId, event.roomId) })
         if (isVoiceRoomId(auth.serverId, event.roomId)) {
           notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
+          sendScreenBootstrapChunkToViewer(auth.serverId, event.roomId, socket, auth.clientId)
         }
       } else if (event.type === "request_screen_resync") {
         const row = db
@@ -937,6 +958,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         if (row?.room_id !== event.roomId) return
         if (!isVoiceRoomId(auth.serverId, event.roomId)) return
         notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
+        sendScreenBootstrapChunkToViewer(auth.serverId, event.roomId, socket, auth.clientId)
       } else if (event.type === "leave_room") {
         db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)
@@ -1065,6 +1087,14 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           }
           return
         }
+        const bootstrap = screenBootstrapChunkByClient.get(auth.clientId)
+        if (!bootstrap || bootstrap.serverId !== auth.serverId || bootstrap.roomId !== roomId) {
+          screenBootstrapChunkByClient.set(auth.clientId, {
+            serverId: auth.serverId,
+            roomId,
+            chunkBase64: event.chunkBase64
+          })
+        }
         broadcastScreenChunkWs(app, auth.serverId, roomId, auth.clientId, {
           type: "screen_chunk",
           fromClientId: auth.clientId,
@@ -1076,6 +1106,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
         const roomId = room?.room_id ?? null
         const active = Boolean(event.active && roomId)
+        if (!active) {
+          screenBootstrapChunkByClient.delete(auth.clientId)
+        }
         screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId, active })
         if (config.screenLog) {
           app.log.info({ msg: "set_screen_share", clientId: auth.clientId, roomId, active })
@@ -1093,6 +1126,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     removeMember(auth.clientId)
     const shareSnap = screenShareStateByClient.get(auth.clientId)
     screenShareStateByClient.delete(auth.clientId)
+    screenBootstrapChunkByClient.delete(auth.clientId)
     const shareRoomEmit =
       shareSnap?.active && shareSnap.roomId ? shareSnap.roomId : null
     emitScreenShareState(auth.serverId, auth.clientId, shareRoomEmit, false)
