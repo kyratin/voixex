@@ -343,6 +343,11 @@ export class VoipClient {
     this.sendWsEvent({ type: "set_screen_share", active })
   }
 
+  /** Ask server to signal the active sharer in this voice room (MSE needs a fresh WebM header). */
+  requestScreenResync(roomId: string) {
+    this.sendWsEvent({ type: "request_screen_resync", roomId })
+  }
+
   /** Reliable screen: one MediaRecorder blob per message (TCP/WebSocket). */
   sendScreenVideoChunk(chunkBase64: string) {
     this.sendWsEvent({ type: "screen_chunk", chunkBase64 })
