@@ -17,6 +17,7 @@ services:
       UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-50}
       SCREEN_MAX_FPS: ${SCREEN_MAX_FPS:-5}
       SCREEN_MAX_CHUNK_BYTES: ${SCREEN_MAX_CHUNK_BYTES:-1200}
+      SCREEN_LOG: ${SCREEN_LOG:-0}
     ports:
       - "18080:8080"
       - "50010:50010/udp"

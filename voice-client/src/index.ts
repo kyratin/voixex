@@ -67,7 +67,6 @@ export class VoiceEngine {
     await new Promise<void>((resolve) => this.socket.bind(0, "0.0.0.0", () => resolve()))
     this.sendHello()
     this.socket.on("message", (buf) => {
-      if (this.deafened) return
       const frame = this.decrypt(buf)
       if (!frame) return
       if (this.lastSeqIn > 0 && frame.seq > this.lastSeqIn + 1) {
@@ -87,6 +86,7 @@ export class VoiceEngine {
         this.lastTransitMs = transit
       }
       if (frame.kind === MEDIA_KIND_AUDIO && frame.payload.length > 0) {
+        if (this.deafened) return
         this.onPcm16Frame?.(frame.payload)
       } else if (frame.kind === MEDIA_KIND_SCREEN && frame.payload.length > 0) {
         this.onScreenChunk?.(frame.payload)

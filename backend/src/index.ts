@@ -1,4 +1,4 @@
-import Fastify from "fastify"
+import Fastify, { type FastifyInstance } from "fastify"
 import cors from "@fastify/cors"
 import websocket from "@fastify/websocket"
 import bcrypt from "bcryptjs"
@@ -20,7 +20,11 @@ await app.register(cors, {
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-file-name", "x-file-mime"]
 })
-await app.register(websocket)
+await app.register(websocket, {
+  options: {
+    maxPayload: config.wsMaxPayloadBytes
+  }
+})
 app.addContentTypeParser(
   /^application\/octet-stream$|^image\/|^audio\/|^video\//i,
   { parseAs: "buffer", bodyLimit: config.uploadMaxMb * 1024 * 1024 },
@@ -28,7 +32,11 @@ app.addContentTypeParser(
 )
 const db = initDb(config.dbPath)
 const clients = new Map<string, Set<WebSocket>>()
+/** Map WebSocket → client for targeted broadcast (screen chunks). */
+const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string }>()
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
+const screenWsRateByClient = new Map<string, { sec: number; count: number }>()
+let screenRelayLogCounter = 0
 
 type PermissionKey = "manage_server" | "manage_channels" | "manage_roles" | "manage_chat"
 type PermissionMap = Record<PermissionKey, boolean>
@@ -43,6 +51,63 @@ function emitToServer(serverId: string, event: WsServerEvent) {
   const payload = JSON.stringify(event)
   for (const ws of clients.get(serverId) ?? []) {
     if (ws.readyState === ws.OPEN) ws.send(payload)
+  }
+}
+
+function isVoiceRoomId(serverId: string, roomId: string): boolean {
+  const row = db.prepare("SELECT kind FROM rooms WHERE server_id = ? AND id = ? LIMIT 1").get(serverId, roomId) as { kind: string } | undefined
+  return row?.kind === "voice"
+}
+
+function allowScreenWsRate(clientId: string): boolean {
+  const sec = Math.floor(Date.now() / 1000)
+  let e = screenWsRateByClient.get(clientId)
+  if (!e || e.sec !== sec) {
+    e = { sec, count: 0 }
+    screenWsRateByClient.set(clientId, e)
+  }
+  e.count += 1
+  return e.count <= config.screenWsMaxPerSec
+}
+
+function broadcastScreenChunkWs(app: FastifyInstance, serverId: string, roomId: string, fromClientId: string, event: WsServerEvent) {
+  const memberIds = new Set(getRoster(serverId, roomId).map((m) => m.clientId))
+  const payload = JSON.stringify(event)
+  let sent = 0
+  let openSameServer = 0
+  for (const ws of clients.get(serverId) ?? []) {
+    if (ws.readyState !== ws.OPEN) continue
+    openSameServer++
+    const meta = wsClientMeta.get(ws)
+    if (!meta || meta.clientId === fromClientId) continue
+    if (!memberIds.has(meta.clientId)) continue
+    ws.send(payload)
+    sent++
+  }
+  if (config.screenLog) {
+    if (sent === 0) {
+      app.log.warn({
+        msg: "screen_chunk relayed to 0 viewers",
+        serverId,
+        roomId,
+        fromClientId,
+        rosterCount: memberIds.size,
+        wsOpenSameServer: openSameServer
+      })
+    } else {
+      screenRelayLogCounter++
+      if (screenRelayLogCounter % 25 === 0) {
+        app.log.info({
+          msg: "screen_chunk relay sample",
+          serverId,
+          roomId,
+          fromClientId,
+          sent,
+          rosterCount: memberIds.size,
+          approxPayloadKb: Math.round(payload.length / 1024)
+        })
+      }
+    }
   }
 }
 
@@ -789,6 +854,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   const set = clients.get(key) ?? new Set<WebSocket>()
   set.add(socket)
   clients.set(key, set)
+  wsClientMeta.set(socket, { serverId: auth.serverId, clientId: auth.clientId })
 
   socket.send(JSON.stringify({ type: "hello", clientId: auth.clientId, serverId: auth.serverId } satisfies WsServerEvent))
   socket.send(JSON.stringify({ type: "rooms_snapshot", rooms: getRooms(auth.serverId) } satisfies WsServerEvent))
@@ -907,6 +973,58 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         }
       } else if (event.type === "ping") {
         socket.send(JSON.stringify({ type: "pong", ts: event.ts } satisfies WsServerEvent))
+      } else if (event.type === "screen_chunk") {
+        if (typeof event.chunkBase64 !== "string" || event.chunkBase64.length === 0) {
+          if (config.screenLog) app.log.warn({ msg: "screen_chunk dropped", reason: "empty_chunk", clientId: auth.clientId })
+          return
+        }
+        if (event.chunkBase64.length > config.screenWsMaxBase64Chars) {
+          if (config.screenLog) {
+            app.log.warn({
+              msg: "screen_chunk dropped",
+              reason: "chunk_too_large",
+              clientId: auth.clientId,
+              base64Len: event.chunkBase64.length,
+              max: config.screenWsMaxBase64Chars
+            })
+          }
+          return
+        }
+        if (!allowScreenWsRate(auth.clientId)) {
+          if (config.screenLog) app.log.warn({ msg: "screen_chunk dropped", reason: "rate_limit", clientId: auth.clientId })
+          return
+        }
+        const row = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        const roomId = row?.room_id
+        if (!roomId) {
+          if (config.screenLog) app.log.warn({ msg: "screen_chunk dropped", reason: "not_in_voice_room", clientId: auth.clientId })
+          return
+        }
+        if (!isVoiceRoomId(auth.serverId, roomId)) {
+          if (config.screenLog) app.log.warn({ msg: "screen_chunk dropped", reason: "room_not_voice", clientId: auth.clientId, roomId })
+          return
+        }
+        const share = screenShareStateByClient.get(auth.clientId)
+        if (!share?.active || share.roomId !== roomId) {
+          if (config.screenLog) {
+            app.log.warn({
+              msg: "screen_chunk dropped",
+              reason: "share_inactive_or_room_mismatch",
+              clientId: auth.clientId,
+              roomId,
+              shareActive: share?.active ?? false,
+              shareRoomId: share?.roomId ?? null
+            })
+          }
+          return
+        }
+        broadcastScreenChunkWs(app, auth.serverId, roomId, auth.clientId, {
+          type: "screen_chunk",
+          fromClientId: auth.clientId,
+          chunkBase64: event.chunkBase64
+        })
       } else if (event.type === "set_screen_share") {
         const room = db
           .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
@@ -914,6 +1032,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         const roomId = room?.room_id ?? null
         const active = Boolean(event.active && roomId)
         screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId, active })
+        if (config.screenLog) {
+          app.log.info({ msg: "set_screen_share", clientId: auth.clientId, roomId, active })
+        }
         emitScreenShareState(auth.serverId, auth.clientId, roomId, active)
       }
     } catch {
@@ -945,6 +1066,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     }
     const bucket = clients.get(key)
     bucket?.delete(socket)
+    wsClientMeta.delete(socket)
     if (bucket && bucket.size === 0) clients.delete(key)
   }
 })

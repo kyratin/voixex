@@ -74,6 +74,7 @@ export class VoipClient {
   private currentServerId: string | null = null
   private pendingWsMessages: string[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
   
   setApiBase(url: string) {
     this.apiBase = url.replace(/\/+$/, "")
@@ -202,6 +203,7 @@ export class VoipClient {
     url.searchParams.set("token", this.authToken)
     const wsUrl = url.toString().replace("http://", "ws://").replace("https://", "wss://")
     this.ws = new WebSocket(wsUrl)
+    this.ws.binaryType = "arraybuffer"
     this.ws.onopen = () => {
       this.state.connection = { wsConnected: true, reconnecting: false }
       this.emit()
@@ -211,7 +213,27 @@ export class VoipClient {
       this.pendingWsMessages = []
     }
     this.ws.onmessage = (event) => {
-      const data = JSON.parse(String(event.data)) as
+      const raw = String(event.data)
+      let data: Record<string, unknown>
+      try {
+        data = JSON.parse(raw) as Record<string, unknown>
+      } catch {
+        return
+      }
+      if (data.type === "screen_chunk") {
+        const fromClientId = data.fromClientId as string
+        const chunkBase64 = data.chunkBase64 as string
+        if (typeof fromClientId !== "string" || typeof chunkBase64 !== "string") return
+        for (const cb of this.screenChunkListeners) {
+          try {
+            cb(fromClientId, chunkBase64)
+          } catch {
+            /* ignore */
+          }
+        }
+        return
+      }
+      const typed = data as
         | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
@@ -221,46 +243,46 @@ export class VoipClient {
           }
         | { type: "chat_message"; message: ChatMessage }
         | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
-      if (data.type === "rooms_snapshot") {
-        this.state.rooms = data.rooms
-      } else if (data.type === "rooms_updated") {
-        this.state.rooms = data.rooms
-      } else if (data.type === "roster_snapshot") {
-        if (data.roomId) this.state.rosterByRoom[data.roomId] = data.members
-        else this.state.lobby = data.members
-      } else if (data.type === "member_updated") {
+      if (typed.type === "rooms_snapshot") {
+        this.state.rooms = typed.rooms
+      } else if (typed.type === "rooms_updated") {
+        this.state.rooms = typed.rooms
+      } else if (typed.type === "roster_snapshot") {
+        if (typed.roomId) this.state.rosterByRoom[typed.roomId] = typed.members
+        else this.state.lobby = typed.members
+      } else if (typed.type === "member_updated") {
         for (const roomId of Object.keys(this.state.rosterByRoom)) {
-          this.state.rosterByRoom[roomId] = this.state.rosterByRoom[roomId].filter((m) => m.clientId !== data.member.clientId)
+          this.state.rosterByRoom[roomId] = this.state.rosterByRoom[roomId].filter((m) => m.clientId !== typed.member.clientId)
         }
-        this.state.lobby = this.state.lobby.filter((m) => m.clientId !== data.member.clientId)
+        this.state.lobby = this.state.lobby.filter((m) => m.clientId !== typed.member.clientId)
         const member: RosterMember = {
-          clientId: data.member.clientId,
-          displayName: data.member.displayName,
-          muted: data.member.muted,
-          deafened: data.member.deafened,
-          speaking: data.member.speaking
+          clientId: typed.member.clientId,
+          displayName: typed.member.displayName,
+          muted: typed.member.muted,
+          deafened: typed.member.deafened,
+          speaking: typed.member.speaking
         }
-        if (data.member.roomId) {
-          const next = this.state.rosterByRoom[data.member.roomId] ?? []
-          this.state.rosterByRoom[data.member.roomId] = [...next, member]
+        if (typed.member.roomId) {
+          const next = this.state.rosterByRoom[typed.member.roomId] ?? []
+          this.state.rosterByRoom[typed.member.roomId] = [...next, member]
         } else {
           this.state.lobby = [...this.state.lobby, member]
         }
-      } else if (data.type === "chat_message") {
-        const channel = data.message.channelId
+      } else if (typed.type === "chat_message") {
+        const channel = typed.message.channelId
         const existing = this.state.messagesByChannel[channel] ?? []
-        this.state.messagesByChannel[channel] = [...existing, this.normalizeMessage(data.message)].slice(-200)
-      } else if (data.type === "screen_share_state") {
-        if (data.active && data.roomId) {
-          this.state.activeScreenShareByRoom[data.roomId] = data.clientId
-        } else if (!data.active) {
-          if (data.roomId) {
-            if (this.state.activeScreenShareByRoom[data.roomId] === data.clientId) {
-              this.state.activeScreenShareByRoom[data.roomId] = null
+        this.state.messagesByChannel[channel] = [...existing, this.normalizeMessage(typed.message)].slice(-200)
+      } else if (typed.type === "screen_share_state") {
+        if (typed.active && typed.roomId) {
+          this.state.activeScreenShareByRoom[typed.roomId] = typed.clientId
+        } else if (!typed.active) {
+          if (typed.roomId) {
+            if (this.state.activeScreenShareByRoom[typed.roomId] === typed.clientId) {
+              this.state.activeScreenShareByRoom[typed.roomId] = null
             }
           } else {
             for (const rid of Object.keys(this.state.activeScreenShareByRoom)) {
-              if (this.state.activeScreenShareByRoom[rid] === data.clientId) {
+              if (this.state.activeScreenShareByRoom[rid] === typed.clientId) {
                 this.state.activeScreenShareByRoom[rid] = null
               }
             }
@@ -306,6 +328,18 @@ export class VoipClient {
 
   setScreenShare(active: boolean) {
     this.sendWsEvent({ type: "set_screen_share", active })
+  }
+
+  /** Reliable screen: one MediaRecorder blob per message (TCP/WebSocket). */
+  sendScreenVideoChunk(chunkBase64: string) {
+    this.sendWsEvent({ type: "screen_chunk", chunkBase64 })
+  }
+
+  subscribeScreenVideoChunks(cb: (fromClientId: string, chunkBase64: string) => void) {
+    this.screenChunkListeners.add(cb)
+    return () => {
+      this.screenChunkListeners.delete(cb)
+    }
   }
 
   toSidebarCategories(): ChannelCategory[] {
