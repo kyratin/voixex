@@ -75,6 +75,7 @@ export class VoipClient {
   private pendingWsMessages: string[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
+  private screenResyncListeners = new Set<(roomId: string) => void>()
   
   setApiBase(url: string) {
     this.apiBase = url.replace(/\/+$/, "")
@@ -233,6 +234,18 @@ export class VoipClient {
         }
         return
       }
+      if (data.type === "screen_share_resync_request") {
+        const roomId = data.roomId as string
+        if (typeof roomId !== "string") return
+        for (const cb of this.screenResyncListeners) {
+          try {
+            cb(roomId)
+          } catch {
+            /* ignore */
+          }
+        }
+        return
+      }
       const typed = data as
         | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
@@ -339,6 +352,14 @@ export class VoipClient {
     this.screenChunkListeners.add(cb)
     return () => {
       this.screenChunkListeners.delete(cb)
+    }
+  }
+
+  /** Only the active screen sharer receives this (server targets their socket). */
+  subscribeScreenResyncRequests(cb: (roomId: string) => void) {
+    this.screenResyncListeners.add(cb)
+    return () => {
+      this.screenResyncListeners.delete(cb)
     }
   }
 
