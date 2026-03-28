@@ -37,6 +37,8 @@ const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string }>(
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
 /** First chunk after share start; used to bootstrap late viewers' MSE. */
 const screenBootstrapChunkByClient = new Map<string, { serverId: string; roomId: string; chunkBase64: string }>()
+/** Viewer IDs temporarily forced into WS screen relay after join/resync. */
+const forceScreenRelayByRoom = new Map<string, Map<string, number>>()
 const screenWsRateByClient = new Map<string, { sec: number; count: number }>()
 let screenRelayLogCounter = 0
 
@@ -72,8 +74,21 @@ function allowScreenWsRate(clientId: string): boolean {
   return e.count <= config.screenWsMaxPerSec
 }
 
+function markForceScreenRelay(roomId: string, viewerClientId: string, ttlMs = 20_000) {
+  const now = Date.now()
+  const roomMap = forceScreenRelayByRoom.get(roomId) ?? new Map<string, number>()
+  roomMap.set(viewerClientId, now + ttlMs)
+  for (const [clientId, expiresAt] of roomMap.entries()) {
+    if (expiresAt <= now) roomMap.delete(clientId)
+  }
+  if (roomMap.size > 0) forceScreenRelayByRoom.set(roomId, roomMap)
+  else forceScreenRelayByRoom.delete(roomId)
+}
+
 function broadcastScreenChunkWs(app: FastifyInstance, serverId: string, roomId: string, fromClientId: string, event: WsServerEvent) {
   const memberIds = new Set(getRoster(serverId, roomId).map((m) => m.clientId))
+  const now = Date.now()
+  const forced = forceScreenRelayByRoom.get(roomId)
   const payload = JSON.stringify(event)
   let sent = 0
   let openSameServer = 0
@@ -82,10 +97,20 @@ function broadcastScreenChunkWs(app: FastifyInstance, serverId: string, roomId: 
     openSameServer++
     const meta = wsClientMeta.get(ws)
     if (!meta || meta.clientId === fromClientId) continue
-    if (!memberIds.has(meta.clientId)) continue
+    let allowed = memberIds.has(meta.clientId)
+    if (!allowed && forced) {
+      const expiresAt = forced.get(meta.clientId)
+      if (expiresAt && expiresAt > now) {
+        allowed = true
+      } else if (expiresAt) {
+        forced.delete(meta.clientId)
+      }
+    }
+    if (!allowed) continue
     ws.send(payload)
     sent++
   }
+  if (forced && forced.size === 0) forceScreenRelayByRoom.delete(roomId)
   if (config.screenLog) {
     if (sent === 0) {
       app.log.warn({
@@ -948,6 +973,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         }
         emitToServer(auth.serverId, { type: "roster_snapshot", roomId: event.roomId, members: getRoster(auth.serverId, event.roomId) })
         if (isVoiceRoomId(auth.serverId, event.roomId)) {
+          markForceScreenRelay(event.roomId, auth.clientId)
           notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
           sendScreenBootstrapChunkToViewer(auth.serverId, event.roomId, socket, auth.clientId)
         }
@@ -957,12 +983,16 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
         if (row?.room_id !== event.roomId) return
         if (!isVoiceRoomId(auth.serverId, event.roomId)) return
+        markForceScreenRelay(event.roomId, auth.clientId)
         notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
         sendScreenBootstrapChunkToViewer(auth.serverId, event.roomId, socket, auth.clientId)
       } else if (event.type === "leave_room") {
         db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)
         setMemberSpeaking(auth.clientId, false)
+        for (const forced of forceScreenRelayByRoom.values()) {
+          forced.delete(auth.clientId)
+        }
         screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId: null, active: false })
         emitScreenShareState(auth.serverId, auth.clientId, null, false)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
@@ -1127,6 +1157,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     const shareSnap = screenShareStateByClient.get(auth.clientId)
     screenShareStateByClient.delete(auth.clientId)
     screenBootstrapChunkByClient.delete(auth.clientId)
+    for (const forced of forceScreenRelayByRoom.values()) {
+      forced.delete(auth.clientId)
+    }
     const shareRoomEmit =
       shareSnap?.active && shareSnap.roomId ? shareSnap.roomId : null
     emitScreenShareState(auth.serverId, auth.clientId, shareRoomEmit, false)
