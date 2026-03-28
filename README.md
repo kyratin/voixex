@@ -1,78 +1,135 @@
-# VoIP Server Branch
+# VoIP MVP (Client + Server)
 
-This branch contains the backend-only VoIP server package for VPS deployment.
+This repository now includes:
 
-## Includes
+- `backend`: Control plane (REST + WS) and media plane (UDP mixer) with SQLite persistence.
+- `primer_front`: Next.js client UI integrated with backend APIs and real-time WS events.
+- `voice-client`: Desktop-side voice engine module (UDP encrypted media transport interface).
+- `desktop-client`: Electron shell with IPC bridge to native voice service.
+- `docker-compose.yml`: One-command local run for backend + frontend.
 
-- `backend`: Fastify control plane + WebSocket events + UDP media mixer.
-- `docker-compose.yml`: production-oriented compose that pulls a prebuilt image.
-- `.env.example`: required runtime environment variables.
+## Current Model
 
-## Important: do not build the image on the VPS
+- Server-authoritative state for profile, room membership, mute/deafen/speaking.
+- Nickname is persisted on backend per `serverId + clientId`.
+- Persistent text chat history stored on backend with pagination.
+- Voice quality telemetry is exposed in desktop UI (`ping/jitter p99 and p999`, packet loss).
+- Desktop app exposes audio device selection (`input/output`) via Electron IPC.
 
-Building on a small VPS (`docker build ./backend`) loads CPU/RAM heavily and can **freeze or crash the machine**. Always **build and push** the image from your PC or CI, then on the server run **`docker compose pull`** only.
+## Run with Docker Compose
 
-1. On your machine (with Docker): `./scripts/build-push-backend.sh`  
-   (requires `docker login registry.gitlab.com` once — enable **Container Registry** on the GitLab project).
-2. On the VPS: only `docker compose pull` and `docker compose up -d` — **no** `docker build`.
-
-## Quick Install on VPS
+Create `.env` (or copy from `.env.example`) and set superuser password:
 
 ```bash
-git clone <your-repo-url> voip-server
-cd voip-server
-git checkout server
 cp .env.example .env
-# edit .env values (minimum: TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST)
-# optional: VOIP_BACKEND_IMAGE=registry.gitlab.com/superkokkon/voixex/voip-backend:latest
-docker compose pull
-docker compose up -d
+# edit SUPERUSER_PASSWORD
 ```
-
-You only need `docker-compose.yml`, `.env`, and optionally this README — **not** a `docker build` context on the server.
-
-Ports (default):
-
-- HTTP/WS: `18080/tcp`
-- UDP media: `50010/udp`
-
-## Environment
-
-- `VOIP_BACKEND_IMAGE`: container image tag to pull (default `registry.gitlab.com/superkokkon/voixex/voip-backend:latest`).
-- `TOKEN_SECRET`: required signing secret for auth/media tokens.
-- `SUPERUSER_PASSWORD`: required password to grant the `admin` role on join.
-- `PUBLIC_UDP_HOST`: public VPS IP/domain clients should use for UDP.
-- `BACKEND_HTTP_PORT`: external HTTP/WS port.
-- `BACKEND_UDP_PORT`: external UDP media port.
-- `MEDIA_RATE_LIMIT_PER_SEC`: UDP packets per client per second (default `6000`; keep high enough for screen-share relay).
-- `UPLOAD_MAX_MB` / uploads path: chat attachments stored under `UPLOAD_DIR` inside the data volume (`/data/uploads` in compose).
-
-## Superuser / Admin
-
-- Client joins using normal server password.
-- If client also sends `superuserPassword` equal to `SUPERUSER_PASSWORD`, backend grants built-in `admin` role.
-- Only `admin` users can access server settings operations (channels/roles management).
-
-## Build and Publish Your Own Image
-
-From repository root (same as `./scripts/build-push-backend.sh`):
 
 ```bash
-chmod +x ./scripts/build-push-backend.sh
-./scripts/build-push-backend.sh
-# or: IMAGE=your-registry.example/voip-backend:1.2.3 ./scripts/build-push-backend.sh
+docker compose up --build
 ```
 
-Then on the VPS, set in `.env`:
+Services:
 
-```env
-VOIP_BACKEND_IMAGE=registry.gitlab.com/superkokkon/voixex/voip-backend:latest
+- Frontend: `http://localhost:3000`
+- Backend HTTP/WS: `http://localhost:18080`
+- Backend UDP media: `localhost:50010/udp`
+
+## Run Desktop Client (Phase 1)
+
+```bash
+cd voice-client && npm install && npm run build
+cd ../desktop-client && npm install && npm run build && npm run start
 ```
+
+Desktop client opens your UI in Electron and exposes `window.electronVoice` bridge for connect/join/mute/deafen actions.
+
+## Build Binary (Desktop)
+
+From `desktop-client`:
+
+```bash
+npm install
+npm run build
+npm run pack
+```
+
+For installer artifacts:
+
+```bash
+npm run dist
+```
+
+Expected outputs are created under `desktop-client/release/`:
+- Linux: `AppImage`, `deb`
+- Windows: NSIS installer (`Voixex-<version>-win-x64.exe`)
+
+## Windows Build And Run
+
+Preferred (native Windows host):
+
+```powershell
+cd <repo>\voice-client
+npm install
+npm run build
+
+cd ..\desktop-client
+npm install
+npm run build
+npm run dist:win
+```
+
+Artifact:
+- `desktop-client/release/Voixex-<version>-win-x64.exe`
+
+Optional (from WSL/Linux via Docker builder image with Wine — same as a native Windows build, but dependencies run inside the container):
+
+```bash
+# From repository root. Builds voice-client, installs primer_front deps (for prepare:ui / Next export), then desktop + NSIS.
+docker run --rm \
+  -e CI=false \
+  -v "$PWD":/project \
+  -w /project \
+  -v "$HOME/.cache/electron":/root/.cache/electron \
+  -v "$HOME/.cache/electron-builder":/root/.cache/electron-builder \
+  electronuserland/builder:wine \
+  /bin/bash -lc 'set -euo pipefail
+    cd /project/voice-client && npm install && npm run build
+    cd /project/primer_front && npm install
+    cd /project/desktop-client && npm install && npm run build && npm run dist:win'
+```
+
+Files created in the container are written to the mounted repo; they may be owned by `root` on the host — run `sudo chown -R "$USER" desktop-client/node_modules primer_front/node_modules voice-client/node_modules` if local `npm install` then fails with permission errors.
+
+## Windows Troubleshooting
 
 - If microphone/headphones list is empty, allow microphone access in Windows privacy settings and restart the app.
 - If call quality is unstable, allow app traffic in Windows Firewall for both TCP/UDP.
 - If no output is heard, set a default playback device in Windows Sound settings, then reopen app settings and reapply output device.
 - If running UI from WSL path, prefer launching installed `.exe` directly on Windows host filesystem.
+
+## Screen share (desktop)
+
+- Screen capture is encoded as WebM (MediaRecorder) and sent over the **same WebSocket** as chat/roster (`screen_chunk` messages with base64 payloads). The server **retransmits** chunks to other members of the **same voice channel** (no separate streaming server process).
+- The client must register sharing with `set_screen_share` **before** `MediaRecorder` starts emitting chunks; otherwise the server drops early chunks (`share_inactive_or_room_mismatch` in logs when `SCREEN_LOG=1`).
+- Rebuild the embedded UI (`desktop-client`: `npm run prepare:ui`) after changing `primer_front` so the desktop bundle includes the latest client logic.
+
+## Backend environment (screen / WebSocket)
+
+See `.env.example`. Notable variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `SCREEN_LOG` | Set to `1` to log `screen_chunk` drops (with reason), relay samples, and `set_screen_share` (useful on VPS: `docker logs -f <container>`). |
+| `WS_MAX_PAYLOAD_BYTES` | Max WebSocket frame size (default ~12MB) for large screen blobs. |
+| `SCREEN_WS_MAX_BASE64_CHARS` | Max base64 length per `screen_chunk` message. |
+| `SCREEN_WS_MAX_PER_SEC` | Rate limit per client (messages/sec). |
+
+`docker-compose.yml` passes `SCREEN_LOG` from the host environment (`SCREEN_LOG=${SCREEN_LOG:-0}`).
+
+## Production API URL
+
+The desktop UI builds the API base as `http://<host>:<port>` (default port `18080`). Point **host** at your server IP or DNS name and ensure that TCP port reaches the backend (e.g. `http://203.0.113.10:18080`). HTTPS/WSS in front of the app requires a reverse proxy with WebSocket upgrade and large enough proxy buffers for screen frames; this repo does not ship that nginx config.
 
 ## Implemented API
 
@@ -84,7 +141,7 @@ VOIP_BACKEND_IMAGE=registry.gitlab.com/superkokkon/voixex/voip-backend:latest
 - `GET /v1/servers/:serverId/rooms` - list rooms
 - `GET /v1/servers/:serverId/channels/:channelId/messages?limit=&cursor=` - chat history pagination
 - `POST /v1/servers/:serverId/channels/:channelId/messages` - append chat message
-- `GET /v1/ws?token=...` - WS events for rooms/roster/member/chat updates
+- `GET /v1/ws?token=...` - WS events for rooms/roster/member/chat updates; also carries `screen_chunk` / `set_screen_share` for desktop screen share.
 
 ## Media Protocol (MVP)
 
@@ -103,3 +160,4 @@ VOIP_BACKEND_IMAGE=registry.gitlab.com/superkokkon/voixex/voip-backend:latest
 5. Join voice room, toggle mute/deafen, verify roster and speaking indicators update from server events.
 6. In desktop client settings, select input/output devices and apply.
 7. In `Voice Connected` stats panel check packet loss and `ping/jitter` p99/p999 values.
+8. Two desktop clients in the same voice channel: start screen share on one; the other should receive video (if not, enable `SCREEN_LOG=1` on the backend and inspect `screen_chunk` / `set_screen_share` lines in container logs).
