@@ -895,8 +895,23 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         setMemberRoom(auth.clientId, event.roomId)
         setMemberSpeaking(auth.clientId, false)
         setMemberFlags(auth.clientId, forceMutedInLobby, false)
-        screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId: event.roomId, active: false })
-        emitScreenShareState(auth.serverId, auth.clientId, event.roomId, false)
+        const prevShare = screenShareStateByClient.get(auth.clientId)
+        const keepScreenShareActive =
+          Boolean(
+            prevShare?.active &&
+              prevShare.serverId === auth.serverId &&
+              prevShare.roomId === event.roomId
+          )
+        screenShareStateByClient.set(auth.clientId, {
+          serverId: auth.serverId,
+          roomId: event.roomId,
+          active: keepScreenShareActive
+        })
+        if (keepScreenShareActive) {
+          emitScreenShareState(auth.serverId, auth.clientId, event.roomId, true)
+        } else {
+          emitScreenShareState(auth.serverId, auth.clientId, event.roomId, false)
+        }
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           emitToServer(auth.serverId, {
@@ -915,6 +930,13 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         if (isVoiceRoomId(auth.serverId, event.roomId)) {
           notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
         }
+      } else if (event.type === "request_screen_resync") {
+        const row = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        if (row?.room_id !== event.roomId) return
+        if (!isVoiceRoomId(auth.serverId, event.roomId)) return
+        notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
       } else if (event.type === "leave_room") {
         db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)

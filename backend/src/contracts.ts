@@ -7,6 +7,8 @@ export type WsClientEvent =
   | { type: "set_screen_share"; active: boolean }
   /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
   | { type: "screen_chunk"; chunkBase64: string }
+  /** Viewer asks server to nudge the active sharer (fresh WebM header for MSE). */
+  | { type: "request_screen_resync"; roomId: string }
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
