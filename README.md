@@ -62,7 +62,7 @@ npm run dist
 
 Expected outputs are created under `desktop-client/release/`:
 - Linux: `AppImage`, `deb`
-- Windows: `nsis` installer (`Kyratin VoIP-<version>-win-x64.exe`)
+- Windows: NSIS installer (`Voixex-<version>-win-x64.exe`)
 
 ## Windows Build And Run
 
@@ -80,19 +80,26 @@ npm run dist:win
 ```
 
 Artifact:
-- `desktop-client/release/Kyratin VoIP-0.1.0-win-x64.exe`
+- `desktop-client/release/Voixex-<version>-win-x64.exe`
 
-Optional (from WSL/Linux via Docker builder image with wine):
+Optional (from WSL/Linux via Docker builder image with Wine — same as a native Windows build, but dependencies run inside the container):
 
 ```bash
+# From repository root. Builds voice-client, installs primer_front deps (for prepare:ui / Next export), then desktop + NSIS.
 docker run --rm \
+  -e CI=false \
   -v "$PWD":/project \
-  -w /project/desktop-client \
+  -w /project \
   -v "$HOME/.cache/electron":/root/.cache/electron \
   -v "$HOME/.cache/electron-builder":/root/.cache/electron-builder \
   electronuserland/builder:wine \
-  /bin/bash -lc "npm install && npm run build && npm run dist:win"
+  /bin/bash -lc 'set -euo pipefail
+    cd /project/voice-client && npm install && npm run build
+    cd /project/primer_front && npm install
+    cd /project/desktop-client && npm install && npm run build && npm run dist:win'
 ```
+
+Files created in the container are written to the mounted repo; they may be owned by `root` on the host — run `sudo chown -R "$USER" desktop-client/node_modules primer_front/node_modules voice-client/node_modules` if local `npm install` then fails with permission errors.
 
 ## Windows Troubleshooting
 
@@ -100,6 +107,29 @@ docker run --rm \
 - If call quality is unstable, allow app traffic in Windows Firewall for both TCP/UDP.
 - If no output is heard, set a default playback device in Windows Sound settings, then reopen app settings and reapply output device.
 - If running UI from WSL path, prefer launching installed `.exe` directly on Windows host filesystem.
+
+## Screen share (desktop)
+
+- Screen capture is encoded as WebM (MediaRecorder) and sent over the **same WebSocket** as chat/roster (`screen_chunk` messages with base64 payloads). The server **retransmits** chunks to other members of the **same voice channel** (no separate streaming server process).
+- The client must register sharing with `set_screen_share` **before** `MediaRecorder` starts emitting chunks; otherwise the server drops early chunks (`share_inactive_or_room_mismatch` in logs when `SCREEN_LOG=1`).
+- Rebuild the embedded UI (`desktop-client`: `npm run prepare:ui`) after changing `primer_front` so the desktop bundle includes the latest client logic.
+
+## Backend environment (screen / WebSocket)
+
+See `.env.example`. Notable variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `SCREEN_LOG` | Set to `1` to log `screen_chunk` drops (with reason), relay samples, and `set_screen_share` (useful on VPS: `docker logs -f <container>`). |
+| `WS_MAX_PAYLOAD_BYTES` | Max WebSocket frame size (default ~12MB) for large screen blobs. |
+| `SCREEN_WS_MAX_BASE64_CHARS` | Max base64 length per `screen_chunk` message. |
+| `SCREEN_WS_MAX_PER_SEC` | Rate limit per client (messages/sec). |
+
+`docker-compose.yml` passes `SCREEN_LOG` from the host environment (`SCREEN_LOG=${SCREEN_LOG:-0}`).
+
+## Production API URL
+
+The desktop UI builds the API base as `http://<host>:<port>` (default port `18080`). Point **host** at your server IP or DNS name and ensure that TCP port reaches the backend (e.g. `http://203.0.113.10:18080`). HTTPS/WSS in front of the app requires a reverse proxy with WebSocket upgrade and large enough proxy buffers for screen frames; this repo does not ship that nginx config.
 
 ## Implemented API
 
@@ -111,7 +141,7 @@ docker run --rm \
 - `GET /v1/servers/:serverId/rooms` - list rooms
 - `GET /v1/servers/:serverId/channels/:channelId/messages?limit=&cursor=` - chat history pagination
 - `POST /v1/servers/:serverId/channels/:channelId/messages` - append chat message
-- `GET /v1/ws?token=...` - WS events for rooms/roster/member/chat updates
+- `GET /v1/ws?token=...` - WS events for rooms/roster/member/chat updates; also carries `screen_chunk` / `set_screen_share` for desktop screen share.
 
 ## Media Protocol (MVP)
 
@@ -130,3 +160,4 @@ docker run --rm \
 5. Join voice room, toggle mute/deafen, verify roster and speaking indicators update from server events.
 6. In desktop client settings, select input/output devices and apply.
 7. In `Voice Connected` stats panel check packet loss and `ping/jitter` p99/p999 values.
+8. Two desktop clients in the same voice channel: start screen share on one; the other should receive video (if not, enable `SCREEN_LOG=1` on the backend and inspect `screen_chunk` / `set_screen_share` lines in container logs).

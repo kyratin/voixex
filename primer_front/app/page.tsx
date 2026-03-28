@@ -125,9 +125,7 @@ export default function VoIPApp() {
   const [showingStreamWindow, setShowingStreamWindow] = useState(false)
   const screenShareTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const screenCaptureStreamRef = useRef<MediaStream | null>(null)
-  const screenAssembleRef = useRef(new Map<number, { total: number; parts: Uint8Array[]; received: number; ts: number; format: "jpeg" | "webp" | "webm" }>())
   const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const screenChunkSeqRef = useRef(1)
   const localPreviewVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteStreamVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteMediaSourceRef = useRef<MediaSource | null>(null)
@@ -445,6 +443,7 @@ export default function VoIPApp() {
           }
           return
         }
+        console.warn("[voixex] MSE appendBuffer failed", e)
         drainRemoteMse()
       }
     }
@@ -481,6 +480,22 @@ export default function VoIPApp() {
 
     drainRemoteMse()
   }
+
+  const pushRemoteVideoChunkRef = useRef(pushRemoteVideoChunk)
+  pushRemoteVideoChunkRef.current = pushRemoteVideoChunk
+
+  useEffect(() => {
+    if (!hasDesktopBridge) return
+    return client.subscribeScreenVideoChunks((fromClientId, chunkBase64) => {
+      const me = client.getMeState()
+      if (me && fromClientId === me.clientId) return
+      try {
+        pushRemoteVideoChunkRef.current(decodeBytesBase64(chunkBase64))
+      } catch {
+        /* ignore */
+      }
+    })
+  }, [hasDesktopBridge, client])
 
   const concatInt16 = (a: Int16Array, b: Int16Array) => {
     if (a.length === 0) return b
@@ -734,57 +749,8 @@ export default function VoIPApp() {
             for (const d of dropped) runtime.bufferedSamples -= d.length
           }
         }) ?? null
-        runtime.unsubscribeScreenChunk = window.electronVoice?.onScreenChunk((chunkBase64) => {
-          const packet = decodeBytesBase64(chunkBase64)
-          if (packet.length < 12 || packet[1] !== 0x53) return
-          const format: "jpeg" | "webp" | "webm" = packet[3] === 2 ? "webm" : packet[3] === 1 ? "webp" : "jpeg"
-          const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength)
-          const frameId = view.getUint32(4, false)
-          const index = view.getUint16(8, false)
-          const total = view.getUint16(10, false)
-          const payload = packet.subarray(12)
-          const existing = screenAssembleRef.current.get(frameId) ?? {
-            total,
-            parts: new Array<Uint8Array>(total),
-            received: 0,
-            ts: Date.now(),
-            format
-          }
-          if (!existing.parts[index]) {
-            existing.parts[index] = payload
-            existing.received += 1
-          }
-          screenAssembleRef.current.set(frameId, existing)
-          if (existing.received === existing.total) {
-            const fullSize = existing.parts.reduce((sum, p) => sum + (p?.length ?? 0), 0)
-            const full = new Uint8Array(fullSize)
-            let cursor = 0
-            for (let i = 0; i < existing.parts.length; i += 1) {
-              const part = existing.parts[i]
-              if (!part) return
-              full.set(part, cursor)
-              cursor += part.length
-            }
-            if (format === "webm") {
-              pushRemoteVideoChunk(full)
-            } else {
-              const mime = existing.format === "webp" ? "image/webp" : "image/jpeg"
-              const url = URL.createObjectURL(new Blob([full], { type: mime }))
-              setScreenImageUrl((prev) => {
-                if (prev) URL.revokeObjectURL(prev)
-                return url
-              })
-            }
-            screenAssembleRef.current.delete(frameId)
-          }
-          const now = Date.now()
-          for (const [id, partial] of screenAssembleRef.current.entries()) {
-            const ttlMs = partial.format === "webm" ? 20000 : 3000
-            if (now - partial.ts > ttlMs) {
-              screenAssembleRef.current.delete(id)
-            }
-          }
-        }) ?? null
+        // Screen video uses WebSocket (reliable); UDP screen path not used.
+        runtime.unsubscribeScreenChunk = null
 
         captureSource.connect(micGainNode)
         micGainNode.connect(captureNode)
@@ -1070,7 +1036,6 @@ export default function VoIPApp() {
     }
     if (isScreenSharing) return
     const fps = Math.max(8, Math.min(60, screenFps))
-    const chunkSize = 1120
     const [targetWidthRaw, targetHeightRaw] = screenResolution.split("x").map((v) => Number(v))
     const targetWidth = Number.isFinite(targetWidthRaw) ? targetWidthRaw : 1280
     const targetHeight = Number.isFinite(targetHeightRaw) ? targetHeightRaw : 720
@@ -1095,40 +1060,24 @@ export default function VoIPApp() {
       mimeType,
       videoBitsPerSecond: bitrateKbps * 1000
     })
-    screenChunkSeqRef.current = 1
     recorder.ondataavailable = (event) => {
-      const bridge = window.electronVoice
-      if (!bridge) return
       if (!event.data || event.data.size === 0) return
       void event.data.arrayBuffer().then((buffer) => {
         const bytes = new Uint8Array(buffer)
-        const chunkId = screenChunkSeqRef.current++
-        const total = Math.max(1, Math.ceil(bytes.length / chunkSize))
-        for (let i = 0; i < total; i += 1) {
-          const payload = bytes.subarray(i * chunkSize, Math.min(bytes.length, (i + 1) * chunkSize))
-          const packet = new Uint8Array(12 + payload.length)
-          packet[0] = 1
-          packet[1] = 0x53
-          packet[2] = (i === 0 ? 1 : 0) | (i === total - 1 ? 2 : 0)
-          packet[3] = 2 // webm stream chunk
-          const view = new DataView(packet.buffer)
-          view.setUint32(4, chunkId >>> 0, false)
-          view.setUint16(8, i, false)
-          view.setUint16(10, total, false)
-          packet.set(payload, 12)
-          void bridge.sendScreenChunk(encodeBytesBase64(packet))
-        }
+        client.sendScreenVideoChunk(encodeBytesBase64(bytes))
       })
     }
-    recorder.start(Math.max(16, Math.round(1000 / fps)))
+    // Server drops screen_chunk until set_screen_share(active:true) is applied; register share before any blob.
+    setIsScreenSharing(true)
+    client.setScreenShare(true)
+    // Shorter timeslice => smaller WebM blobs over WebSocket.
+    recorder.start(200)
     screenMediaRecorderRef.current = recorder
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => {
         void stopScreenShare()
       }
     })
-    setIsScreenSharing(true)
-    client.setScreenShare(true)
     setStatus("Screen share started")
   }
 

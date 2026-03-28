@@ -5,6 +5,8 @@ export type WsClientEvent =
   | { type: "set_deafen"; deafened: boolean }
   | { type: "set_profile"; displayName: string }
   | { type: "set_screen_share"; active: boolean }
+  /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
+  | { type: "screen_chunk"; chunkBase64: string }
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
@@ -63,6 +65,7 @@ export type WsServerEvent =
       }
     }
   | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
+  | { type: "screen_chunk"; fromClientId: string; chunkBase64: string }
   | { type: "pong"; ts: number }
   | { type: "error"; message: string }
 
