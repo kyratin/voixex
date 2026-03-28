@@ -115,6 +115,26 @@ function emitScreenShareState(serverId: string, clientId: string, roomId: string
   emitToServer(serverId, { type: "screen_share_state", clientId, roomId, active })
 }
 
+function findOpenSocketForClient(serverId: string, clientId: string): WebSocket | null {
+  for (const ws of clients.get(serverId) ?? []) {
+    if (ws.readyState !== ws.OPEN) continue
+    const meta = wsClientMeta.get(ws)
+    if (meta?.clientId === clientId) return ws
+  }
+  return null
+}
+
+/** New viewer joined a voice room: ask active sharer(s) to restart MediaRecorder so WebM init is sent again. */
+function notifyActiveScreenSharerToResync(serverId: string, joinedRoomId: string, joinedClientId: string) {
+  for (const [sharerId, share] of screenShareStateByClient.entries()) {
+    if (sharerId === joinedClientId) continue
+    if (share.serverId !== serverId || !share.active || share.roomId !== joinedRoomId) continue
+    const ws = findOpenSocketForClient(serverId, sharerId)
+    if (!ws) continue
+    ws.send(JSON.stringify({ type: "screen_share_resync_request", roomId: joinedRoomId } satisfies WsServerEvent))
+  }
+}
+
 function ensureAdminRole(serverId: string) {
   const existing = db
     .prepare("SELECT id, permissions_json FROM server_roles WHERE server_id = ? AND role_key = 'admin' LIMIT 1")
@@ -892,6 +912,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           })
         }
         emitToServer(auth.serverId, { type: "roster_snapshot", roomId: event.roomId, members: getRoster(auth.serverId, event.roomId) })
+        if (isVoiceRoomId(auth.serverId, event.roomId)) {
+          notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
+        }
       } else if (event.type === "leave_room") {
         db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)

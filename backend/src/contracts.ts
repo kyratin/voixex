@@ -65,6 +65,8 @@ export type WsServerEvent =
       }
     }
   | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
+  /** Tells the active sharer to restart encoding so late joiners get a fresh WebM header (MSE). */
+  | { type: "screen_share_resync_request"; roomId: string }
   | { type: "screen_chunk"; fromClientId: string; chunkBase64: string }
   | { type: "pong"; ts: number }
   | { type: "error"; message: string }
