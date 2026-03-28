@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ServerSidebar } from "@/components/voip/server-sidebar"
 import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-sidebar"
 import { UserPanel } from "@/components/voip/user-panel"
@@ -134,6 +134,10 @@ export default function VoIPApp() {
   const remoteMseUpdateEndRef = useRef<(() => void) | null>(null)
   const screenEncodeInFlightRef = useRef(false)
   const streamWindowRef = useRef<Window | null>(null)
+  /** Tracks from captureStream() fed to the popup; must be stopped when switching modes or closing. */
+  const popupMirrorStreamRef = useRef<MediaStream | null>(null)
+  const lastPopupMirrorVideoUrlRef = useRef<string | null>(null)
+  const renderStreamWindowRef = useRef<() => void>(() => {})
   const lastLocalPreviewUpdateAtRef = useRef(0)
   const client = useMemo(() => new VoipClient(), [])
   const voicePipelineRef = useRef<VoicePipelineRuntime | null>(null)
@@ -388,7 +392,17 @@ export default function VoIPApp() {
     return bytes
   }
 
+  const stopPopupMirrorTracks = useCallback(() => {
+    const s = popupMirrorStreamRef.current
+    if (s) {
+      s.getTracks().forEach((t) => t.stop())
+      popupMirrorStreamRef.current = null
+    }
+    lastPopupMirrorVideoUrlRef.current = null
+  }, [])
+
   const resetRemoteStreamPlayback = () => {
+    stopPopupMirrorTracks()
     remoteAppendQueueRef.current = []
     const sb = remoteSourceBufferRef.current
     if (sb && remoteMseUpdateEndRef.current) {
@@ -436,7 +450,8 @@ export default function VoIPApp() {
             if (sbuf.buffered.length > 0) {
               const a = sbuf.buffered.start(0)
               const b = sbuf.buffered.end(0)
-              if (b - a > 0.5) sbuf.remove(a, a + (b - a) * 0.35)
+              // Keep a larger playout buffer so the viewer stalls less often.
+              if (b - a > 1.2) sbuf.remove(a, a + (b - a) * 0.22)
             }
           } catch {
             /* ignore */
@@ -866,11 +881,24 @@ export default function VoIPApp() {
 
   useEffect(() => {
     return () => {
+      stopPopupMirrorTracks()
       if (streamWindowRef.current && !streamWindowRef.current.closed) {
         streamWindowRef.current.close()
       }
     }
-  }, [])
+  }, [stopPopupMirrorTracks])
+
+  useEffect(() => {
+    const v = remoteStreamVideoRef.current
+    if (!v || !showingStreamWindow) return
+    const sync = () => renderStreamWindowRef.current()
+    v.addEventListener("playing", sync)
+    v.addEventListener("loadeddata", sync)
+    return () => {
+      v.removeEventListener("playing", sync)
+      v.removeEventListener("loadeddata", sync)
+    }
+  }, [showingStreamWindow, screenVideoUrl])
 
   useEffect(() => {
     if (!localPreviewVideoRef.current) return
@@ -983,6 +1011,7 @@ export default function VoIPApp() {
     if (viewersEl) viewersEl.textContent = `Viewers: ${viewers}`
     if (imageEl && placeholderEl) {
       if (localCapture) {
+        stopPopupMirrorTracks()
         if (imageEl.src) imageEl.removeAttribute("src")
         if (imageEl.srcObject !== localCapture) {
           imageEl.srcObject = localCapture
@@ -990,7 +1019,37 @@ export default function VoIPApp() {
         }
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
+      } else if (screenVideoUrl && remoteStreamVideoRef.current) {
+        // Blob URLs tied to MediaSource in the opener do not reliably play in a second window
+        // (Steam overlay / pop-out). Mirror decoded output via captureStream from the main <video>.
+        const srcVideo = remoteStreamVideoRef.current
+        const mirrorFps = Math.min(60, Math.max(8, screenFps))
+        const needNewMirror =
+          lastPopupMirrorVideoUrlRef.current !== screenVideoUrl || imageEl.srcObject !== popupMirrorStreamRef.current
+        if (needNewMirror) {
+          stopPopupMirrorTracks()
+          try {
+            const cap = srcVideo.captureStream(mirrorFps)
+            popupMirrorStreamRef.current = cap
+            lastPopupMirrorVideoUrlRef.current = screenVideoUrl
+            imageEl.srcObject = cap
+            imageEl.removeAttribute("src")
+            void imageEl.play().catch(() => {})
+          } catch {
+            lastPopupMirrorVideoUrlRef.current = null
+            if (imageEl.srcObject) imageEl.srcObject = null
+            if (previewUrl && imageEl.src !== previewUrl) {
+              imageEl.src = previewUrl
+              void imageEl.play().catch(() => {})
+            }
+          }
+        } else {
+          void imageEl.play().catch(() => {})
+        }
+        imageEl.style.display = "block"
+        placeholderEl.style.display = "none"
       } else if (previewUrl) {
+        stopPopupMirrorTracks()
         if (imageEl.srcObject) imageEl.srcObject = null
         if (imageEl.src !== previewUrl) {
           imageEl.src = previewUrl
@@ -999,6 +1058,7 @@ export default function VoIPApp() {
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
       } else {
+        stopPopupMirrorTracks()
         imageEl.srcObject = null
         imageEl.removeAttribute("src")
         imageEl.style.display = "none"
@@ -1006,9 +1066,17 @@ export default function VoIPApp() {
       }
     }
   }
+  renderStreamWindowRef.current = renderStreamWindow
 
   const toggleStreamWindow = () => {
     if (streamWindowRef.current && !streamWindowRef.current.closed) {
+      try {
+        const v = streamWindowRef.current.document.getElementById("voixex-stream-video") as HTMLVideoElement | null
+        if (v) v.srcObject = null
+      } catch {
+        /* ignore */
+      }
+      stopPopupMirrorTracks()
       streamWindowRef.current.close()
       streamWindowRef.current = null
       setShowingStreamWindow(false)
@@ -1070,8 +1138,8 @@ export default function VoIPApp() {
     // Server drops screen_chunk until set_screen_share(active:true) is applied; register share before any blob.
     setIsScreenSharing(true)
     client.setScreenShare(true)
-    // Shorter timeslice => smaller WebM blobs over WebSocket.
-    recorder.start(200)
+    // Larger timeslice => fewer MSE appendBuffer cycles and less "chunky" playback (slightly higher latency).
+    recorder.start(900)
     screenMediaRecorderRef.current = recorder
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => {
