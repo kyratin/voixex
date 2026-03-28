@@ -143,6 +143,7 @@ export default function VoIPApp() {
   const screenRecorderResyncAtRef = useRef(0)
   const screenRecorderRestartingRef = useRef(false)
   const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
+  const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
   const lastLocalPreviewUpdateAtRef = useRef(0)
   const client = useMemo(() => new VoipClient(), [])
@@ -241,6 +242,17 @@ export default function VoIPApp() {
   useEffect(() => {
     isScreenSharingRef.current = isScreenSharing
   }, [isScreenSharing])
+
+  useEffect(() => {
+    // WS may reconnect while desktop voice transport keeps running;
+    // re-send join_room so server routes screen chunks to this viewer.
+    if (!wsConnected || !isInVoice || !currentVoiceChannel) return
+    const now = Date.now()
+    const prev = lastWsVoiceJoinSyncRef.current
+    if (prev && prev.room === currentVoiceChannel && now - prev.at < 3000) return
+    lastWsVoiceJoinSyncRef.current = { room: currentVoiceChannel, at: now }
+    client.joinRoom(currentVoiceChannel)
+  }, [wsConnected, isInVoice, currentVoiceChannel, client])
 
   useEffect(() => {
     const raw = localStorage.getItem("voixex-saved-servers")
