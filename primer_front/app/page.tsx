@@ -144,12 +144,6 @@ export default function VoIPApp() {
   const screenRecorderRestartingRef = useRef(false)
   const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
   const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
-  const lastRemoteScreenChunkAtRef = useRef(0)
-  const lastViewerPlaybackResetAtRef = useRef(0)
-  const remoteChunkCounterRef = useRef(0)
-  const lastRemoteChunkCounterSeenRef = useRef(0)
-  const lastRemoteVideoTimeRef = useRef(0)
-  const remoteVideoStuckSinceRef = useRef(0)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
   const lastLocalPreviewUpdateAtRef = useRef(0)
   const client = useMemo(() => new VoipClient(), [])
@@ -519,13 +513,6 @@ export default function VoIPApp() {
         const mime = mimeCandidates.find((m) => MediaSource.isTypeSupported(m)) ?? "video/webm"
         try {
           const sbuf = ms.addSourceBuffer(mime)
-          try {
-            // MediaRecorder restarts may reset fragment timestamps to zero.
-            // sequence mode keeps a monotonic timeline by append order.
-            sbuf.mode = "sequence"
-          } catch {
-            /* ignore */
-          }
           remoteSourceBufferRef.current = sbuf
           const onEnd = () => drainRemoteMse()
           remoteMseUpdateEndRef.current = onEnd
@@ -549,8 +536,6 @@ export default function VoIPApp() {
     return client.subscribeScreenVideoChunks((fromClientId, chunkBase64) => {
       const me = client.getMeState()
       if (me && fromClientId === me.clientId) return
-      lastRemoteScreenChunkAtRef.current = Date.now()
-      remoteChunkCounterRef.current += 1
       try {
         pushRemoteVideoChunkRef.current(decodeBytesBase64(chunkBase64))
       } catch {
@@ -1095,40 +1080,6 @@ export default function VoIPApp() {
       client.requestScreenResync(room)
     }, 400)
     return () => clearTimeout(timer)
-  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, client])
-
-  useEffect(() => {
-    if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName) return
-    const tick = window.setInterval(() => {
-      const now = Date.now()
-      const sinceChunk = now - lastRemoteScreenChunkAtRef.current
-      const sinceReset = now - lastViewerPlaybackResetAtRef.current
-      const video = remoteStreamVideoRef.current
-      const hasFreshChunks = now - lastRemoteScreenChunkAtRef.current < 1500
-      const currentTime = video?.currentTime ?? 0
-      const chunkCounter = remoteChunkCounterRef.current
-      const chunkCounterChanged = chunkCounter !== lastRemoteChunkCounterSeenRef.current
-      if (chunkCounterChanged) {
-        lastRemoteChunkCounterSeenRef.current = chunkCounter
-      }
-      if (video && hasFreshChunks && chunkCounterChanged) {
-        if (currentTime > lastRemoteVideoTimeRef.current + 0.08) {
-          lastRemoteVideoTimeRef.current = currentTime
-          remoteVideoStuckSinceRef.current = 0
-        } else if (remoteVideoStuckSinceRef.current === 0) {
-          remoteVideoStuckSinceRef.current = now
-        }
-      }
-      const videoStuck = remoteVideoStuckSinceRef.current > 0 && now - remoteVideoStuckSinceRef.current > 2400
-      // If screen share is active but chunks are stale for a while, re-bootstrap playback.
-      if ((sinceChunk > 3500 || videoStuck) && sinceReset > 5000) {
-        lastViewerPlaybackResetAtRef.current = now
-        remoteVideoStuckSinceRef.current = 0
-        resetRemoteStreamPlaybackRef.current()
-        client.requestScreenResync(currentVoiceChannel)
-      }
-    }, 1200)
-    return () => window.clearInterval(tick)
   }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, client])
 
   const renderStreamWindow = () => {
