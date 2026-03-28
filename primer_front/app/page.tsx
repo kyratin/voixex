@@ -519,6 +519,13 @@ export default function VoIPApp() {
         const mime = mimeCandidates.find((m) => MediaSource.isTypeSupported(m)) ?? "video/webm"
         try {
           const sbuf = ms.addSourceBuffer(mime)
+          try {
+            // MediaRecorder restarts may reset fragment timestamps to zero.
+            // sequence mode keeps a monotonic timeline by append order.
+            sbuf.mode = "sequence"
+          } catch {
+            /* ignore */
+          }
           remoteSourceBufferRef.current = sbuf
           const onEnd = () => drainRemoteMse()
           remoteMseUpdateEndRef.current = onEnd
@@ -1280,11 +1287,6 @@ export default function VoIPApp() {
     // Larger timeslice => fewer MSE appendBuffer cycles and less "chunky" playback (slightly higher latency).
     recorder.start(900)
     screenMediaRecorderRef.current = recorder
-    // Force periodic fresh WebM init/keyframe cadence for late joiners and stuck decoders.
-    // restartScreenRecorderForLateViewers has debounce and safe guards.
-    screenShareTimerRef.current = setInterval(() => {
-      restartScreenRecorderForLateViewers()
-    }, 5000)
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => {
         void stopScreenShare()
