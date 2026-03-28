@@ -142,6 +142,7 @@ export default function VoIPApp() {
   const isScreenSharingRef = useRef(false)
   const screenRecorderResyncAtRef = useRef(0)
   const screenRecorderRestartingRef = useRef(false)
+  const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
   const lastLocalPreviewUpdateAtRef = useRef(0)
   const client = useMemo(() => new VoipClient(), [])
@@ -1010,7 +1011,7 @@ export default function VoIPApp() {
     const oldRec = screenMediaRecorderRef.current
     if (!stream || !oldRec || oldRec.state !== "recording") return
     const now = Date.now()
-    if (now - screenRecorderResyncAtRef.current < 2500) return
+    if (now - screenRecorderResyncAtRef.current < 1200) return
     screenRecorderResyncAtRef.current = now
     if (screenRecorderRestartingRef.current) return
     screenRecorderRestartingRef.current = true
@@ -1055,6 +1056,19 @@ export default function VoIPApp() {
       restartScreenRecorderForLateViewers()
     })
   }, [hasDesktopBridge, isScreenSharing, client, restartScreenRecorderForLateViewers])
+
+  useEffect(() => {
+    if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName) return
+    const now = Date.now()
+    const prev = lastViewerScreenResyncReqRef.current
+    if (prev && prev.room === currentVoiceChannel && now - prev.at < 5000) return
+    const room = currentVoiceChannel
+    const timer = window.setTimeout(() => {
+      lastViewerScreenResyncReqRef.current = { room, at: Date.now() }
+      client.requestScreenResync(room)
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, client])
 
   const renderStreamWindow = () => {
     if (!streamWindowRef.current || streamWindowRef.current.closed) return
