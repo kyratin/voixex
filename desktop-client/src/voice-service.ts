@@ -11,6 +11,7 @@ type VoiceState = {
 export class VoiceService {
   private engine: VoiceEngine | null = null
   private onIncomingPcm16: ((pcm16Base64: string) => void) | null = null
+  private onIncomingScreenChunk: ((chunkBase64: string) => void) | null = null
   private state: VoiceState = {
     connected: false,
     joinedRoomId: null,
@@ -34,6 +35,9 @@ export class VoiceService {
     })
     this.engine.setOnPcm16Frame((frame) => {
       this.onIncomingPcm16?.(frame.toString("base64"))
+    })
+    this.engine.setOnScreenChunk((chunk) => {
+      this.onIncomingScreenChunk?.(chunk.toString("base64"))
     })
     this.engine.connect()
     this.state.connected = true
@@ -132,8 +136,17 @@ export class VoiceService {
     this.engine.sendPcm16Frame(Buffer.from(pcm16Base64, "base64"))
   }
 
+  sendScreenChunk(chunkBase64: string) {
+    if (!this.engine) return
+    this.engine.sendScreenChunk(Buffer.from(chunkBase64, "base64"))
+  }
+
   setOnIncomingPcm16(listener: ((pcm16Base64: string) => void) | null) {
     this.onIncomingPcm16 = listener
+  }
+
+  setOnIncomingScreenChunk(listener: ((chunkBase64: string) => void) | null) {
+    this.onIncomingScreenChunk = listener
   }
 }
 

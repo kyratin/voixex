@@ -19,7 +19,11 @@ declare global {
       setKeybinds: (keybinds: { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }) => Promise<unknown>
       clearKeybinds: () => Promise<unknown>
       sendPcm16Frame: (pcm16Base64: string) => Promise<unknown>
+      sendScreenChunk: (chunkBase64: string) => Promise<unknown>
+      listScreenSources: () => Promise<Array<{ id: string; name: string }>>
+      setScreenSource: (sourceId: string | null) => Promise<unknown>
       onPcm16Frame: (listener: (pcm16Base64: string) => void) => () => void
+      onScreenChunk: (listener: (chunkBase64: string) => void) => () => void
       onHotkeyAction: (listener: (payload: { action: "toggle_mute" | "toggle_deafen" | "push_to_talk" }) => void) => () => void
     }
   }

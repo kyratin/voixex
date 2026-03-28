@@ -4,6 +4,7 @@ node_modules/
 **/out/
 **/dist/
 **/release/
+primer_front/tsconfig.tsbuildinfo
 *.log
 backend_logs.txt
 .env

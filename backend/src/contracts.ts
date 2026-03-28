@@ -4,6 +4,7 @@ export type WsClientEvent =
   | { type: "set_mute"; muted: boolean }
   | { type: "set_deafen"; deafened: boolean }
   | { type: "set_profile"; displayName: string }
+  | { type: "set_screen_share"; active: boolean }
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
@@ -34,6 +35,13 @@ export type WsServerEvent =
         author: { clientId: string; displayName: string }
         body: string
         createdAt: string
+        attachments?: Array<{
+          id: string
+          name: string
+          mime: string
+          sizeBytes: number
+          url: string
+        }>
       }>
       nextCursor: string | null
     }
@@ -45,8 +53,16 @@ export type WsServerEvent =
         author: { clientId: string; displayName: string }
         body: string
         createdAt: string
+        attachments?: Array<{
+          id: string
+          name: string
+          mime: string
+          sizeBytes: number
+          url: string
+        }>
       }
     }
+  | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
   | { type: "pong"; ts: number }
   | { type: "error"; message: string }
 

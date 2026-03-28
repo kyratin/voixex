@@ -26,6 +26,7 @@ export type RealtimeState = {
   rosterByRoom: Record<string, RosterMember[]>
   lobby: RosterMember[]
   messagesByChannel: Record<string, ChatMessage[]>
+  activeScreenShareByRoom: Record<string, string | null>
   me: {
     clientId: string
     displayName: string
@@ -46,6 +47,13 @@ export type ChatMessage = {
   author: { clientId: string; displayName: string }
   body: string
   createdAt: string
+  attachments?: Array<{
+    id: string
+    name: string
+    mime: string
+    sizeBytes: number
+    url: string
+  }>
 }
 
 export class VoipClient {
@@ -59,6 +67,7 @@ export class VoipClient {
     rosterByRoom: {},
     lobby: [],
     messagesByChannel: {},
+    activeScreenShareByRoom: {},
     me: null,
     connection: { wsConnected: false, reconnecting: false }
   }
@@ -152,21 +161,38 @@ export class VoipClient {
     const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${this.authToken}` } })
     if (!res.ok) throw new Error("messages load failed")
     const body = (await res.json()) as { messages: ChatMessage[]; nextCursor: string | null }
-    this.state.messagesByChannel[channelId] = body.messages
+    this.state.messagesByChannel[channelId] = body.messages.map((m) => this.normalizeMessage(m))
     this.emit()
     return body
   }
 
-  async sendMessage(serverId: string, channelId: string, body: string) {
+  async sendMessage(serverId: string, channelId: string, body: string, attachmentIds?: string[]) {
     if (!this.authToken) throw new Error("not authorized")
     const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/channels/${channelId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.authToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ body })
+      body: JSON.stringify({ body, attachmentIds: attachmentIds ?? [] })
     })
     if (!res.ok) throw new Error("send message failed")
     const payload = (await res.json()) as { message: ChatMessage }
     return payload.message
+  }
+
+  async uploadAttachment(serverId: string, channelId: string, file: File) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/channels/${channelId}/attachments`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.authToken}`,
+        "x-file-name": file.name,
+        "x-file-mime": file.type || "application/octet-stream"
+      },
+      body: file
+    })
+    if (!res.ok) throw new Error("attachment upload failed")
+    return (await res.json()) as {
+      attachment: { id: string; name: string; mime: string; sizeBytes: number; url: string }
+    }
   }
 
   connectWs() {
@@ -194,6 +220,7 @@ export class VoipClient {
             member: { clientId: string; displayName: string; roomId: string | null; muted: boolean; deafened: boolean; speaking: boolean }
           }
         | { type: "chat_message"; message: ChatMessage }
+        | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
       if (data.type === "rooms_snapshot") {
         this.state.rooms = data.rooms
       } else if (data.type === "rooms_updated") {
@@ -222,7 +249,23 @@ export class VoipClient {
       } else if (data.type === "chat_message") {
         const channel = data.message.channelId
         const existing = this.state.messagesByChannel[channel] ?? []
-        this.state.messagesByChannel[channel] = [...existing, data.message].slice(-200)
+        this.state.messagesByChannel[channel] = [...existing, this.normalizeMessage(data.message)].slice(-200)
+      } else if (data.type === "screen_share_state") {
+        if (data.active && data.roomId) {
+          this.state.activeScreenShareByRoom[data.roomId] = data.clientId
+        } else if (!data.active) {
+          if (data.roomId) {
+            if (this.state.activeScreenShareByRoom[data.roomId] === data.clientId) {
+              this.state.activeScreenShareByRoom[data.roomId] = null
+            }
+          } else {
+            for (const rid of Object.keys(this.state.activeScreenShareByRoom)) {
+              if (this.state.activeScreenShareByRoom[rid] === data.clientId) {
+                this.state.activeScreenShareByRoom[rid] = null
+              }
+            }
+          }
+        }
       }
       this.emit()
     }
@@ -259,6 +302,10 @@ export class VoipClient {
 
   setDeafen(deafened: boolean) {
     this.sendWsEvent({ type: "set_deafen", deafened })
+  }
+
+  setScreenShare(active: boolean) {
+    this.sendWsEvent({ type: "set_screen_share", active })
   }
 
   toSidebarCategories(): ChannelCategory[] {
@@ -314,5 +361,21 @@ export class VoipClient {
       return
     }
     this.pendingWsMessages.push(message)
+  }
+
+  private normalizeMessage(message: ChatMessage): ChatMessage {
+    return {
+      ...message,
+      attachments: (message.attachments ?? []).map((attachment) => ({
+        ...attachment,
+        url: this.normalizeAttachmentUrl(attachment.url)
+      }))
+    }
+  }
+
+  private normalizeAttachmentUrl(url: string): string {
+    if (url.startsWith("http://") || url.startsWith("https://")) return url
+    if (url.startsWith("/")) return `${this.apiBase}${url}`
+    return `${this.apiBase}/${url}`
   }
 }

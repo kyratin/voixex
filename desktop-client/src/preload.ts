@@ -18,10 +18,18 @@ const electronVoice = {
     ipcRenderer.invoke("voice:setKeybinds", keybinds),
   clearKeybinds: () => ipcRenderer.invoke("voice:clearKeybinds"),
   sendPcm16Frame: (pcm16Base64: string) => ipcRenderer.invoke("voice:sendPcm16Frame", pcm16Base64),
+  sendScreenChunk: (chunkBase64: string) => ipcRenderer.invoke("voice:sendScreenChunk", chunkBase64),
+  listScreenSources: () => ipcRenderer.invoke("screenShare:listSources"),
+  setScreenSource: (sourceId: string | null) => ipcRenderer.invoke("screenShare:setSource", sourceId),
   onPcm16Frame: (listener: (pcm16Base64: string) => void) => {
     const handler = (_event: unknown, payload: string) => listener(payload)
     ipcRenderer.on("voice:pcm16Frame", handler)
     return () => ipcRenderer.removeListener("voice:pcm16Frame", handler)
+  },
+  onScreenChunk: (listener: (chunkBase64: string) => void) => {
+    const handler = (_event: unknown, payload: string) => listener(payload)
+    ipcRenderer.on("voice:screenChunk", handler)
+    return () => ipcRenderer.removeListener("voice:screenChunk", handler)
   },
   onHotkeyAction: (listener: (payload: { action: "toggle_mute" | "toggle_deafen" | "push_to_talk" }) => void) => {
     const handler = (_event: unknown, payload: { action: "toggle_mute" | "toggle_deafen" | "push_to_talk" }) => listener(payload)

@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Users, Send } from "lucide-react"
+import { Hash, Users, Send, Paperclip } from "lucide-react"
 import { useState, useRef, useEffect } from "react"
 
 export interface Message {
@@ -16,6 +16,13 @@ export interface Message {
   timestamp: Date
   isEdited?: boolean
   reactions?: { emoji: string; count: number; reacted: boolean }[]
+  attachments?: Array<{
+    id: string
+    name: string
+    mime: string
+    sizeBytes: number
+    url: string
+  }>
 }
 
 interface ChatAreaProps {
@@ -23,6 +30,7 @@ interface ChatAreaProps {
   channelType: "text" | "voice"
   messages: Message[]
   onSendMessage: (content: string) => void
+  onUploadAttachment?: (file: File) => Promise<void>
   showMemberList: boolean
   onToggleMemberList: () => void
   canSend?: boolean
@@ -33,11 +41,14 @@ export function ChatArea({
   channelType, 
   messages, 
   onSendMessage,
+  onUploadAttachment,
   showMemberList,
   onToggleMemberList,
   canSend = true
 }: ChatAreaProps) {
   const [messageInput, setMessageInput] = useState("")
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -57,6 +68,24 @@ export function ChatArea({
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       handleSend()
+    }
+  }
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  const handleSelectAttachment = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file || !onUploadAttachment) return
+    try {
+      setUploading(true)
+      await onUploadAttachment(file)
+    } finally {
+      setUploading(false)
+      event.target.value = ""
     }
   }
 
@@ -141,6 +170,28 @@ export function ChatArea({
                     </span>
                   </div>
                   <p className="text-sm text-foreground break-words">{message.content}</p>
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="mt-2 space-y-2">
+                      {message.attachments.map((attachment) => (
+                        <div key={attachment.id} className="rounded border border-border bg-card p-2">
+                          <div className="mb-1 text-xs text-muted-foreground">
+                            {attachment.name} ({formatFileSize(attachment.sizeBytes)})
+                          </div>
+                          {attachment.mime.startsWith("image/") ? (
+                            <img src={attachment.url} alt={attachment.name} className="max-h-56 rounded border border-border" />
+                          ) : attachment.mime.startsWith("video/") ? (
+                            <video controls className="max-h-56 w-full rounded border border-border" src={attachment.url} />
+                          ) : attachment.mime.startsWith("audio/") ? (
+                            <audio controls className="w-full" src={attachment.url} />
+                          ) : (
+                            <a href={attachment.url} target="_blank" rel="noreferrer" className="text-xs text-primary underline">
+                              Download attachment
+                            </a>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   
                   {/* Reactions */}
                   {message.reactions && message.reactions.length > 0 && (
@@ -170,6 +221,21 @@ export function ChatArea({
       <div className="shrink-0 bg-card p-3">
         <div className="flex items-center gap-2">
           <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={handleSelectAttachment}
+            disabled={!canSend || uploading}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!canSend || uploading}
+            className="rounded border border-border px-2 py-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+            title="Attach file"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
+          <input
             type="text"
             value={messageInput}
             onChange={(e) => setMessageInput(e.target.value)}
@@ -178,7 +244,7 @@ export function ChatArea({
             disabled={!canSend}
             className="flex-1 rounded border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
-          <button 
+          <button
             onClick={handleSend}
             disabled={!messageInput.trim() || !canSend}
             className="rounded border border-border bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
