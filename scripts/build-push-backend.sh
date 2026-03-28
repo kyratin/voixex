@@ -18,7 +18,7 @@ echo "Pushing: $IMAGE"
 docker push "$IMAGE"
 
 echo
-echo "On kyratin.ru (after SSH is up), in the directory with docker-compose.yml and .env:"
+echo "On the VPS, in the directory with docker-compose.yml and .env:"
 echo "  export VOIP_BACKEND_IMAGE=$IMAGE   # or put in .env"
 echo "  docker compose pull"
 echo "  docker compose up -d"
