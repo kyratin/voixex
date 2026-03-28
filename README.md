@@ -32,6 +32,8 @@ Ports (default):
 - `PUBLIC_UDP_HOST`: public VPS IP/domain clients should use for UDP.
 - `BACKEND_HTTP_PORT`: external HTTP/WS port.
 - `BACKEND_UDP_PORT`: external UDP media port.
+- `MEDIA_RATE_LIMIT_PER_SEC`: UDP packets per client per second (default `6000`; keep high enough for screen-share relay).
+- `UPLOAD_MAX_MB` / uploads path: chat attachments stored under `UPLOAD_DIR` inside the data volume (`/data/uploads` in compose).
 
 ## Superuser / Admin
 

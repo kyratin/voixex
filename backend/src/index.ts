@@ -3,6 +3,10 @@ import cors from "@fastify/cors"
 import websocket from "@fastify/websocket"
 import bcrypt from "bcryptjs"
 import { randomUUID, randomBytes } from "node:crypto"
+import { createReadStream, createWriteStream, mkdirSync, statSync } from "node:fs"
+import { basename, dirname, extname, join, resolve } from "node:path"
+import { pipeline } from "node:stream/promises"
+import { Readable } from "node:stream"
 import { z } from "zod"
 import { config } from "./config.js"
 import { initDb } from "./db.js"
@@ -14,11 +18,17 @@ const app = Fastify({ logger: true })
 await app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  allowedHeaders: ["Content-Type", "Authorization", "x-file-name", "x-file-mime"]
 })
 await app.register(websocket)
+app.addContentTypeParser(
+  /^application\/octet-stream$|^image\/|^audio\/|^video\//i,
+  { parseAs: "buffer", bodyLimit: config.uploadMaxMb * 1024 * 1024 },
+  (_req, body, done) => done(null, body)
+)
 const db = initDb(config.dbPath)
 const clients = new Map<string, Set<WebSocket>>()
+const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
 
 type PermissionKey = "manage_server" | "manage_channels" | "manage_roles" | "manage_chat"
 type PermissionMap = Record<PermissionKey, boolean>
@@ -34,6 +44,10 @@ function emitToServer(serverId: string, event: WsServerEvent) {
   for (const ws of clients.get(serverId) ?? []) {
     if (ws.readyState === ws.OPEN) ws.send(payload)
   }
+}
+
+function emitScreenShareState(serverId: string, clientId: string, roomId: string | null, active: boolean) {
+  emitToServer(serverId, { type: "screen_share_state", clientId, roomId, active })
 }
 
 function ensureAdminRole(serverId: string) {
@@ -109,6 +123,76 @@ function getRooms(serverId: string) {
     name: string
     kind: "voice" | "text"
   }>
+}
+
+function isLobbyVoiceRoom(serverId: string, roomId: string) {
+  const row = db
+    .prepare("SELECT kind, name FROM rooms WHERE server_id = ? AND id = ? LIMIT 1")
+    .get(serverId, roomId) as { kind: "voice" | "text"; name: string } | undefined
+  if (!row) return false
+  return row.kind === "voice" && row.name.toLowerCase() === "lobby"
+}
+
+type AttachmentRow = {
+  id: string
+  message_id: string | null
+  server_id: string
+  channel_id: string
+  uploader_client_id: string
+  storage_path: string
+  original_name: string
+  mime: string
+  size_bytes: number
+}
+
+const ATTACHMENT_ALLOWED_MIME_PREFIXES = ["audio/", "image/", "video/"]
+const ATTACHMENT_ALLOWED_MIME_EXACT = new Set(["image/gif"])
+
+function isAllowedAttachmentMime(mime: string) {
+  if (ATTACHMENT_ALLOWED_MIME_EXACT.has(mime)) return true
+  return ATTACHMENT_ALLOWED_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))
+}
+
+function sanitizeFilename(input: string) {
+  const base = basename(input).replace(/[^a-zA-Z0-9._-]/g, "_")
+  return base.length > 0 ? base : "file"
+}
+
+function attachmentUrl(serverId: string, attachmentId: string, token: string) {
+  return `/v1/servers/${serverId}/attachments/${attachmentId}?token=${encodeURIComponent(token)}`
+}
+
+function getAttachmentsByMessageIds(serverId: string, messageIds: string[], token: string) {
+  if (messageIds.length === 0) return new Map<string, Array<{ id: string; name: string; mime: string; sizeBytes: number; url: string }>>()
+  const placeholders = messageIds.map(() => "?").join(",")
+  const rows = db
+    .prepare(
+      `SELECT id, message_id, server_id, original_name, mime, size_bytes
+       FROM message_attachments
+       WHERE server_id = ? AND message_id IN (${placeholders})
+       ORDER BY created_at ASC`
+    )
+    .all(serverId, ...messageIds) as Array<{
+    id: string
+    message_id: string
+    server_id: string
+    original_name: string
+    mime: string
+    size_bytes: number
+  }>
+  const out = new Map<string, Array<{ id: string; name: string; mime: string; sizeBytes: number; url: string }>>()
+  for (const row of rows) {
+    const list = out.get(row.message_id) ?? []
+    list.push({
+      id: row.id,
+      name: row.original_name,
+      mime: row.mime,
+      sizeBytes: row.size_bytes,
+      url: attachmentUrl(row.server_id, row.id, token)
+    })
+    out.set(row.message_id, list)
+  }
+  return out
 }
 
 function getMemberSnapshot(serverId: string, clientId: string) {
@@ -348,7 +432,11 @@ app.post("/v1/servers/:serverId/join", async (req, rep) => {
 
 app.addHook("preHandler", async (req, rep) => {
   if (!req.url.startsWith("/v1/servers/") || req.url.includes("/join")) return
-  const token = req.headers.authorization?.replace("Bearer ", "")
+  let token = req.headers.authorization?.replace("Bearer ", "")
+  if (!token && req.method === "GET" && req.url.includes("/attachments/")) {
+    const url = new URL(req.url, "http://localhost")
+    token = url.searchParams.get("token") ?? undefined
+  }
   if (!token) return rep.code(401).send({ message: "missing auth token" })
   const payload = verifyToken(token, config.tokenSecret)
   if (!payload || payload.sub !== "auth") return rep.code(401).send({ message: "invalid token" })
@@ -495,9 +583,107 @@ app.get("/v1/servers/:serverId/rooms", async (req, rep) => {
   return rep.send({ rooms: getRooms(params.serverId) })
 })
 
+app.post("/v1/servers/:serverId/channels/:channelId/attachments", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), channelId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  const token = req.headers.authorization?.replace("Bearer ", "") ?? ""
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const channel = db
+    .prepare("SELECT id, kind FROM rooms WHERE id = ? AND server_id = ?")
+    .get(params.channelId, params.serverId) as { id: string; kind: "voice" | "text" } | undefined
+  if (!channel || channel.kind !== "text") return rep.code(400).send({ message: "attachments allowed only in text channels" })
+
+  const mime = String(req.headers["x-file-mime"] ?? "").toLowerCase()
+  const originalName = String(req.headers["x-file-name"] ?? "upload.bin")
+  if (!mime || !isAllowedAttachmentMime(mime)) {
+    return rep.code(400).send({ message: "unsupported file type" })
+  }
+  const maxBytes = config.uploadMaxMb * 1024 * 1024
+  const rawBody = req.body
+  const chunks: Buffer[] = []
+  let size = 0
+  if (Buffer.isBuffer(rawBody)) {
+    size = rawBody.length
+    if (size > maxBytes) {
+      return rep.code(400).send({ message: `file too large, max ${config.uploadMaxMb}MB` })
+    }
+    chunks.push(rawBody)
+  } else {
+    for await (const chunk of req.raw) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += buf.length
+      if (size > maxBytes) {
+        return rep.code(400).send({ message: `file too large, max ${config.uploadMaxMb}MB` })
+      }
+      chunks.push(buf)
+    }
+  }
+  if (size === 0) return rep.code(400).send({ message: "file is required" })
+
+  const attachmentId = randomUUID()
+  const safeName = sanitizeFilename(originalName)
+  const ext = extname(safeName) || ".bin"
+  const relPath = join(params.serverId, params.channelId, `${attachmentId}${ext}`)
+  const absPath = resolve(config.uploadDir, relPath)
+  if (!absPath.startsWith(resolve(config.uploadDir))) {
+    return rep.code(400).send({ message: "invalid file path" })
+  }
+  mkdirSync(dirname(absPath), { recursive: true })
+  const stream = createWriteStream(absPath)
+  await pipeline(Readable.from(chunks), stream)
+  const writtenSize = statSync(absPath).size
+
+  db.prepare(
+    `INSERT INTO message_attachments(
+      id, message_id, server_id, channel_id, uploader_client_id, storage_path, original_name, mime, size_bytes, width, height, duration_ms
+    ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`
+  ).run(attachmentId, params.serverId, params.channelId, auth.clientId, absPath, safeName, mime, writtenSize)
+  app.log.info(
+    { serverId: params.serverId, channelId: params.channelId, attachmentId, clientId: auth.clientId, mime, sizeBytes: writtenSize },
+    "chat attachment uploaded"
+  )
+
+  return rep.send({
+    attachment: {
+      id: attachmentId,
+      name: safeName,
+      mime,
+      sizeBytes: writtenSize,
+      url: attachmentUrl(params.serverId, attachmentId, token)
+    }
+  })
+})
+
+app.get("/v1/servers/:serverId/attachments/:attachmentId", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), attachmentId: z.string().uuid() }).parse(req.params)
+  const query = z.object({ token: z.string().optional() }).parse(req.query)
+  const bearerToken = req.headers.authorization?.replace("Bearer ", "")
+  const token = bearerToken || query.token
+  if (!token) return rep.code(401).send({ message: "missing auth token" })
+  const payload = verifyToken(token, config.tokenSecret)
+  if (!payload || payload.sub !== "auth") return rep.code(401).send({ message: "invalid token" })
+  if (payload.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const row = db
+    .prepare(
+      `SELECT id, message_id, server_id, channel_id, uploader_client_id, storage_path, original_name, mime, size_bytes
+       FROM message_attachments
+       WHERE id = ? AND server_id = ?`
+    )
+    .get(params.attachmentId, params.serverId) as AttachmentRow | undefined
+  if (!row) return rep.code(404).send({ message: "attachment not found" })
+  const safeRoot = resolve(config.uploadDir)
+  const absPath = resolve(row.storage_path)
+  if (!absPath.startsWith(safeRoot)) return rep.code(403).send({ message: "forbidden" })
+  rep.header("Content-Type", row.mime)
+  rep.header("Content-Length", String(row.size_bytes))
+  rep.header("Content-Disposition", `inline; filename=\"${row.original_name}\"`)
+  return rep.send(createReadStream(absPath))
+})
+
 app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), channelId: z.string().min(1) }).parse(req.params)
   const query = z.object({ limit: z.coerce.number().min(1).max(100).default(50), cursor: z.string().optional() }).parse(req.query)
+  const token = req.headers.authorization?.replace("Bearer ", "") ?? ""
   const auth = (req as any).auth as { serverId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   const cursorClause = query.cursor ? "AND m.id < ?" : ""
@@ -517,13 +703,16 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
       client_id: string
       display_name: string
     }>
+  const messageIds = rows.map((row) => row.id)
+  const attachmentsByMessageId = getAttachmentsByMessageIds(params.serverId, messageIds, token)
   const messages = rows
     .map((row) => ({
       id: row.id,
       channelId: row.channel_id,
       author: { clientId: row.client_id, displayName: row.display_name },
       body: row.body,
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      attachments: attachmentsByMessageId.get(row.id) ?? []
     }))
     .reverse()
   const nextCursor = rows.length === query.limit ? rows[rows.length - 1].id : null
@@ -532,21 +721,48 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
 
 app.post("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), channelId: z.string().min(1) }).parse(req.params)
-  const body = z.object({ body: z.string().min(1).max(2000) }).parse(req.body)
+  const body = z
+    .object({
+      body: z.string().max(2000).optional().default(""),
+      attachmentIds: z.array(z.string().uuid()).max(10).optional().default([])
+    })
+    .parse(req.body)
+  const token = req.headers.authorization?.replace("Bearer ", "") ?? ""
   const auth = (req as any).auth as { serverId: string; clientId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   const channel = db
     .prepare("SELECT id, kind FROM rooms WHERE id = ? AND server_id = ?")
     .get(params.channelId, params.serverId) as { id: string; kind: "voice" | "text" } | undefined
   if (!channel || channel.kind !== "text") return rep.code(400).send({ message: "chat allowed only in text channels" })
+  if (body.body.trim().length === 0 && body.attachmentIds.length === 0) {
+    return rep.code(400).send({ message: "message body or attachments required" })
+  }
+  if (body.attachmentIds.length > 0) {
+    const placeholders = body.attachmentIds.map(() => "?").join(",")
+    const rows = db
+      .prepare(
+        `SELECT id FROM message_attachments
+         WHERE server_id = ? AND channel_id = ? AND uploader_client_id = ? AND message_id IS NULL AND id IN (${placeholders})`
+      )
+      .all(params.serverId, params.channelId, auth.clientId, ...body.attachmentIds) as Array<{ id: string }>
+    if (rows.length !== body.attachmentIds.length) {
+      return rep.code(400).send({ message: "invalid attachmentIds" })
+    }
+  }
   const id = randomUUID()
   db.prepare("INSERT INTO messages(id, server_id, channel_id, client_id, body) VALUES (?, ?, ?, ?, ?)").run(
     id,
     params.serverId,
     params.channelId,
     auth.clientId,
-    body.body
+    body.body.trim()
   )
+  if (body.attachmentIds.length > 0) {
+    const update = db.prepare("UPDATE message_attachments SET message_id = ? WHERE server_id = ? AND id = ?")
+    for (const attachmentId of body.attachmentIds) {
+      update.run(id, params.serverId, attachmentId)
+    }
+  }
   const member = db
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
     .get(params.serverId, auth.clientId) as { display_name: string } | undefined
@@ -554,8 +770,9 @@ app.post("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) 
     id,
     channelId: params.channelId,
     author: { clientId: auth.clientId, displayName: member?.display_name ?? auth.clientId },
-    body: body.body,
-    createdAt: new Date().toISOString()
+    body: body.body.trim(),
+    createdAt: new Date().toISOString(),
+    attachments: getAttachmentsByMessageIds(params.serverId, [id], token).get(id) ?? []
   }
   emitToServer(params.serverId, { type: "chat_message", message })
   return rep.send({ message })
@@ -576,18 +793,24 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   socket.send(JSON.stringify({ type: "hello", clientId: auth.clientId, serverId: auth.serverId } satisfies WsServerEvent))
   socket.send(JSON.stringify({ type: "rooms_snapshot", rooms: getRooms(auth.serverId) } satisfies WsServerEvent))
   socket.send(JSON.stringify({ type: "roster_snapshot", roomId: null, members: getRoster(auth.serverId, null) } satisfies WsServerEvent))
+  for (const [clientId, state] of screenShareStateByClient.entries()) {
+    if (state.serverId !== auth.serverId || !state.active) continue
+    socket.send(JSON.stringify({ type: "screen_share_state", clientId, roomId: state.roomId, active: true } satisfies WsServerEvent))
+  }
 
   socket.onmessage = (msg: { data: unknown }) => {
     try {
       const event = JSON.parse(String(msg.data)) as WsClientEvent
       if (event.type === "join_room") {
-        db.prepare("UPDATE member_state SET room_id = ?, speaking = 0, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
-          event.roomId,
-          auth.serverId,
-          auth.clientId
-        )
+        const forceMutedInLobby = isLobbyVoiceRoom(auth.serverId, event.roomId)
+        db.prepare(
+          "UPDATE member_state SET room_id = ?, speaking = 0, muted = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?"
+        ).run(event.roomId, forceMutedInLobby ? 1 : 0, auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, event.roomId)
         setMemberSpeaking(auth.clientId, false)
+        setMemberFlags(auth.clientId, forceMutedInLobby, false)
+        screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId: event.roomId, active: false })
+        emitScreenShareState(auth.serverId, auth.clientId, event.roomId, false)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           emitToServer(auth.serverId, {
@@ -607,6 +830,8 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)
         setMemberSpeaking(auth.clientId, false)
+        screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId: null, active: false })
+        emitScreenShareState(auth.serverId, auth.clientId, null, false)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           emitToServer(auth.serverId, {
@@ -622,7 +847,12 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           })
         }
       } else if (event.type === "set_mute") {
-        db.prepare("UPDATE member_state SET muted = ? WHERE server_id = ? AND client_id = ?").run(event.muted ? 1 : 0, auth.serverId, auth.clientId)
+        const room = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        const forceMutedInLobby = Boolean(room?.room_id && isLobbyVoiceRoom(auth.serverId, room.room_id))
+        const effectiveMuted = forceMutedInLobby ? true : event.muted
+        db.prepare("UPDATE member_state SET muted = ? WHERE server_id = ? AND client_id = ?").run(effectiveMuted ? 1 : 0, auth.serverId, auth.clientId)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           setMemberFlags(auth.clientId, Boolean(snap.muted), Boolean(snap.deafened))
@@ -677,6 +907,14 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         }
       } else if (event.type === "ping") {
         socket.send(JSON.stringify({ type: "pong", ts: event.ts } satisfies WsServerEvent))
+      } else if (event.type === "set_screen_share") {
+        const room = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        const roomId = room?.room_id ?? null
+        const active = Boolean(event.active && roomId)
+        screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId, active })
+        emitScreenShareState(auth.serverId, auth.clientId, roomId, active)
       }
     } catch {
       socket.send(JSON.stringify({ type: "error", message: "bad ws message" } satisfies WsServerEvent))
@@ -687,6 +925,11 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     const snap = getMemberSnapshot(auth.serverId, auth.clientId)
     db.prepare("DELETE FROM member_state WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
     removeMember(auth.clientId)
+    const shareSnap = screenShareStateByClient.get(auth.clientId)
+    screenShareStateByClient.delete(auth.clientId)
+    const shareRoomEmit =
+      shareSnap?.active && shareSnap.roomId ? shareSnap.roomId : null
+    emitScreenShareState(auth.serverId, auth.clientId, shareRoomEmit, false)
     if (snap) {
       emitToServer(auth.serverId, {
         type: "member_updated",
