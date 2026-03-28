@@ -1280,6 +1280,11 @@ export default function VoIPApp() {
     // Larger timeslice => fewer MSE appendBuffer cycles and less "chunky" playback (slightly higher latency).
     recorder.start(900)
     screenMediaRecorderRef.current = recorder
+    // Force periodic fresh WebM init/keyframe cadence for late joiners and stuck decoders.
+    // restartScreenRecorderForLateViewers has debounce and safe guards.
+    screenShareTimerRef.current = setInterval(() => {
+      restartScreenRecorderForLateViewers()
+    }, 5000)
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => {
         void stopScreenShare()
