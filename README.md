@@ -8,16 +8,28 @@ This branch contains the backend-only VoIP server package for VPS deployment.
 - `docker-compose.yml`: production-oriented compose that pulls a prebuilt image.
 - `.env.example`: required runtime environment variables.
 
+## Important: do not build the image on the VPS
+
+Building on a small VPS (`docker build ./backend`) loads CPU/RAM heavily and can **freeze or crash the machine**. Always **build and push** the image from your PC or CI, then on the server run **`docker compose pull`** only.
+
+1. On your machine (with Docker): `./scripts/build-push-backend.sh`  
+   (requires `docker login registry.gitlab.com` once — enable **Container Registry** on the GitLab project).
+2. On the VPS: only `docker compose pull` and `docker compose up -d` — **no** `docker build`.
+
 ## Quick Install on VPS
 
 ```bash
 git clone <your-repo-url> voip-server
 cd voip-server
+git checkout server
 cp .env.example .env
 # edit .env values (minimum: TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST)
+# optional: VOIP_BACKEND_IMAGE=registry.gitlab.com/superkokkon/voixex/voip-backend:latest
 docker compose pull
 docker compose up -d
 ```
+
+You only need `docker-compose.yml`, `.env`, and optionally this README — **not** a `docker build` context on the server.
 
 Ports (default):
 
@@ -26,7 +38,7 @@ Ports (default):
 
 ## Environment
 
-- `VOIP_BACKEND_IMAGE`: container image tag to pull (default `ghcr.io/kyratin/voip-backend:latest`).
+- `VOIP_BACKEND_IMAGE`: container image tag to pull (default `registry.gitlab.com/superkokkon/voixex/voip-backend:latest`).
 - `TOKEN_SECRET`: required signing secret for auth/media tokens.
 - `SUPERUSER_PASSWORD`: required password to grant the `admin` role on join.
 - `PUBLIC_UDP_HOST`: public VPS IP/domain clients should use for UDP.
@@ -43,17 +55,18 @@ Ports (default):
 
 ## Build and Publish Your Own Image
 
-From repository root:
+From repository root (same as `./scripts/build-push-backend.sh`):
 
 ```bash
-docker build -t your-registry/voip-backend:latest ./backend
-docker push your-registry/voip-backend:latest
+chmod +x ./scripts/build-push-backend.sh
+./scripts/build-push-backend.sh
+# or: IMAGE=your-registry.example/voip-backend:1.2.3 ./scripts/build-push-backend.sh
 ```
 
-Then update `.env`:
+Then on the VPS, set in `.env`:
 
 ```env
-VOIP_BACKEND_IMAGE=your-registry/voip-backend:latest
+VOIP_BACKEND_IMAGE=registry.gitlab.com/superkokkon/voixex/voip-backend:latest
 ```
 
 - If microphone/headphones list is empty, allow microphone access in Windows privacy settings and restart the app.

@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ${VOIP_BACKEND_IMAGE:-ghcr.io/kyratin/voip-backend:latest}
+    image: ${VOIP_BACKEND_IMAGE:-registry.gitlab.com/superkokkon/voixex/voip-backend:latest}
     restart: unless-stopped
     environment:
       HOST: 0.0.0.0
