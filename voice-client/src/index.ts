@@ -3,6 +3,8 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 
 const MEDIA_MAGIC = Buffer.from([0x56, 0x50, 0x01])
 const MEDIA_CIPHER = "aes-256-gcm"
+const MEDIA_KIND_AUDIO = 0
+const MEDIA_KIND_SCREEN = 1
 
 type VoiceClientOptions = {
   host: string
@@ -49,7 +51,9 @@ export class VoiceEngine {
   ]
   private selectedDevices: AudioDeviceSelection = { inputId: null, outputId: null }
   private onPcm16Frame: ((frame: Buffer) => void) | null = null
+  private onScreenChunk: ((chunk: Buffer) => void) | null = null
   private probeTimer: NodeJS.Timeout | null = null
+  private lastHelloAtMs = 0
 
   constructor(opts: VoiceClientOptions) {
     this.key = Buffer.from(hkdfSync("sha256", Buffer.from(opts.mediaSeed, "base64"), Buffer.from("voip-salt"), Buffer.from("media-key"), 32))
@@ -61,7 +65,7 @@ export class VoiceEngine {
   async connect() {
     if (this.connected) return
     await new Promise<void>((resolve) => this.socket.bind(0, "0.0.0.0", () => resolve()))
-    this.socket.send(Buffer.from(`HELLO ${this.mediaToken}`), this.port, this.host)
+    this.sendHello()
     this.socket.on("message", (buf) => {
       if (this.deafened) return
       const frame = this.decrypt(buf)
@@ -82,8 +86,10 @@ export class VoiceEngine {
         }
         this.lastTransitMs = transit
       }
-      if (frame.payload.length > 0) {
+      if (frame.kind === MEDIA_KIND_AUDIO && frame.payload.length > 0) {
         this.onPcm16Frame?.(frame.payload)
+      } else if (frame.kind === MEDIA_KIND_SCREEN && frame.payload.length > 0) {
+        this.onScreenChunk?.(frame.payload)
       }
     })
     this.connected = true
@@ -91,6 +97,7 @@ export class VoiceEngine {
 
   joinRoom(roomId: string) {
     this.roomId = roomId
+    this.sendHello()
     this.ensureProbeTimer()
   }
 
@@ -109,7 +116,16 @@ export class VoiceEngine {
 
   sendPcm16Frame(frame: Buffer) {
     if (!this.connected || !this.roomId || this.muted) return
-    const packet = this.encrypt(this.roomId, frame)
+    if (Date.now() - this.lastHelloAtMs > 5000) this.sendHello()
+    const packet = this.encrypt(this.roomId, frame, MEDIA_KIND_AUDIO)
+    this.socket.send(packet, this.port, this.host)
+    this.txPackets += 1
+  }
+
+  sendScreenChunk(chunk: Buffer) {
+    if (!this.connected || !this.roomId) return
+    if (Date.now() - this.lastHelloAtMs > 5000) this.sendHello()
+    const packet = this.encrypt(this.roomId, chunk, MEDIA_KIND_SCREEN)
     this.socket.send(packet, this.port, this.host)
     this.txPackets += 1
   }
@@ -185,12 +201,17 @@ export class VoiceEngine {
     this.onPcm16Frame = listener
   }
 
+  setOnScreenChunk(listener: ((chunk: Buffer) => void) | null) {
+    this.onScreenChunk = listener
+  }
+
   private ensureProbeTimer() {
     if (this.probeTimer) return
     this.probeTimer = setInterval(() => {
       if (!this.connected || !this.roomId) return
+      if (Date.now() - this.lastHelloAtMs > 5000) this.sendHello()
       const silence = Buffer.alloc(960 * 2)
-      const packet = this.encrypt(this.roomId, silence)
+      const packet = this.encrypt(this.roomId, silence, MEDIA_KIND_AUDIO)
       this.socket.send(packet, this.port, this.host)
       this.txPackets += 1
     }, 1000)
@@ -202,14 +223,21 @@ export class VoiceEngine {
     this.probeTimer = null
   }
 
-  private encrypt(roomId: string, payload: Buffer): Buffer {
+  private sendHello() {
+    if (!this.connected) return
+    this.socket.send(Buffer.from(`HELLO ${this.mediaToken}`), this.port, this.host)
+    this.lastHelloAtMs = Date.now()
+  }
+
+  private encrypt(roomId: string, payload: Buffer, kind: number): Buffer {
     const room = Buffer.from(roomId)
     const nonce = Buffer.alloc(12)
     nonce.writeUInt32BE(Date.now() >>> 0, 0)
     nonce.writeUInt32BE(this.seqOut >>> 0, 4)
     randomBytes(4).copy(nonce, 8)
     const cipher = createCipheriv(MEDIA_CIPHER, this.key, nonce, { authTagLength: 16 })
-    const encrypted = Buffer.concat([cipher.update(payload), cipher.final()])
+    const plaintext = Buffer.concat([Buffer.from([kind & 0xff]), payload])
+    const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()])
     const tag = cipher.getAuthTag()
     const header = Buffer.alloc(3 + 4 + 4 + 1 + room.length + 12 + 2)
     MEDIA_MAGIC.copy(header, 0)
@@ -238,8 +266,11 @@ export class VoiceEngine {
     const tag = packet.subarray(encEnd)
     const decipher = createDecipheriv(MEDIA_CIPHER, this.key, nonce, { authTagLength: 16 })
     decipher.setAuthTag(tag)
-    const payload = Buffer.concat([decipher.update(encrypted), decipher.final()])
-    return { seq: packet.readUInt32BE(3), ts: packet.readUInt32BE(7), roomId: packet.subarray(roomStart, roomEnd).toString(), payload }
+    const plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()])
+    if (plaintext.length < 1) return null
+    const kind = plaintext.readUInt8(0)
+    const payload = plaintext.subarray(1)
+    return { seq: packet.readUInt32BE(3), ts: packet.readUInt32BE(7), roomId: packet.subarray(roomStart, roomEnd).toString(), kind, payload }
   }
 }
 

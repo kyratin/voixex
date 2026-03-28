@@ -116,6 +116,27 @@ export function initDb(dbPath: string) {
     CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel_id, created_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_server_created ON messages(server_id, created_at DESC, id DESC);
 
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NULL,
+      server_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      uploader_client_id TEXT NOT NULL,
+      storage_path TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      mime TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      width INTEGER NULL,
+      height INTEGER NULL,
+      duration_ms INTEGER NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY(message_id) REFERENCES messages(id),
+      FOREIGN KEY(server_id) REFERENCES servers(id),
+      FOREIGN KEY(channel_id) REFERENCES rooms(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id ON message_attachments(message_id);
+    CREATE INDEX IF NOT EXISTS idx_message_attachments_server_channel ON message_attachments(server_id, channel_id, created_at DESC);
+
     -- Backward compatibility for older DB file: ensure display_name exists in member_state.
     -- If it exists, keep it unused by new code.
   `)

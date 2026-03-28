@@ -51,6 +51,7 @@ export default function VoIPApp() {
     playbackSampleRate: number
     bufferedSamples: number
     unsubscribeIncoming: (() => void) | null
+    unsubscribeScreenChunk: (() => void) | null
     lastIncomingAudioAtMs: number
     playbackIdleTimer: ReturnType<typeof setInterval> | null
   }
@@ -111,6 +112,31 @@ export default function VoIPApp() {
   })
   const [canManageServer, setCanManageServer] = useState(false)
   const [savedServers, setSavedServers] = useState<SavedServerProfile[]>([])
+  const [isScreenSharing, setIsScreenSharing] = useState(false)
+  const [activeScreenSharerName, setActiveScreenSharerName] = useState("")
+  const [screenImageUrl, setScreenImageUrl] = useState<string | null>(null)
+  const [screenVideoUrl, setScreenVideoUrl] = useState<string | null>(null)
+  const [localScreenPreviewUrl, setLocalScreenPreviewUrl] = useState<string | null>(null)
+  const [screenSources, setScreenSources] = useState<Array<{ id: string; name: string }>>([])
+  const [selectedScreenSourceId, setSelectedScreenSourceId] = useState<string | null>(null)
+  const [screenResolution, setScreenResolution] = useState("1280x720")
+  const [screenFps, setScreenFps] = useState(30)
+  const [screenBitrateKbps, setScreenBitrateKbps] = useState(3500)
+  const [showingStreamWindow, setShowingStreamWindow] = useState(false)
+  const screenShareTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const screenCaptureStreamRef = useRef<MediaStream | null>(null)
+  const screenAssembleRef = useRef(new Map<number, { total: number; parts: Uint8Array[]; received: number; ts: number; format: "jpeg" | "webp" | "webm" }>())
+  const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const screenChunkSeqRef = useRef(1)
+  const localPreviewVideoRef = useRef<HTMLVideoElement | null>(null)
+  const remoteStreamVideoRef = useRef<HTMLVideoElement | null>(null)
+  const remoteMediaSourceRef = useRef<MediaSource | null>(null)
+  const remoteSourceBufferRef = useRef<SourceBuffer | null>(null)
+  const remoteAppendQueueRef = useRef<ArrayBuffer[]>([])
+  const remoteMseUpdateEndRef = useRef<(() => void) | null>(null)
+  const screenEncodeInFlightRef = useRef(false)
+  const streamWindowRef = useRef<Window | null>(null)
+  const lastLocalPreviewUpdateAtRef = useRef(0)
   const client = useMemo(() => new VoipClient(), [])
   const voicePipelineRef = useRef<VoicePipelineRuntime | null>(null)
   const mutedRef = useRef(isMuted)
@@ -171,12 +197,34 @@ export default function VoIPApp() {
           id: m.id,
           author: { id: m.author.clientId, name: m.author.displayName, avatar: m.author.displayName.slice(0, 1).toUpperCase() || "U" },
           content: m.body,
-          timestamp: new Date(m.createdAt)
+          timestamp: new Date(m.createdAt),
+          attachments: m.attachments
         }))
       )
+      const activeSharerId = currentVoiceChannel ? state.activeScreenShareByRoom[currentVoiceChannel] : null
+      if (activeSharerId) {
+        const inLobby = state.lobby.find((u) => u.clientId === activeSharerId)
+        if (inLobby) {
+          setActiveScreenSharerName(inLobby.displayName)
+        } else {
+          let name = activeSharerId
+          for (const users of Object.values(state.rosterByRoom)) {
+            const found = users.find((u) => u.clientId === activeSharerId)
+            if (found) {
+              name = found.displayName
+              break
+            }
+          }
+          setActiveScreenSharerName(name)
+        }
+      } else {
+        setActiveScreenSharerName("")
+      }
     })
-    return unsubscribe
-  }, [client, activeChannelId])
+    return () => {
+      unsubscribe()
+    }
+  }, [client, activeChannelId, currentVoiceChannel])
 
   useEffect(() => {
     const raw = localStorage.getItem("voixex-saved-servers")
@@ -287,6 +335,7 @@ export default function VoIPApp() {
     const runtime = voicePipelineRef.current
     if (!runtime) return
     runtime.unsubscribeIncoming?.()
+    runtime.unsubscribeScreenChunk?.()
     runtime.captureNode.disconnect()
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
@@ -321,6 +370,116 @@ export default function VoIPApp() {
       bytes[i] = raw.charCodeAt(i)
     }
     return new Int16Array(bytes.buffer)
+  }
+
+  const encodeBytesBase64 = (bytes: Uint8Array) => {
+    let out = ""
+    const chunk = 0x8000
+    for (let i = 0; i < bytes.length; i += chunk) {
+      out += String.fromCharCode(...bytes.subarray(i, i + chunk))
+    }
+    return btoa(out)
+  }
+
+  const decodeBytesBase64 = (payload: string) => {
+    const raw = atob(payload)
+    const bytes = new Uint8Array(raw.length)
+    for (let i = 0; i < raw.length; i += 1) {
+      bytes[i] = raw.charCodeAt(i)
+    }
+    return bytes
+  }
+
+  const resetRemoteStreamPlayback = () => {
+    remoteAppendQueueRef.current = []
+    const sb = remoteSourceBufferRef.current
+    if (sb && remoteMseUpdateEndRef.current) {
+      try {
+        sb.removeEventListener("updateend", remoteMseUpdateEndRef.current)
+      } catch {
+        /* ignore */
+      }
+    }
+    remoteMseUpdateEndRef.current = null
+    remoteSourceBufferRef.current = null
+    const ms = remoteMediaSourceRef.current
+    remoteMediaSourceRef.current = null
+    if (ms) {
+      try {
+        if (ms.readyState === "open") ms.endOfStream()
+      } catch {
+        /* ignore */
+      }
+    }
+    setScreenVideoUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
+  }
+
+  const pushRemoteVideoChunk = (chunk: Uint8Array) => {
+    const buf =
+      chunk.buffer instanceof ArrayBuffer && chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
+        ? chunk.buffer
+        : chunk.slice().buffer
+
+    const drainRemoteMse = () => {
+      const sbuf = remoteSourceBufferRef.current
+      if (!sbuf || sbuf.updating) return
+      const q = remoteAppendQueueRef.current
+      if (q.length === 0) return
+      const next = q.shift()!
+      try {
+        sbuf.appendBuffer(next)
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "QuotaExceededError") {
+          q.unshift(next)
+          try {
+            if (sbuf.buffered.length > 0) {
+              const a = sbuf.buffered.start(0)
+              const b = sbuf.buffered.end(0)
+              if (b - a > 0.5) sbuf.remove(a, a + (b - a) * 0.35)
+            }
+          } catch {
+            /* ignore */
+          }
+          return
+        }
+        drainRemoteMse()
+      }
+    }
+
+    remoteAppendQueueRef.current.push(buf)
+
+    if (!remoteMediaSourceRef.current) {
+      const mediaSource = new MediaSource()
+      remoteMediaSourceRef.current = mediaSource
+      const url = URL.createObjectURL(mediaSource)
+      setScreenVideoUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev)
+        return url
+      })
+      mediaSource.addEventListener("sourceopen", () => {
+        if (remoteSourceBufferRef.current) return
+        const ms = remoteMediaSourceRef.current
+        if (!ms || ms.readyState !== "open") return
+        const mimeCandidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+        const mime = mimeCandidates.find((m) => MediaSource.isTypeSupported(m)) ?? "video/webm"
+        try {
+          const sbuf = ms.addSourceBuffer(mime)
+          remoteSourceBufferRef.current = sbuf
+          const onEnd = () => drainRemoteMse()
+          remoteMseUpdateEndRef.current = onEnd
+          sbuf.addEventListener("updateend", onEnd)
+          drainRemoteMse()
+        } catch {
+          /* ignore */
+        }
+      })
+      return
+    }
+
+    drainRemoteMse()
   }
 
   const concatInt16 = (a: Int16Array, b: Int16Array) => {
@@ -499,6 +658,7 @@ export default function VoIPApp() {
           playbackSampleRate: playbackCtx.sampleRate,
           bufferedSamples: 0,
           unsubscribeIncoming: null,
+          unsubscribeScreenChunk: null,
           lastIncomingAudioAtMs: 0,
           playbackIdleTimer: null
         }
@@ -574,6 +734,57 @@ export default function VoIPApp() {
             for (const d of dropped) runtime.bufferedSamples -= d.length
           }
         }) ?? null
+        runtime.unsubscribeScreenChunk = window.electronVoice?.onScreenChunk((chunkBase64) => {
+          const packet = decodeBytesBase64(chunkBase64)
+          if (packet.length < 12 || packet[1] !== 0x53) return
+          const format: "jpeg" | "webp" | "webm" = packet[3] === 2 ? "webm" : packet[3] === 1 ? "webp" : "jpeg"
+          const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength)
+          const frameId = view.getUint32(4, false)
+          const index = view.getUint16(8, false)
+          const total = view.getUint16(10, false)
+          const payload = packet.subarray(12)
+          const existing = screenAssembleRef.current.get(frameId) ?? {
+            total,
+            parts: new Array<Uint8Array>(total),
+            received: 0,
+            ts: Date.now(),
+            format
+          }
+          if (!existing.parts[index]) {
+            existing.parts[index] = payload
+            existing.received += 1
+          }
+          screenAssembleRef.current.set(frameId, existing)
+          if (existing.received === existing.total) {
+            const fullSize = existing.parts.reduce((sum, p) => sum + (p?.length ?? 0), 0)
+            const full = new Uint8Array(fullSize)
+            let cursor = 0
+            for (let i = 0; i < existing.parts.length; i += 1) {
+              const part = existing.parts[i]
+              if (!part) return
+              full.set(part, cursor)
+              cursor += part.length
+            }
+            if (format === "webm") {
+              pushRemoteVideoChunk(full)
+            } else {
+              const mime = existing.format === "webp" ? "image/webp" : "image/jpeg"
+              const url = URL.createObjectURL(new Blob([full], { type: mime }))
+              setScreenImageUrl((prev) => {
+                if (prev) URL.revokeObjectURL(prev)
+                return url
+              })
+            }
+            screenAssembleRef.current.delete(frameId)
+          }
+          const now = Date.now()
+          for (const [id, partial] of screenAssembleRef.current.entries()) {
+            const ttlMs = partial.format === "webm" ? 20000 : 3000
+            if (now - partial.ts > ttlMs) {
+              screenAssembleRef.current.delete(id)
+            }
+          }
+        }) ?? null
 
         captureSource.connect(micGainNode)
         micGainNode.connect(captureNode)
@@ -612,6 +823,105 @@ export default function VoIPApp() {
     }
   }, [isInVoice])
 
+  useEffect(() => {
+    if (!hasDesktopBridge || !window.electronVoice) return
+    void window.electronVoice
+      .listScreenSources()
+      .then((sources) => {
+        setScreenSources(sources)
+        if (!selectedScreenSourceId && sources.length > 0) {
+          setSelectedScreenSourceId(sources[0].id)
+        }
+      })
+      .catch(() => {
+        setScreenSources([])
+      })
+  }, [hasDesktopBridge, selectedScreenSourceId])
+
+  useEffect(() => {
+    const savedRes = localStorage.getItem("voixex-screen-resolution")
+    const savedFps = Number(localStorage.getItem("voixex-screen-fps") || "30")
+    const savedBitrate = Number(localStorage.getItem("voixex-screen-bitrate-kbps") || "3500")
+    if (savedRes && /^\d+x\d+$/.test(savedRes)) setScreenResolution(savedRes)
+    if (Number.isFinite(savedFps) && savedFps > 0) setScreenFps(savedFps)
+    if (Number.isFinite(savedBitrate) && savedBitrate > 0) setScreenBitrateKbps(savedBitrate)
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem("voixex-screen-resolution", screenResolution)
+  }, [screenResolution])
+
+  useEffect(() => {
+    localStorage.setItem("voixex-screen-fps", String(screenFps))
+  }, [screenFps])
+
+  useEffect(() => {
+    localStorage.setItem("voixex-screen-bitrate-kbps", String(screenBitrateKbps))
+  }, [screenBitrateKbps])
+
+  useEffect(() => {
+    if (activeScreenSharerName) return
+    setScreenImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
+    resetRemoteStreamPlayback()
+  }, [activeScreenSharerName])
+
+  useEffect(() => {
+    return () => {
+      if (screenImageUrl) URL.revokeObjectURL(screenImageUrl)
+    }
+  }, [screenImageUrl])
+
+  useEffect(() => {
+    return () => {
+      if (screenVideoUrl) URL.revokeObjectURL(screenVideoUrl)
+    }
+  }, [screenVideoUrl])
+
+  useEffect(() => {
+    return () => {
+      if (localScreenPreviewUrl) URL.revokeObjectURL(localScreenPreviewUrl)
+    }
+  }, [localScreenPreviewUrl])
+
+  useEffect(() => {
+    renderStreamWindow()
+  }, [
+    screenImageUrl,
+    screenVideoUrl,
+    localScreenPreviewUrl,
+    activeScreenSharerName,
+    currentVoiceChannel,
+    voiceUsers,
+    isScreenSharing
+  ])
+
+  useEffect(() => {
+    return () => {
+      if (streamWindowRef.current && !streamWindowRef.current.closed) {
+        streamWindowRef.current.close()
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!localPreviewVideoRef.current) return
+    const video = localPreviewVideoRef.current
+    video.srcObject = isScreenSharing ? screenCaptureStreamRef.current : null
+    if (isScreenSharing) {
+      void video.play().catch(() => {})
+    }
+  }, [isScreenSharing, currentVoiceChannel])
+
+  useEffect(() => {
+    if (!screenVideoUrl || isScreenSharing) return
+    const v = remoteStreamVideoRef.current
+    if (!v) return
+    void v.play().catch(() => {})
+  }, [screenVideoUrl, isScreenSharing])
+
   const applyMute = (next: boolean) => {
     setIsMuted(next)
     client.setMute(next)
@@ -633,10 +943,216 @@ export default function VoIPApp() {
     })
   }
 
+  const handleUploadAttachment = async (file: File) => {
+    if (!activeServerId || !activeChannelId) return
+    const channel = categories.flatMap((c) => c.channels).find((c) => c.id === activeChannelId)
+    if (!channel || channel.type !== "text") return
+    try {
+      const uploaded = await client.uploadAttachment(activeServerId, activeChannelId, file)
+      await client.sendMessage(activeServerId, activeChannelId, "", [uploaded.attachment.id])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "attachment upload failed")
+    }
+  }
+
+  const stopScreenShare = async () => {
+    if (screenShareTimerRef.current) {
+      clearInterval(screenShareTimerRef.current)
+      screenShareTimerRef.current = null
+    }
+    if (screenMediaRecorderRef.current) {
+      try {
+        if (screenMediaRecorderRef.current.state !== "inactive") {
+          screenMediaRecorderRef.current.stop()
+        }
+      } catch {
+        // ignore
+      }
+      screenMediaRecorderRef.current = null
+    }
+    if (screenCaptureStreamRef.current) {
+      screenCaptureStreamRef.current.getTracks().forEach((t) => t.stop())
+      screenCaptureStreamRef.current = null
+    }
+    screenEncodeInFlightRef.current = false
+    setIsScreenSharing(false)
+    client.setScreenShare(false)
+    setLocalScreenPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
+    if (localPreviewVideoRef.current) {
+      localPreviewVideoRef.current.srcObject = null
+    }
+    setScreenImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
+    resetRemoteStreamPlayback()
+  }
+
+  const renderStreamWindow = () => {
+    if (!streamWindowRef.current || streamWindowRef.current.closed) return
+    const title = activeScreenSharerName ? `Voixex Stream - ${activeScreenSharerName}` : "Voixex Stream"
+    streamWindowRef.current.document.title = title
+    const viewers = (voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"
+    const previewUrl = screenVideoUrl ?? screenImageUrl ?? localScreenPreviewUrl
+    const localCapture = isScreenSharing ? screenCaptureStreamRef.current : null
+    const doc = streamWindowRef.current.document
+    if (!doc.getElementById("voixex-stream-root")) {
+      doc.body.innerHTML = `
+        <div id="voixex-stream-root" style="font-family:sans-serif;background:#111;color:#eee;margin:0;padding:12px">
+          <div id="voixex-streaming" style="margin-bottom:8px"></div>
+          <div id="voixex-viewers" style="margin-bottom:8px"></div>
+          <video id="voixex-stream-video" autoplay muted playsinline controls style="display:none;max-width:100%;max-height:85vh;border:1px solid #444;border-radius:6px"></video>
+          <div id="voixex-stream-placeholder" style="color:#999">No active stream frame.</div>
+        </div>
+      `
+    }
+    const streamingEl = doc.getElementById("voixex-streaming")
+    const viewersEl = doc.getElementById("voixex-viewers")
+    const imageEl = doc.getElementById("voixex-stream-video") as HTMLVideoElement | null
+    const placeholderEl = doc.getElementById("voixex-stream-placeholder")
+    if (streamingEl) streamingEl.textContent = `Streaming: ${activeScreenSharerName || "none"}`
+    if (viewersEl) viewersEl.textContent = `Viewers: ${viewers}`
+    if (imageEl && placeholderEl) {
+      if (localCapture) {
+        if (imageEl.src) imageEl.removeAttribute("src")
+        if (imageEl.srcObject !== localCapture) {
+          imageEl.srcObject = localCapture
+          void imageEl.play().catch(() => {})
+        }
+        imageEl.style.display = "block"
+        placeholderEl.style.display = "none"
+      } else if (previewUrl) {
+        if (imageEl.srcObject) imageEl.srcObject = null
+        if (imageEl.src !== previewUrl) {
+          imageEl.src = previewUrl
+          void imageEl.play().catch(() => {})
+        }
+        imageEl.style.display = "block"
+        placeholderEl.style.display = "none"
+      } else {
+        imageEl.srcObject = null
+        imageEl.removeAttribute("src")
+        imageEl.style.display = "none"
+        placeholderEl.style.display = "block"
+      }
+    }
+  }
+
+  const toggleStreamWindow = () => {
+    if (streamWindowRef.current && !streamWindowRef.current.closed) {
+      streamWindowRef.current.close()
+      streamWindowRef.current = null
+      setShowingStreamWindow(false)
+      return
+    }
+    const popup = window.open("", "voixex-stream-window", "width=1280,height=760")
+    if (!popup) {
+      setError("Unable to open stream window. Allow popups for Voixex.")
+      return
+    }
+    streamWindowRef.current = popup
+    setShowingStreamWindow(true)
+    renderStreamWindow()
+  }
+
+  const startScreenShare = async () => {
+    if (!hasDesktopBridge || !window.electronVoice) {
+      throw new Error("Screen share is available only in the desktop client.")
+    }
+    if (!isInVoice || !currentVoiceChannel) {
+      throw new Error("Join a voice channel first.")
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error("Screen capture API is not available in this runtime.")
+    }
+    if (isScreenSharing) return
+    const fps = Math.max(8, Math.min(60, screenFps))
+    const chunkSize = 1120
+    const [targetWidthRaw, targetHeightRaw] = screenResolution.split("x").map((v) => Number(v))
+    const targetWidth = Number.isFinite(targetWidthRaw) ? targetWidthRaw : 1280
+    const targetHeight = Number.isFinite(targetHeightRaw) ? targetHeightRaw : 720
+    const bitrateKbps = Math.max(600, Math.min(10000, screenBitrateKbps))
+    await window.electronVoice.setScreenSource(selectedScreenSourceId)
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        frameRate: fps,
+        width: { ideal: targetWidth, max: targetWidth },
+        height: { ideal: targetHeight, max: targetHeight }
+      },
+      audio: false
+    })
+    screenCaptureStreamRef.current = stream
+    if (localPreviewVideoRef.current) {
+      localPreviewVideoRef.current.srcObject = stream
+      void localPreviewVideoRef.current.play().catch(() => {})
+    }
+    const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? "video/webm"
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: bitrateKbps * 1000
+    })
+    screenChunkSeqRef.current = 1
+    recorder.ondataavailable = (event) => {
+      const bridge = window.electronVoice
+      if (!bridge) return
+      if (!event.data || event.data.size === 0) return
+      void event.data.arrayBuffer().then((buffer) => {
+        const bytes = new Uint8Array(buffer)
+        const chunkId = screenChunkSeqRef.current++
+        const total = Math.max(1, Math.ceil(bytes.length / chunkSize))
+        for (let i = 0; i < total; i += 1) {
+          const payload = bytes.subarray(i * chunkSize, Math.min(bytes.length, (i + 1) * chunkSize))
+          const packet = new Uint8Array(12 + payload.length)
+          packet[0] = 1
+          packet[1] = 0x53
+          packet[2] = (i === 0 ? 1 : 0) | (i === total - 1 ? 2 : 0)
+          packet[3] = 2 // webm stream chunk
+          const view = new DataView(packet.buffer)
+          view.setUint32(4, chunkId >>> 0, false)
+          view.setUint16(8, i, false)
+          view.setUint16(10, total, false)
+          packet.set(payload, 12)
+          void bridge.sendScreenChunk(encodeBytesBase64(packet))
+        }
+      })
+    }
+    recorder.start(Math.max(16, Math.round(1000 / fps)))
+    screenMediaRecorderRef.current = recorder
+    stream.getVideoTracks().forEach((track) => {
+      track.onended = () => {
+        void stopScreenShare()
+      }
+    })
+    setIsScreenSharing(true)
+    client.setScreenShare(true)
+    setStatus("Screen share started")
+  }
+
+  const handleScreenShareToggle = async () => {
+    try {
+      setError("")
+      if (isScreenSharing) {
+        await stopScreenShare()
+        setStatus("Screen share stopped")
+      } else {
+        await startScreenShare()
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to toggle screen share")
+    }
+  }
+
   const handleChannelSelect = async (channelId: string) => {
     setActiveChannelId(channelId)
     const channel = categories.flatMap((c) => c.channels).find((c) => c.id === channelId)
     if (channel?.type === "voice") {
+      if (isScreenSharing) {
+        await stopScreenShare()
+      }
       setIsInVoice(true)
       setCurrentVoiceChannel(channelId)
       client.joinRoom(channelId)
@@ -649,6 +1165,7 @@ export default function VoIPApp() {
   }
 
   const handleDisconnect = () => {
+    void stopScreenShare()
     setIsInVoice(false)
     setCurrentVoiceChannel("")
     stopVoicePipeline()
@@ -899,7 +1416,7 @@ export default function VoIPApp() {
             <div className="mb-2 flex gap-2">
               <input className="w-40 rounded border px-2 py-1" value={apiHost} onChange={(e) => setApiHost(e.target.value)} placeholder="Backend host/ip" />
               <input className="w-20 rounded border px-2 py-1" value={apiPort} onChange={(e) => setApiPort(e.target.value)} placeholder="Port" />
-              <button className="rounded border px-2 py-1" onClick={connectAndJoin} disabled={joining}>
+              <button className="rounded border px-2 py-1" onClick={() => void connectAndJoin()} disabled={joining}>
                 {joining ? "Connecting..." : "Connect"}
               </button>
             </div>
@@ -1220,15 +1737,100 @@ export default function VoIPApp() {
         <div className="flex h-full flex-1 flex-col bg-background">
           <div className="flex h-10 shrink-0 items-center justify-between border-b border-border bg-card px-3">
             <div className="text-sm font-medium text-foreground">{activeChannel.name}</div>
-            <button
-              onClick={() => setShowMemberList(!showMemberList)}
-              className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-            >
-              {showMemberList ? "Hide members" : "Show members"}
-            </button>
+            <div className="flex items-center gap-2">
+              <select
+                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
+                value={selectedScreenSourceId ?? ""}
+                onChange={(e) => setSelectedScreenSourceId(e.target.value || null)}
+                disabled={screenSources.length === 0}
+              >
+                {screenSources.length === 0 ? (
+                  <option value="">No sources</option>
+                ) : (
+                  screenSources.map((source) => (
+                    <option key={source.id} value={source.id}>
+                      {source.name}
+                    </option>
+                  ))
+                )}
+              </select>
+              <select
+                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
+                value={screenResolution}
+                onChange={(e) => setScreenResolution(e.target.value)}
+              >
+                <option value="854x480">480p</option>
+                <option value="1280x720">720p</option>
+                <option value="1600x900">900p</option>
+                <option value="1920x1080">1080p</option>
+              </select>
+              <select
+                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
+                value={String(screenFps)}
+                onChange={(e) => setScreenFps(Number(e.target.value))}
+              >
+                <option value="10">10 FPS</option>
+                <option value="15">15 FPS</option>
+                <option value="24">24 FPS</option>
+                <option value="30">30 FPS</option>
+                <option value="60">60 FPS</option>
+              </select>
+              <select
+                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
+                value={String(screenBitrateKbps)}
+                onChange={(e) => setScreenBitrateKbps(Number(e.target.value))}
+              >
+                <option value="1200">1.2 Mbps</option>
+                <option value="2000">2.0 Mbps</option>
+                <option value="3500">3.5 Mbps</option>
+                <option value="5000">5.0 Mbps</option>
+                <option value="8000">8.0 Mbps</option>
+              </select>
+              <button
+                onClick={() => void handleScreenShareToggle()}
+                className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                disabled={!isInVoice || !hasDesktopBridge}
+              >
+                {isScreenSharing ? "Stop Screen Share" : "Start Screen Share"}
+              </button>
+              <button
+                onClick={toggleStreamWindow}
+                className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                disabled={!activeScreenSharerName && !screenImageUrl && !screenVideoUrl && !isScreenSharing}
+              >
+                {showingStreamWindow ? "Close Stream Window" : "Open Stream Window"}
+              </button>
+              <button
+                onClick={() => setShowMemberList(!showMemberList)}
+                className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                {showMemberList ? "Hide members" : "Show members"}
+              </button>
+            </div>
           </div>
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            Voice channel selected. Text chat is available only in text channels.
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-sm text-muted-foreground">
+            {error ? <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive">{error}</div> : null}
+            {activeScreenSharerName ? <div>Screen share by: {activeScreenSharerName}</div> : <div>No active screen share.</div>}
+            {activeScreenSharerName ? (
+              <div>
+                Watching: {(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"}
+              </div>
+            ) : null}
+            {isScreenSharing ? (
+              <video ref={localPreviewVideoRef} autoPlay muted playsInline className="max-h-[70vh] w-auto rounded border border-border" />
+            ) : screenVideoUrl || screenImageUrl ? (
+              <video
+                ref={remoteStreamVideoRef}
+                src={screenVideoUrl ?? screenImageUrl ?? undefined}
+                autoPlay
+                muted
+                playsInline
+                controls
+                className="max-h-[70vh] w-auto rounded border border-border"
+              />
+            ) : (
+              <div>Voice channel selected. Text chat is available only in text channels.</div>
+            )}
           </div>
         </div>
       ) : (
@@ -1237,6 +1839,7 @@ export default function VoIPApp() {
           channelType={activeChannel?.type || "text"}
           messages={messages}
           onSendMessage={handleSendMessage}
+          onUploadAttachment={handleUploadAttachment}
           canSend={Boolean(activeServerId && activeChannelId && isTextChannel)}
           showMemberList={showMemberList}
           onToggleMemberList={() => setShowMemberList(!showMemberList)}

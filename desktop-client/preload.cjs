@@ -17,10 +17,18 @@ const electronVoice = {
   setKeybinds: (keybinds) => ipcRenderer.invoke("voice:setKeybinds", keybinds),
   clearKeybinds: () => ipcRenderer.invoke("voice:clearKeybinds"),
   sendPcm16Frame: (pcm16Base64) => ipcRenderer.invoke("voice:sendPcm16Frame", pcm16Base64),
+  sendScreenChunk: (chunkBase64) => ipcRenderer.invoke("voice:sendScreenChunk", chunkBase64),
+  listScreenSources: () => ipcRenderer.invoke("screenShare:listSources"),
+  setScreenSource: (sourceId) => ipcRenderer.invoke("screenShare:setSource", sourceId),
   onPcm16Frame: (listener) => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on("voice:pcm16Frame", handler)
     return () => ipcRenderer.removeListener("voice:pcm16Frame", handler)
+  },
+  onScreenChunk: (listener) => {
+    const handler = (_event, payload) => listener(payload)
+    ipcRenderer.on("voice:screenChunk", handler)
+    return () => ipcRenderer.removeListener("voice:screenChunk", handler)
   },
   onHotkeyAction: (listener) => {
     const handler = (_event, payload) => listener(payload)

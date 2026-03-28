@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain } from "electron"
+import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, session } from "electron"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { join } from "node:path"
@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 import { VoiceService } from "./voice-service.js"
 
 const voice = new VoiceService()
+let preferredScreenSourceId: string | null = null
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
 const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000"
 const bundledUiPath = join(__dirname, "../ui/index.html")
@@ -53,6 +54,7 @@ if (isLegacyWindows10()) {
   app.commandLine.appendSwitch("in-process-gpu")
   app.commandLine.appendSwitch("disable-gpu-compositing")
 }
+app.commandLine.appendSwitch("disable-renderer-backgrounding")
 
 function loadFallbackErrorPage(win: BrowserWindow, error: string, target: string) {
   const html = `<!doctype html><html><body style="font-family:sans-serif;padding:24px;background:#111;color:#eee">
@@ -73,7 +75,8 @@ function createWindow() {
     webPreferences: {
       preload: join(__dirname, "../preload.cjs"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   })
   win.once("ready-to-show", () => win.show())
@@ -91,10 +94,24 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (_request, callback) => {
+      const sources = await desktopCapturer.getSources({ types: ["screen", "window"] })
+      const preferred =
+        (preferredScreenSourceId && sources.find((s) => s.id === preferredScreenSourceId)) || sources[0]
+      callback({ video: preferred })
+    },
+    { useSystemPicker: true }
+  )
   registerHotkeys()
   voice.setOnIncomingPcm16((pcm16Base64) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("voice:pcm16Frame", pcm16Base64)
+    }
+  })
+  voice.setOnIncomingScreenChunk((chunkBase64) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send("voice:screenChunk", chunkBase64)
     }
   })
   ipcMain.handle("voice:connect", (_event, payload: { host: string; port: number; mediaToken: string }) => {
@@ -152,6 +169,18 @@ app.whenReady().then(() => {
   })
   ipcMain.handle("voice:sendPcm16Frame", (_event, pcm16Base64: string) => {
     voice.sendPcm16Frame(pcm16Base64)
+    return { ok: true }
+  })
+  ipcMain.handle("voice:sendScreenChunk", (_event, chunkBase64: string) => {
+    voice.sendScreenChunk(chunkBase64)
+    return { ok: true }
+  })
+  ipcMain.handle("screenShare:listSources", async () => {
+    const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } })
+    return sources.map((s) => ({ id: s.id, name: s.name }))
+  })
+  ipcMain.handle("screenShare:setSource", (_event, sourceId: string | null) => {
+    preferredScreenSourceId = sourceId
     return { ok: true }
   })
 

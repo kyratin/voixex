@@ -6,6 +6,8 @@ import { config } from "./config.js"
 import { verifyToken } from "./token.js"
 
 const MEDIA_CIPHER = "aes-256-gcm"
+const MEDIA_KIND_AUDIO = 0
+const MEDIA_KIND_SCREEN = 1
 
 type MemberSession = {
   clientId: string
@@ -42,8 +44,14 @@ type FrameEntry = {
   pcm16: Buffer
 }
 
+type ScreenChunkEntry = {
+  clientId: string
+  chunk: Buffer
+}
+
 const sessions = new Map<string, MemberSession>()
 const roomFrames = new Map<string, FrameEntry[]>()
+const roomScreenChunks = new Map<string, ScreenChunkEntry[]>()
 const desiredRoomByClient = new Map<string, string | null>()
 const desiredFlagsByClient = new Map<string, { muted: boolean; deafened: boolean }>()
 const desiredSpeakingByClient = new Map<string, boolean>()
@@ -81,14 +89,15 @@ function deriveKey(mediaSeedB64: string) {
   return Buffer.from(hkdfSync("sha256", Buffer.from(mediaSeedB64, "base64"), Buffer.from("voip-salt"), Buffer.from("media-key"), 32))
 }
 
-function encryptFrame(key: Buffer, seq: number, ts: number, roomId: string, payload: Buffer): Buffer {
+function encryptFrame(key: Buffer, seq: number, ts: number, roomId: string, payload: Buffer, kind = MEDIA_KIND_AUDIO): Buffer {
   const roomIdBuf = Buffer.from(roomId)
   const nonce = Buffer.alloc(12)
   nonce.writeUInt32BE(ts >>> 0, 0)
   nonce.writeUInt32BE(seq >>> 0, 4)
   randomBytes(4).copy(nonce, 8)
   const cipher = createCipheriv(MEDIA_CIPHER, key, nonce, { authTagLength: 16 })
-  const encrypted = Buffer.concat([cipher.update(payload), cipher.final()])
+  const plaintext = Buffer.concat([Buffer.from([kind & 0xff]), payload])
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()])
   const tag = cipher.getAuthTag()
   const header = Buffer.alloc(3 + 4 + 4 + 1 + roomIdBuf.length + 12 + 2)
   MEDIA_MAGIC.copy(header, 0)
@@ -120,10 +129,18 @@ function decryptFrame(key: Buffer, packet: Buffer) {
   const nonce = packet.subarray(nonceStart, nonceEnd)
   const encrypted = packet.subarray(encStart, encEnd)
   const tag = packet.subarray(encEnd)
-  const decipher = createDecipheriv(MEDIA_CIPHER, key, nonce, { authTagLength: 16 })
-  decipher.setAuthTag(tag)
-  const payload = Buffer.concat([decipher.update(encrypted), decipher.final()])
-  return { seq, ts, roomId, payload }
+  let plaintext: Buffer
+  try {
+    const decipher = createDecipheriv(MEDIA_CIPHER, key, nonce, { authTagLength: 16 })
+    decipher.setAuthTag(tag)
+    plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()])
+  } catch {
+    return null
+  }
+  if (plaintext.length < 1) return null
+  const kind = plaintext.readUInt8(0)
+  const payload = plaintext.subarray(1)
+  return { seq, ts, roomId, kind, payload }
 }
 
 function mixPcm16(buffers: Buffer[]): Buffer {
@@ -223,64 +240,101 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       return
     }
 
-    for (const session of sessions.values()) {
-      if (!session.remote || !session.key) continue
-      if (session.remote.address !== rinfo.address || session.remote.port !== rinfo.port) continue
+    const sessionsList = [...sessions.values()].filter((s) => Boolean(s.key))
+    const knownRemote = sessionsList.find(
+      (s) => s.remote && s.remote.address === rinfo.address && s.remote.port === rinfo.port
+    )
 
-      const sec = Math.floor(Date.now() / 1000)
-      if (sec !== session.currentSecond) {
-        session.currentSecond = sec
-        session.packetCountSecond = 0
+    let matchedSession: MemberSession | null = null
+    let decoded: ReturnType<typeof decryptFrame> = null
+
+    if (knownRemote?.key) {
+      const hit = decryptFrame(knownRemote.key, packet)
+      if (hit) {
+        matchedSession = knownRemote
+        decoded = hit
+      } else {
+        knownRemote.rxDecryptDropped += 1
       }
-      session.packetCountSecond += 1
-      if (session.packetCountSecond > config.mediaRateLimitPerSec) {
-        session.rxRateLimitDropped += 1
+    }
+
+    if (!matchedSession) {
+      for (const session of sessionsList) {
+        if (!session.key) continue
+        if (knownRemote && session.clientId === knownRemote.clientId) continue
+        const hit = decryptFrame(session.key, packet)
+        if (!hit) continue
+        matchedSession = session
+        decoded = hit
+        break
+      }
+    }
+
+    if (!matchedSession || !decoded || !matchedSession.key) return
+
+    const session = matchedSession
+    const key = session.key
+    if (!key) return
+    // Accept valid packets from rebinding clients (NAT/source-port changes).
+    if (!session.remote || session.remote.address !== rinfo.address || session.remote.port !== rinfo.port) {
+      session.remote = { address: rinfo.address, port: rinfo.port }
+      logger.debug({ clientId: session.clientId, remoteAddress: rinfo.address, remotePort: rinfo.port }, "media remote endpoint updated")
+    }
+
+    const sec = Math.floor(Date.now() / 1000)
+    if (sec !== session.currentSecond) {
+      session.currentSecond = sec
+      session.packetCountSecond = 0
+    }
+    session.packetCountSecond += 1
+    if (session.packetCountSecond > config.mediaRateLimitPerSec) {
+      session.rxRateLimitDropped += 1
+      return
+    }
+
+    if (decoded.seq <= session.lastSeqIn) {
+      session.rxReplayDropped += 1
+      return
+    }
+    if (session.lastSeqIn > 0 && decoded.seq > session.lastSeqIn + 1) {
+      session.rxLostEstimated += decoded.seq - session.lastSeqIn - 1
+    }
+    session.lastSeqIn = decoded.seq
+    session.rxPackets += 1
+    session.rxBytes += packet.length
+    const nowTs32 = Date.now() >>> 0
+    const transit = safeTransitDeltaMs(nowTs32, decoded.ts)
+    if (transit !== null) {
+      pushSample(session.delaySamplesMs, transit)
+      if (session.lastTransitMs !== null) {
+        const d = Math.abs(transit - session.lastTransitMs)
+        session.jitterMs += (d - session.jitterMs) / 16
+        pushSample(session.jitterSamplesMs, session.jitterMs)
+      }
+      session.lastTransitMs = transit
+    }
+
+    // Return lightweight encrypted probe-acks so clients can compute RTT
+    // even when there are no other speakers in the room.
+    const nowMs = Date.now()
+    if (session.roomId && decoded.roomId === session.roomId && nowMs - session.lastProbeAckAtMs >= 1000) {
+      if (!session.remote) return
+      const probeAck = encryptFrame(key, session.seqOut++, decoded.ts, decoded.roomId, Buffer.alloc(0), MEDIA_KIND_AUDIO)
+      socket.send(probeAck, session.remote.port, session.remote.address)
+      session.txPackets += 1
+      session.txBytes += probeAck.length
+      session.lastProbeAckAtMs = nowMs
+    }
+
+    if (!session.roomId || session.roomId !== decoded.roomId) {
+      session.rxRoomMismatchDropped += 1
+      return
+    }
+
+    if (decoded.kind === MEDIA_KIND_AUDIO) {
+      if (session.muted) {
         return
       }
-
-      const decoded = decryptFrame(session.key, packet)
-      if (!decoded) {
-        session.rxDecryptDropped += 1
-        return
-      }
-      if (decoded.seq <= session.lastSeqIn) {
-        session.rxReplayDropped += 1
-        return
-      }
-      if (session.lastSeqIn > 0 && decoded.seq > session.lastSeqIn + 1) {
-        session.rxLostEstimated += decoded.seq - session.lastSeqIn - 1
-      }
-      session.lastSeqIn = decoded.seq
-      session.rxPackets += 1
-      session.rxBytes += packet.length
-      const nowTs32 = Date.now() >>> 0
-      const transit = safeTransitDeltaMs(nowTs32, decoded.ts)
-      if (transit !== null) {
-        pushSample(session.delaySamplesMs, transit)
-        if (session.lastTransitMs !== null) {
-          const d = Math.abs(transit - session.lastTransitMs)
-          session.jitterMs += (d - session.jitterMs) / 16
-          pushSample(session.jitterSamplesMs, session.jitterMs)
-        }
-        session.lastTransitMs = transit
-      }
-
-      // Return lightweight encrypted probe-acks so clients can compute RTT
-      // even when there are no other speakers in the room.
-      const nowMs = Date.now()
-      if (session.roomId && decoded.roomId === session.roomId && nowMs - session.lastProbeAckAtMs >= 1000) {
-        const probeAck = encryptFrame(session.key, session.seqOut++, decoded.ts, decoded.roomId, Buffer.alloc(0))
-        socket.send(probeAck, session.remote.port, session.remote.address)
-        session.txPackets += 1
-        session.txBytes += probeAck.length
-        session.lastProbeAckAtMs = nowMs
-      }
-
-      if (!session.roomId || session.roomId !== decoded.roomId || session.muted) {
-        session.rxRoomMismatchDropped += 1
-        return
-      }
-
       const energy = calcRmsEnergyPcm16(decoded.payload)
       const nowEnergyTs = Date.now()
       const speakingThreshold = 0.02
@@ -298,6 +352,12 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       roomFrames.set(session.roomId, list)
       return
     }
+    if (decoded.kind === MEDIA_KIND_SCREEN) {
+      const chunks = roomScreenChunks.get(session.roomId) ?? []
+      chunks.push({ clientId: session.clientId, chunk: decoded.payload })
+      roomScreenChunks.set(session.roomId, chunks)
+    }
+    return
   })
 
   setInterval(() => {
@@ -315,6 +375,27 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
         session.txBytes += packet.length
       }
       roomFrames.set(roomId, [])
+    }
+  }, 20)
+
+  setInterval(() => {
+    for (const [roomId, chunks] of roomScreenChunks.entries()) {
+      if (chunks.length === 0) continue
+      for (const session of sessions.values()) {
+        if (!session.roomId || session.roomId !== roomId || !session.remote || !session.key) continue
+        for (const entry of chunks) {
+          if (entry.clientId === session.clientId) continue
+          if (entry.chunk.length > config.screenMaxChunkBytes + 64) {
+            logger.debug({ roomId, fromClientId: entry.clientId, bytes: entry.chunk.length }, "screen chunk dropped: too large")
+            continue
+          }
+          const packet = encryptFrame(session.key, session.seqOut++, Date.now(), roomId, entry.chunk, MEDIA_KIND_SCREEN)
+          socket.send(packet, session.remote.port, session.remote.address)
+          session.txPackets += 1
+          session.txBytes += packet.length
+        }
+      }
+      roomScreenChunks.set(roomId, [])
     }
   }, 20)
 
