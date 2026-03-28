@@ -467,6 +467,13 @@ export default function VoIPApp() {
         ? chunk.buffer
         : chunk.slice().buffer
 
+    const isWebmInitSegment =
+      chunk.length >= 4 && chunk[0] === 0x1a && chunk[1] === 0x45 && chunk[2] === 0xdf && chunk[3] === 0xa3
+
+    if (isWebmInitSegment && remoteMediaSourceRef.current) {
+      resetRemoteStreamPlayback()
+    }
+
     const drainRemoteMse = () => {
       const sbuf = remoteSourceBufferRef.current
       if (!sbuf || sbuf.updating) return
@@ -482,7 +489,6 @@ export default function VoIPApp() {
             if (sbuf.buffered.length > 0) {
               const a = sbuf.buffered.start(0)
               const b = sbuf.buffered.end(0)
-              // Keep a larger playout buffer so the viewer stalls less often.
               if (b - a > 1.2) sbuf.remove(a, a + (b - a) * 0.22)
             }
           } catch {
