@@ -1,0 +1,12 @@
+.git
+**/.git
+**/node_modules
+**/release
+**/release-build
+primer_front/.next
+primer_front/out
+**/dist
+desktop-client/ui
+*.exe.blockmap
+*.zip.blockmap
+**/.DS_Store

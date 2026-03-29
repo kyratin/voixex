@@ -6,7 +6,7 @@ import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
-import { VoipClient } from "@/lib/voip-client"
+import { VoipClient, type RealtimeState } from "@/lib/voip-client"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -112,6 +112,8 @@ export default function VoIPApp() {
   })
   const [wsConnected, setWsConnected] = useState(false)
   const [wsReconnecting, setWsReconnecting] = useState(false)
+  /** WebSocket for voice signaling when UI and voice use different servers. */
+  const [voiceSigWsConnected, setVoiceSigWsConnected] = useState(false)
   const [deviceError, setDeviceError] = useState("")
   const [audioDevicesRevision, setAudioDevicesRevision] = useState(0)
   const [micVolumePct, setMicVolumePct] = useState(100)
@@ -163,12 +165,23 @@ export default function VoIPApp() {
   const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
   const lastLocalPreviewUpdateAtRef = useRef(0)
-  const client = useMemo(() => new VoipClient(), [])
+  const uiClient = useMemo(() => new VoipClient(), [])
+  const voiceClient = useMemo(() => new VoipClient(), [])
+  /** Server where the user is in a voice channel; empty when not in voice. */
+  const [voiceServerId, setVoiceServerId] = useState("")
+  const activeServerIdRef = useRef("")
+  const voiceServerIdRef = useRef("")
+  const latestUiStateRef = useRef<RealtimeState | null>(null)
+  const latestVoiceStateRef = useRef<RealtimeState | null>(null)
   const voicePipelineRef = useRef<VoicePipelineRuntime | null>(null)
   const mutedRef = useRef(isMuted)
   const deafenedRef = useRef(isDeafened)
   const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoConnectAttemptedRef = useRef(false)
+  /** Serializes sidebar server switches so disconnect + connect never overlap. */
+  const serverSwitchChainRef = useRef<Promise<void>>(Promise.resolve())
+  const connectedToApiRef = useRef(false)
+  const wsConnectedRef = useRef(false)
 
   const currentUser = useMemo(
     () => ({
@@ -181,6 +194,29 @@ export default function VoIPApp() {
     [profileDisplayName]
   )
 
+  connectedToApiRef.current = connectedToApi
+  wsConnectedRef.current = wsConnected
+
+  activeServerIdRef.current = activeServerId
+  voiceServerIdRef.current = voiceServerId
+  const isVoiceSplit =
+    Boolean(isInVoice && voiceServerId && activeServerId && voiceServerId !== activeServerId)
+
+  const getVoiceWsClient = () => {
+    const vs = voiceServerIdRef.current
+    const act = activeServerIdRef.current
+    if (vs && act && vs !== act) return voiceClient
+    return uiClient
+  }
+
+  const getVoiceWsClientRef = useRef(getVoiceWsClient)
+  getVoiceWsClientRef.current = getVoiceWsClient
+
+  const isInVoiceRef = useRef(isInVoice)
+  useEffect(() => {
+    isInVoiceRef.current = isInVoice
+  }, [isInVoice])
+
   useEffect(() => {
     const key = "voip-client-id"
     const existing = localStorage.getItem(key)
@@ -190,34 +226,52 @@ export default function VoIPApp() {
       setDisplayNameInput(savedNick)
       setProfileDisplayName(savedNick)
     }
-    const unsubscribe = client.subscribe((state) => {
-      setCategories(client.toSidebarCategories())
-      setVoiceUsers(client.toVoiceUsers())
-      setWsConnected(state.connection.wsConnected)
-      setWsReconnecting(state.connection.reconnecting)
-      if (state.me?.displayName) {
-        setProfileDisplayName(state.me.displayName)
+
+    const applyMerged = () => {
+      const u = latestUiStateRef.current
+      if (!u) return
+      const split =
+        Boolean(voiceServerIdRef.current && activeServerIdRef.current && voiceServerIdRef.current !== activeServerIdRef.current)
+      const v = latestVoiceStateRef.current
+
+      setCategories(uiClient.toSidebarCategories())
+      const uVu = uiClient.toVoiceUsers()
+      const vVu = split && v ? voiceClient.toVoiceUsers() : {}
+      setVoiceUsers({ ...uVu, ...vVu })
+
+      setWsConnected(u.connection.wsConnected)
+      setWsReconnecting(u.connection.reconnecting)
+      if (split && v) {
+        setVoiceSigWsConnected(v.connection.wsConnected)
+      } else {
+        setVoiceSigWsConnected(false)
       }
-      setCanManageServer(Boolean(state.me?.permissions?.manage_server))
+
+      if (u.me?.displayName) {
+        setProfileDisplayName(u.me.displayName)
+      }
+      setCanManageServer(Boolean(u.me?.permissions?.manage_server))
+
       const onlineByClientId = new Map<string, { clientId: string; displayName: string }>()
-      for (const u of state.lobby) {
-        onlineByClientId.set(u.clientId, { clientId: u.clientId, displayName: u.displayName })
+      for (const member of u.lobby) {
+        onlineByClientId.set(member.clientId, { clientId: member.clientId, displayName: member.displayName })
       }
-      for (const users of Object.values(state.rosterByRoom)) {
-        for (const u of users) {
-          onlineByClientId.set(u.clientId, { clientId: u.clientId, displayName: u.displayName })
+      for (const users of Object.values(u.rosterByRoom)) {
+        for (const member of users) {
+          onlineByClientId.set(member.clientId, { clientId: member.clientId, displayName: member.displayName })
         }
       }
       setMembers(
-        Array.from(onlineByClientId.values()).map((u) => ({
-          id: u.clientId,
-          name: u.displayName,
-          avatar: u.displayName.slice(0, 1).toUpperCase(),
+        Array.from(onlineByClientId.values()).map((m) => ({
+          id: m.clientId,
+          name: m.displayName,
+          avatar: m.displayName.slice(0, 1).toUpperCase(),
           status: "online",
           roles: []
         }))
       )
-      const activeMessages = client.getMessagesState(activeChannelId)
+
+      const activeMessages = uiClient.getMessagesState(activeChannelId)
       setMessages(
         activeMessages.map((m) => ({
           id: m.id,
@@ -227,15 +281,17 @@ export default function VoIPApp() {
           attachments: m.attachments
         }))
       )
-      const activeSharerId = currentVoiceChannel ? state.activeScreenShareByRoom[currentVoiceChannel] : null
+
+      const screenState = split && v ? v : u
+      const activeSharerId = currentVoiceChannel ? screenState.activeScreenShareByRoom[currentVoiceChannel] : null
       if (activeSharerId) {
-        const inLobby = state.lobby.find((u) => u.clientId === activeSharerId)
+        const inLobby = screenState.lobby.find((x) => x.clientId === activeSharerId)
         if (inLobby) {
           setActiveScreenSharerName(inLobby.displayName)
         } else {
           let name = activeSharerId
-          for (const users of Object.values(state.rosterByRoom)) {
-            const found = users.find((u) => u.clientId === activeSharerId)
+          for (const users of Object.values(screenState.rosterByRoom)) {
+            const found = users.find((x) => x.clientId === activeSharerId)
             if (found) {
               name = found.displayName
               break
@@ -246,11 +302,21 @@ export default function VoIPApp() {
       } else {
         setActiveScreenSharerName("")
       }
+    }
+
+    const unsubUi = uiClient.subscribe((state) => {
+      latestUiStateRef.current = state
+      applyMerged()
+    })
+    const unsubVoice = voiceClient.subscribe((state) => {
+      latestVoiceStateRef.current = state
+      applyMerged()
     })
     return () => {
-      unsubscribe()
+      unsubUi()
+      unsubVoice()
     }
-  }, [client, activeChannelId, currentVoiceChannel])
+  }, [uiClient, voiceClient, activeChannelId, currentVoiceChannel])
 
   useEffect(() => {
     currentVoiceChannelRef.current = currentVoiceChannel
@@ -260,16 +326,18 @@ export default function VoIPApp() {
     isScreenSharingRef.current = isScreenSharing
   }, [isScreenSharing])
 
+  const wsForVoiceJoin = isVoiceSplit ? voiceSigWsConnected : wsConnected
+
   useEffect(() => {
     // WS may reconnect while desktop voice transport keeps running;
     // re-send join_room so server routes screen chunks to this viewer.
-    if (!wsConnected || !isInVoice || !currentVoiceChannel) return
+    if (!wsForVoiceJoin || !isInVoice || !currentVoiceChannel) return
     const now = Date.now()
     const prev = lastWsVoiceJoinSyncRef.current
     if (prev && prev.room === currentVoiceChannel && now - prev.at < 3000) return
     lastWsVoiceJoinSyncRef.current = { room: currentVoiceChannel, at: now }
-    client.joinRoom(currentVoiceChannel)
-  }, [wsConnected, isInVoice, currentVoiceChannel, client])
+    getVoiceWsClient().joinRoom(currentVoiceChannel)
+  }, [wsForVoiceJoin, isVoiceSplit, wsConnected, isInVoice, currentVoiceChannel, uiClient, voiceClient])
 
   useEffect(() => {
     const raw = localStorage.getItem("voixex-saved-servers")
@@ -557,8 +625,9 @@ export default function VoIPApp() {
 
   useEffect(() => {
     if (!hasDesktopBridge) return
-    return client.subscribeScreenVideoChunks((fromClientId, chunkBase64) => {
-      const me = client.getMeState()
+    const c = isVoiceSplit ? voiceClient : uiClient
+    return c.subscribeScreenVideoChunks((fromClientId, chunkBase64) => {
+      const me = c.getMeState()
       if (me && fromClientId === me.clientId) return
       try {
         pushRemoteVideoChunkRef.current(decodeBytesBase64(chunkBase64))
@@ -566,7 +635,7 @@ export default function VoIPApp() {
         /* ignore */
       }
     })
-  }, [hasDesktopBridge, client])
+  }, [hasDesktopBridge, isVoiceSplit, uiClient, voiceClient])
 
   const concatInt16 = (a: Int16Array, b: Int16Array) => {
     if (a.length === 0) return b
@@ -984,21 +1053,21 @@ export default function VoIPApp() {
 
   const applyMute = (next: boolean) => {
     setIsMuted(next)
-    client.setMute(next)
+    getVoiceWsClient().setMute(next)
     void window.electronVoice?.setMute(next)
     setStatus(next ? "Microphone muted" : "Microphone unmuted")
   }
 
   const applyDeafen = (next: boolean) => {
     setIsDeafened(next)
-    client.setDeafen(next)
+    getVoiceWsClient().setDeafen(next)
     void window.electronVoice?.setDeafen(next)
     setStatus(next ? "Headphones deafened" : "Headphones undeafened")
   }
 
   const handleSendMessage = (content: string) => {
     if (!activeServerId || !activeChannelId) return
-    void client.sendMessage(activeServerId, activeChannelId, content).catch((e) => {
+    void uiClient.sendMessage(activeServerId, activeChannelId, content).catch((e) => {
       toast.error(e instanceof Error ? e.message : "Failed to send message")
     })
   }
@@ -1008,8 +1077,8 @@ export default function VoIPApp() {
     const channel = categories.flatMap((c) => c.channels).find((c) => c.id === activeChannelId)
     if (!channel || channel.type !== "text") return
     try {
-      const uploaded = await client.uploadAttachment(activeServerId, activeChannelId, file)
-      await client.sendMessage(activeServerId, activeChannelId, "", [uploaded.attachment.id])
+      const uploaded = await uiClient.uploadAttachment(activeServerId, activeChannelId, file)
+      await uiClient.sendMessage(activeServerId, activeChannelId, "", [uploaded.attachment.id])
       toast.success("File uploaded")
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Upload failed")
@@ -1037,7 +1106,7 @@ export default function VoIPApp() {
     }
     screenEncodeInFlightRef.current = false
     setIsScreenSharing(false)
-    client.setScreenShare(false)
+    getVoiceWsClientRef.current().setScreenShare(false)
     setLocalScreenPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev)
       return null
@@ -1071,7 +1140,7 @@ export default function VoIPApp() {
       if (!event.data || event.data.size === 0) return
       void event.data.arrayBuffer().then((buffer) => {
         const bytes = new Uint8Array(buffer)
-        client.sendScreenVideoChunk(encodeBytesBase64(bytes))
+        getVoiceWsClientRef.current().sendScreenVideoChunk(encodeBytesBase64(bytes))
       })
     }
 
@@ -1094,15 +1163,16 @@ export default function VoIPApp() {
     } catch {
       screenRecorderRestartingRef.current = false
     }
-  }, [screenBitrateKbps, client])
+  }, [screenBitrateKbps])
 
   useEffect(() => {
     if (!hasDesktopBridge || !isScreenSharing) return
-    return client.subscribeScreenResyncRequests((roomId) => {
+    const c = isVoiceSplit ? voiceClient : uiClient
+    return c.subscribeScreenResyncRequests((roomId) => {
       if (roomId !== currentVoiceChannelRef.current) return
       restartScreenRecorderForLateViewers()
     })
-  }, [hasDesktopBridge, isScreenSharing, client, restartScreenRecorderForLateViewers])
+  }, [hasDesktopBridge, isScreenSharing, isVoiceSplit, uiClient, voiceClient, restartScreenRecorderForLateViewers])
 
   useEffect(() => {
     if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName) return
@@ -1112,10 +1182,10 @@ export default function VoIPApp() {
     const room = currentVoiceChannel
     const timer = window.setTimeout(() => {
       lastViewerScreenResyncReqRef.current = { room, at: Date.now() }
-      client.requestScreenResync(room)
+      getVoiceWsClientRef.current().requestScreenResync(room)
     }, 400)
     return () => clearTimeout(timer)
-  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, client])
+  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, isVoiceSplit])
 
   const renderStreamWindow = () => {
     if (!streamWindowRef.current || streamWindowRef.current.closed) return
@@ -1264,12 +1334,12 @@ export default function VoIPApp() {
       if (!event.data || event.data.size === 0) return
       void event.data.arrayBuffer().then((buffer) => {
         const bytes = new Uint8Array(buffer)
-        client.sendScreenVideoChunk(encodeBytesBase64(bytes))
+        getVoiceWsClientRef.current().sendScreenVideoChunk(encodeBytesBase64(bytes))
       })
     }
     // Server drops screen_chunk until set_screen_share(active:true) is applied; register share before any blob.
     setIsScreenSharing(true)
-    client.setScreenShare(true)
+    getVoiceWsClientRef.current().setScreenShare(true)
     // Variant A: smaller timeslice for lower end-to-end latency (more appendBuffer work).
     recorder.start(250)
     screenMediaRecorderRef.current = recorder
@@ -1302,23 +1372,54 @@ export default function VoIPApp() {
       if (isScreenSharing) {
         await stopScreenShare()
       }
+      if (isInVoice && voiceServerId && activeServerId && voiceServerId !== activeServerId) {
+        const vopts = uiClient.getElectronVoiceConnectParams()
+        if (!window.electronVoice || !vopts) {
+          toast.error("Cannot join voice on this server from the current setup.")
+          return
+        }
+        voiceClient.leaveRoom()
+        voiceClient.disconnect()
+        await window.electronVoice.leaveRoom()
+        await window.electronVoice.connect({
+          host: vopts.host,
+          port: vopts.port,
+          mediaToken: vopts.mediaToken
+        })
+        setVoiceServerId(activeServerId)
+        voiceServerIdRef.current = activeServerId
+        setCurrentVoiceChannel(channelId)
+        setIsInVoice(true)
+        isInVoiceRef.current = true
+        uiClient.joinRoom(channelId)
+        await window.electronVoice.joinRoom(channelId)
+        setStatus(`In room: ${channel.name}`)
+        return
+      }
       setIsInVoice(true)
+      isInVoiceRef.current = true
       setCurrentVoiceChannel(channelId)
-      client.joinRoom(channelId)
+      setVoiceServerId(activeServerId)
+      voiceServerIdRef.current = activeServerId
+      getVoiceWsClient().joinRoom(channelId)
       void window.electronVoice?.joinRoom(channelId)
       setStatus(`In room: ${channel.name}`)
     } else if (channel?.type === "text" && activeServerId) {
       setStatus(`Text channel: ${channel.name}`)
-      await client.getMessages(activeServerId, channelId)
+      await uiClient.getMessages(activeServerId, channelId)
     }
   }
 
   const handleDisconnect = () => {
     void stopScreenShare()
+    getVoiceWsClientRef.current().leaveRoom()
+    voiceClient.disconnect()
     setIsInVoice(false)
+    isInVoiceRef.current = false
     setCurrentVoiceChannel("")
+    setVoiceServerId("")
+    voiceServerIdRef.current = ""
     stopVoicePipeline()
-    client.leaveRoom()
     void window.electronVoice?.leaveRoom()
     setStatus("Connected to server")
   }
@@ -1326,16 +1427,22 @@ export default function VoIPApp() {
   const fullyDisconnectFromApi = async () => {
     await stopScreenShare()
     setIsInVoice(false)
+    isInVoiceRef.current = false
     setCurrentVoiceChannel("")
+    setVoiceServerId("")
+    voiceServerIdRef.current = ""
     stopVoicePipeline()
-    client.leaveRoom()
+    uiClient.leaveRoom()
+    voiceClient.leaveRoom()
     void window.electronVoice?.leaveRoom()
     void window.electronVoice?.disconnect()
-    client.disconnect()
+    uiClient.disconnect()
+    voiceClient.disconnect()
     setConnectedToApi(false)
     setActiveChannelId("")
     setWsConnected(false)
     setWsReconnecting(false)
+    setVoiceSigWsConnected(false)
     setStatus("Disconnected")
     setActiveScreenSharerName("")
     setError("")
@@ -1351,8 +1458,9 @@ export default function VoIPApp() {
     ) {
       return
     }
-    const isLiveSession = connectedToApi && client.getCurrentServerId() === serverId
-    if (isLiveSession) {
+    const touchesUi = connectedToApi && uiClient.getCurrentServerId() === serverId
+    const touchesVoice = isInVoice && voiceServerId === serverId
+    if (touchesUi || touchesVoice) {
       await fullyDisconnectFromApi()
     }
     const next = savedServers.filter((s) => s.serverId !== serverId)
@@ -1407,6 +1515,7 @@ export default function VoIPApp() {
   const connectAndJoin = async (preset?: SavedServerProfile) => {
     try {
       setJoining(true)
+      voiceClient.disconnect()
       const host = (preset?.apiHost ?? apiHost).trim()
       const port = (preset?.apiPort ?? apiPort).trim()
       const password = preset?.serverPassword ?? serverPassword
@@ -1432,15 +1541,15 @@ export default function VoIPApp() {
       }
       setDisplayNameInput(normalizedDisplayName)
       localStorage.setItem("voip-last-display-name", normalizedDisplayName)
-      client.setApiBase(`http://${host}:${port}`)
+      uiClient.setApiBase(`http://${host}:${port}`)
       setError("")
       setStatus(`Connecting API: ${host}:${port}`)
-      const health = await client.healthcheck()
+      const health = await uiClient.healthcheck()
       if (!health.ok) throw new Error("server is not healthy")
       setConnectedToApi(true)
       setStatus("Joining server...")
       const clientId = localStorage.getItem("voip-client-id") || crypto.randomUUID()
-      const join = await client.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
+      const join = await uiClient.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
       const joinedServerId = join.serverId
       const joinedServerName = join.serverName ?? "Server"
       const effectiveListName = (
@@ -1455,7 +1564,7 @@ export default function VoIPApp() {
         toast.error(
           "A server with this name already exists in your list. Pick another name and connect again."
         )
-        client.disconnect()
+        uiClient.disconnect()
         setConnectedToApi(false)
         setJoining(false)
         return
@@ -1469,15 +1578,18 @@ export default function VoIPApp() {
           throw new Error("Desktop voice bridge not available. Run inside voip-desktop-client.")
         }
         setStatus("Connecting voice transport...")
-        await window.electronVoice.connect({
-          host: join.udp.host === "backend" ? host : join.udp.host,
-          port: join.udp.port,
-          mediaToken: join.mediaToken
-        })
+        const vopts = uiClient.getElectronVoiceConnectParams()
+        if (vopts) {
+          await window.electronVoice.connect({
+            host: vopts.host,
+            port: vopts.port,
+            mediaToken: vopts.mediaToken
+          })
+        }
       }
-      client.connectWs()
-      const rooms = await client.getRooms(joinedServerId)
-      await client.getMe(joinedServerId)
+      uiClient.connectWs()
+      const rooms = await uiClient.getRooms(joinedServerId)
+      await uiClient.getMe(joinedServerId)
       setActiveServerId(joinedServerId)
       const updatedProfile: SavedServerProfile = {
         serverId: joinedServerId,
@@ -1500,20 +1612,16 @@ export default function VoIPApp() {
       )
       setConnectServerListName(effectiveListName)
       const text = rooms.find((r) => r.kind === "text")
-      const voice = rooms.find((r) => r.kind === "voice")
       if (text) {
         setActiveChannelId(text.id)
-        await client.getMessages(joinedServerId, text.id)
+        await uiClient.getMessages(joinedServerId, text.id)
       }
-      if (voice) {
-        setCurrentVoiceChannel(voice.id)
-        setIsInVoice(true)
-        client.joinRoom(voice.id)
-        await window.electronVoice?.joinRoom(voice.id)
-        setStatus(`In room: ${voice.name}`)
-      } else {
-        setStatus("Connected to server")
-      }
+      setCurrentVoiceChannel("")
+      setIsInVoice(false)
+      isInVoiceRef.current = false
+      setVoiceServerId("")
+      voiceServerIdRef.current = ""
+      setStatus("Connected to server")
     } catch (e) {
       setConnectedToApi(false)
       setError(e instanceof Error ? e.message : "join server failed")
@@ -1594,7 +1702,7 @@ export default function VoIPApp() {
 
   const saveProfile = async () => {
     if (!activeServerId) return
-    await client.updateProfile(activeServerId, profileDisplayName)
+    await uiClient.updateProfile(activeServerId, profileDisplayName)
     localStorage.setItem("voip-last-display-name", profileDisplayName)
     setSavedServers((prev) => {
       const next = prev.map((s) => (s.serverId === activeServerId ? { ...s, displayName: profileDisplayName } : s))
@@ -1615,8 +1723,8 @@ export default function VoIPApp() {
     try {
       setCreatingChannel(true)
       setError("")
-      await client.createRoom(activeServerId, name, roomKindInput)
-      await client.getRooms(activeServerId)
+      await uiClient.createRoom(activeServerId, name, roomKindInput)
+      await uiClient.getRooms(activeServerId)
       toast.success(`Channel "${name}" created`)
       setStatus(`Channel created: ${name}`)
       setRoomNameInput("")
@@ -1628,19 +1736,71 @@ export default function VoIPApp() {
   }
 
   const handleServerSelect = (serverId: string) => {
-    setActiveServerId(serverId)
-    localStorage.setItem("voixex-last-server-id", serverId)
     const saved = savedServers.find((s) => s.serverId === serverId)
     if (!saved) return
-    setConnectServerListName(saved.serverName)
-    setApiHost(saved.apiHost)
-    setApiPort(saved.apiPort)
-    setServerPassword(saved.serverPassword)
-    setDisplayNameInput(saved.displayName)
-    setSuperuserPasswordInput(saved.superuserPassword ?? "")
-    if (!connectedToApi || !wsConnected) {
-      void connectAndJoin(saved)
+
+    if (
+      isInVoiceRef.current &&
+      currentVoiceChannelRef.current &&
+      serverId !== activeServerIdRef.current
+    ) {
+      const ok = window.confirm(
+        "Вы в голосовом канале. Переход на другой сервер разорвёт голосовое соединение и выполнит полное переподключение к выбранному серверу. Продолжить?"
+      )
+      if (!ok) return
     }
+
+    serverSwitchChainRef.current = serverSwitchChainRef.current
+      .then(async () => {
+        setActiveServerId(serverId)
+        activeServerIdRef.current = serverId
+        localStorage.setItem("voixex-last-server-id", serverId)
+        setConnectServerListName(saved.serverName)
+        setApiHost(saved.apiHost)
+        setApiPort(saved.apiPort)
+        setServerPassword(saved.serverPassword)
+        setDisplayNameInput(saved.displayName)
+        setSuperuserPasswordInput(saved.superuserPassword ?? "")
+
+        const targetId = serverId
+        const inVoice = isInVoiceRef.current
+        let voiceSrv = voiceServerIdRef.current
+        if (inVoice && currentVoiceChannelRef.current && !voiceSrv) {
+          voiceSrv = voiceClient.getCurrentServerId() ?? uiClient.getCurrentServerId() ?? ""
+          if (voiceSrv) {
+            voiceServerIdRef.current = voiceSrv
+            setVoiceServerId(voiceSrv)
+          }
+        }
+
+        const uiOn = uiClient.getCurrentServerId()
+        if (uiOn === targetId && connectedToApiRef.current && wsConnectedRef.current) {
+          return
+        }
+
+        if (
+          inVoice &&
+          voiceSrv &&
+          voiceSrv === targetId &&
+          uiOn === targetId &&
+          connectedToApiRef.current &&
+          !wsConnectedRef.current
+        ) {
+          uiClient.connectWs()
+          return
+        }
+
+        if (uiOn !== null || connectedToApiRef.current || wsConnectedRef.current) {
+          await fullyDisconnectFromApi()
+        }
+        await connectAndJoin(saved)
+      })
+      .catch((err) => {
+        console.error(err)
+        toast.error(err instanceof Error ? err.message : "Server switch failed")
+      })
+
+    void serverSwitchChainRef.current
   }
 
   return (

@@ -72,6 +72,8 @@ export class VoipClient {
     connection: { wsConnected: false, reconnecting: false }
   }
   private currentServerId: string | null = null
+  /** Resolved host/port + media token for desktop UDP (after last joinServer). */
+  private electronVoiceParams: { host: string; port: number; mediaToken: string } | null = null
   private pendingWsMessages: string[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
@@ -103,6 +105,14 @@ export class VoipClient {
     this.mediaToken = out.mediaToken
     this.currentServerId = out.serverId
     this.state.me = out.profile
+    let apiHostname = "localhost"
+    try {
+      apiHostname = new URL(this.apiBase).hostname
+    } catch {
+      /* keep default */
+    }
+    const voiceHost = out.udp.host === "backend" ? apiHostname : out.udp.host
+    this.electronVoiceParams = { host: voiceHost, port: out.udp.port, mediaToken: out.mediaToken }
     return out
   }
 
@@ -216,6 +226,7 @@ export class VoipClient {
     this.authToken = null
     this.mediaToken = null
     this.currentServerId = null
+    this.electronVoiceParams = null
     this.pendingWsMessages = []
     this.state = {
       rooms: [],
@@ -426,6 +437,10 @@ export class VoipClient {
 
   getMediaToken() {
     return this.mediaToken
+  }
+
+  getElectronVoiceConnectParams() {
+    return this.electronVoiceParams
   }
 
   getCurrentServerId() {
