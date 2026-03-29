@@ -94,6 +94,8 @@ export default function VoIPApp() {
   const [joining, setJoining] = useState(false)
   const [connectedToApi, setConnectedToApi] = useState(false)
   const [showConnectPanel, setShowConnectPanel] = useState(false)
+  /** User-defined label in the server list (sidebar). Falls back to API server name if left empty when connecting. */
+  const [connectServerListName, setConnectServerListName] = useState("")
   const [roomNameInput, setRoomNameInput] = useState("new-room")
   const [roomKindInput, setRoomKindInput] = useState<"voice" | "text">("voice")
   const [creatingChannel, setCreatingChannel] = useState(false)
@@ -296,6 +298,7 @@ export default function VoIPApp() {
       setDisplayNameInput(preferred.displayName)
       setProfileDisplayName(preferred.displayName)
       setSuperuserPasswordInput(preferred.superuserPassword ?? "")
+      setConnectServerListName(preferred.serverName)
     } catch {
       // ignore malformed saved server payload
     }
@@ -1414,6 +1417,18 @@ export default function VoIPApp() {
         setApiPort(port)
         setServerPassword(password)
         setSuperuserPasswordInput(superPassword)
+        setConnectServerListName(preset.serverName)
+      }
+      if (!preset) {
+        const earlyLabel = connectServerListName.trim()
+        if (earlyLabel) {
+          const others = savedServers.filter((s) => !(s.apiHost === host && s.apiPort === port))
+          if (others.some((s) => s.serverName.trim().toLowerCase() === earlyLabel.toLowerCase())) {
+            toast.error("A server with this name already exists in your list.")
+            setJoining(false)
+            return
+          }
+        }
       }
       setDisplayNameInput(normalizedDisplayName)
       localStorage.setItem("voip-last-display-name", normalizedDisplayName)
@@ -1428,6 +1443,23 @@ export default function VoIPApp() {
       const join = await client.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
       const joinedServerId = join.serverId
       const joinedServerName = join.serverName ?? "Server"
+      const effectiveListName = (
+        preset?.serverName ?? (connectServerListName.trim() || joinedServerName)
+      ).trim() || "Server"
+      const withoutSameHostForName = savedServers.filter((s) => !(s.apiHost === host && s.apiPort === port))
+      if (
+        withoutSameHostForName.some(
+          (s) => s.serverName.trim().toLowerCase() === effectiveListName.toLowerCase()
+        )
+      ) {
+        toast.error(
+          "A server with this name already exists in your list. Pick another name and connect again."
+        )
+        client.disconnect()
+        setConnectedToApi(false)
+        setJoining(false)
+        return
+      }
       localStorage.setItem("voip-client-id", join.profile.clientId)
       localStorage.setItem("voip-last-display-name", join.profile.displayName)
       localStorage.setItem("voixex-last-server-id", joinedServerId)
@@ -1449,20 +1481,24 @@ export default function VoIPApp() {
       setActiveServerId(joinedServerId)
       const updatedProfile: SavedServerProfile = {
         serverId: joinedServerId,
-        serverName: joinedServerName,
+        serverName: effectiveListName,
         apiHost: host,
         apiPort: port,
         serverPassword: password,
         displayName: join.profile.displayName,
         ...(superPassword ? { superuserPassword: superPassword } : {})
       }
-      setSavedServers((prev) => {
-        const withoutSameHost = prev.filter((s) => !(s.apiHost === updatedProfile.apiHost && s.apiPort === updatedProfile.apiPort))
-        const next = [updatedProfile, ...withoutSameHost]
-        localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
-        setServers(next.map((s) => ({ id: s.serverId, name: s.serverName, icon: s.serverName.slice(0, 1).toUpperCase() || "S" })))
-        return next
-      })
+      const nextSaved = [updatedProfile, ...withoutSameHostForName]
+      setSavedServers(nextSaved)
+      localStorage.setItem("voixex-saved-servers", JSON.stringify(nextSaved))
+      setServers(
+        nextSaved.map((s) => ({
+          id: s.serverId,
+          name: s.serverName,
+          icon: s.serverName.slice(0, 1).toUpperCase() || "S"
+        }))
+      )
+      setConnectServerListName(effectiveListName)
       const text = rooms.find((r) => r.kind === "text")
       const voice = rooms.find((r) => r.kind === "voice")
       if (text) {
@@ -1596,6 +1632,7 @@ export default function VoIPApp() {
     localStorage.setItem("voixex-last-server-id", serverId)
     const saved = savedServers.find((s) => s.serverId === serverId)
     if (!saved) return
+    setConnectServerListName(saved.serverName)
     setApiHost(saved.apiHost)
     setApiPort(saved.apiPort)
     setServerPassword(saved.serverPassword)
@@ -1613,7 +1650,12 @@ export default function VoIPApp() {
         activeServerId={activeServerId}
         onServerSelect={handleServerSelect}
         onRemoveServer={handleRemoveSavedServer}
-        onAddServer={() => setShowConnectPanel((v) => !v)}
+        onAddServer={() => {
+          setShowConnectPanel((open) => {
+            if (!open) setConnectServerListName("")
+            return !open
+          })
+        }}
         onOpenSettings={() => {
           const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
           void openAppSettings(initialTab)
@@ -1622,12 +1664,24 @@ export default function VoIPApp() {
 
       <div className="flex h-full flex-col">
         {showConnectPanel && (
-          <div className="m-3 w-[360px] rounded-xl border border-border bg-card p-4 shadow-lg">
+          <div className="m-3 w-[400px] max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-card p-4 shadow-lg">
             <div className="mb-4 flex items-center gap-2">
               <Server className="h-5 w-5 text-primary" />
               <h2 className="text-sm font-semibold text-foreground">Server Connection</h2>
             </div>
             <div className="space-y-3">
+              <div>
+                <Label className="mb-1 text-xs text-muted-foreground">Name in list</Label>
+                <Input
+                  className="h-8 text-sm"
+                  value={connectServerListName}
+                  onChange={(e) => setConnectServerListName(e.target.value)}
+                  placeholder="Unique name (sidebar). Empty = use server name from API"
+                />
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Names are compared without case. Two saved servers cannot share the same name.
+                </p>
+              </div>
               <div className="flex gap-2">
                 <div className="flex-1">
                   <Label className="mb-1 text-xs text-muted-foreground">Host</Label>
