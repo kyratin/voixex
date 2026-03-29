@@ -8,6 +8,16 @@ import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient } from "@/lib/voip-client"
 
+/** First WebM Cluster element id (Matroska); media starts here after init segment. */
+function findWebmFirstClusterOffset(buf: Uint8Array): number {
+  for (let i = 4; i <= buf.length - 4; i++) {
+    if (buf[i] === 0x1f && buf[i + 1] === 0x43 && buf[i + 2] === 0xb6 && buf[i + 3] === 0x75) {
+      return i
+    }
+  }
+  return -1
+}
+
 export default function VoIPApp() {
   type SavedServerProfile = {
     serverId: string
@@ -132,6 +142,8 @@ export default function VoIPApp() {
   const remoteSourceBufferRef = useRef<SourceBuffer | null>(null)
   const remoteAppendQueueRef = useRef<ArrayBuffer[]>([])
   const remoteMseUpdateEndRef = useRef<(() => void) | null>(null)
+  /** Set after at least one successful appendBuffer; next EBML chunks may need init stripped (server late-join init + full relay blobs). */
+  const remoteMseAppendedOnceRef = useRef(false)
   const screenEncodeInFlightRef = useRef(false)
   const streamWindowRef = useRef<Window | null>(null)
   /** Tracks from captureStream() fed to the popup; must be stopped when switching modes or closing. */
@@ -451,6 +463,7 @@ export default function VoIPApp() {
       if (prev) URL.revokeObjectURL(prev)
       return null
     })
+    remoteMseAppendedOnceRef.current = false
   }
   resetRemoteStreamPlaybackRef.current = resetRemoteStreamPlayback
 
@@ -473,12 +486,30 @@ export default function VoIPApp() {
       if (!sbuf || sbuf.updating) return
       const q = remoteAppendQueueRef.current
       if (q.length === 0) return
-      const next = q.shift()!
+      const rawBuf = q.shift()!
+      let raw = new Uint8Array(rawBuf)
+      const isEbml =
+        raw.length >= 4 && raw[0] === 0x1a && raw[1] === 0x45 && raw[2] === 0xdf && raw[3] === 0xa3
+      if (isEbml && remoteMseAppendedOnceRef.current) {
+        const c = findWebmFirstClusterOffset(raw)
+        if (c > 0) {
+          raw = raw.subarray(c)
+        }
+      }
+      if (raw.byteLength === 0) {
+        drainRemoteMse()
+        return
+      }
+      const next =
+        raw.buffer instanceof ArrayBuffer && raw.byteOffset === 0 && raw.byteLength === raw.buffer.byteLength
+          ? raw.buffer
+          : raw.slice().buffer
       try {
         sbuf.appendBuffer(next)
+        remoteMseAppendedOnceRef.current = true
       } catch (e) {
         if (e instanceof DOMException && e.name === "QuotaExceededError") {
-          q.unshift(next)
+          q.unshift(rawBuf)
           try {
             if (sbuf.buffered.length > 0) {
               const a = sbuf.buffered.start(0)
