@@ -197,6 +197,38 @@ export class VoipClient {
     }
   }
 
+  /** Close WebSocket, clear auth, stop auto-reconnect. Call when leaving a server from the client UI. */
+  disconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    const socket = this.ws
+    if (socket) {
+      socket.onclose = null
+      try {
+        socket.close()
+      } catch {
+        /* ignore */
+      }
+      this.ws = null
+    }
+    this.authToken = null
+    this.mediaToken = null
+    this.currentServerId = null
+    this.pendingWsMessages = []
+    this.state = {
+      rooms: [],
+      rosterByRoom: {},
+      lobby: [],
+      messagesByChannel: {},
+      activeScreenShareByRoom: {},
+      me: null,
+      connection: { wsConnected: false, reconnecting: false }
+    }
+    this.emit()
+  }
+
   connectWs() {
     if (!this.authToken) throw new Error("not authorized")
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
