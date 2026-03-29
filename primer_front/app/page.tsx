@@ -140,8 +140,6 @@ export default function VoIPApp() {
   const renderStreamWindowRef = useRef<() => void>(() => {})
   const currentVoiceChannelRef = useRef("")
   const isScreenSharingRef = useRef(false)
-  const screenRecorderResyncAtRef = useRef(0)
-  const screenRecorderRestartingRef = useRef(false)
   const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
   const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
@@ -467,12 +465,8 @@ export default function VoIPApp() {
         ? chunk.buffer
         : chunk.slice().buffer
 
-    const isWebmInitSegment =
-      chunk.length >= 4 && chunk[0] === 0x1a && chunk[1] === 0x45 && chunk[2] === 0xdf && chunk[3] === 0xa3
-
-    if (isWebmInitSegment && remoteMediaSourceRef.current) {
-      resetRemoteStreamPlayback()
-    }
+    // Do not reset MSE on EBML-leading chunks: many fragments start with EBML; resetting
+    // breaks playback. Server sends init-only for late join; live chunks append here.
 
     const drainRemoteMse = () => {
       const sbuf = remoteSourceBufferRef.current
@@ -1023,68 +1017,16 @@ export default function VoIPApp() {
     resetRemoteStreamPlayback()
   }
 
-  const restartScreenRecorderForLateViewers = useCallback(() => {
-    if (!isScreenSharingRef.current) return
-    const stream = screenCaptureStreamRef.current
-    const oldRec = screenMediaRecorderRef.current
-    if (!stream || !oldRec || oldRec.state !== "recording") return
-    const now = Date.now()
-    if (now - screenRecorderResyncAtRef.current < 1200) return
-    screenRecorderResyncAtRef.current = now
-    if (screenRecorderRestartingRef.current) return
-    screenRecorderRestartingRef.current = true
-
-    const mimeType =
-      oldRec.mimeType && MediaRecorder.isTypeSupported(oldRec.mimeType) ? oldRec.mimeType : "video/webm"
-    const bps = Math.max(600_000, Math.min(10_000_000, screenBitrateKbps * 1000))
-
-    const onData = (event: BlobEvent) => {
-      if (!event.data || event.data.size === 0) return
-      void event.data.arrayBuffer().then((buffer) => {
-        const bytes = new Uint8Array(buffer)
-        client.sendScreenVideoChunk(encodeBytesBase64(bytes))
-      })
-    }
-
-    oldRec.onstop = () => {
-      screenRecorderRestartingRef.current = false
-      const cap = screenCaptureStreamRef.current
-      if (!cap || !isScreenSharingRef.current) return
-      try {
-        const next = new MediaRecorder(cap, { mimeType, videoBitsPerSecond: bps })
-        next.ondataavailable = onData
-        next.start(250)
-        screenMediaRecorderRef.current = next
-      } catch {
-        screenMediaRecorderRef.current = null
-        void stopScreenShare()
-      }
-    }
-    try {
-      oldRec.stop()
-    } catch {
-      screenRecorderRestartingRef.current = false
-    }
-  }, [screenBitrateKbps, client])
-
-  useEffect(() => {
-    if (!hasDesktopBridge || !isScreenSharing) return
-    return client.subscribeScreenResyncRequests((roomId) => {
-      if (roomId !== currentVoiceChannelRef.current) return
-      restartScreenRecorderForLateViewers()
-    })
-  }, [hasDesktopBridge, isScreenSharing, client, restartScreenRecorderForLateViewers])
-
   useEffect(() => {
     if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName) return
     const now = Date.now()
     const prev = lastViewerScreenResyncReqRef.current
-    if (prev && prev.room === currentVoiceChannel && now - prev.at < 5000) return
+    if (prev && prev.room === currentVoiceChannel && now - prev.at < 2500) return
     const room = currentVoiceChannel
     const timer = window.setTimeout(() => {
       lastViewerScreenResyncReqRef.current = { room, at: Date.now() }
       client.requestScreenResync(room)
-    }, 400)
+    }, 80)
     return () => clearTimeout(timer)
   }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, client])
 
@@ -1241,7 +1183,7 @@ export default function VoIPApp() {
     // Server drops screen_chunk until set_screen_share(active:true) is applied; register share before any blob.
     setIsScreenSharing(true)
     client.setScreenShare(true)
-    // Variant A: smaller timeslice for lower end-to-end latency (more appendBuffer work).
+    // 250ms timeslice + server-cached WebM init for late join (no sharer recorder restart).
     recorder.start(250)
     screenMediaRecorderRef.current = recorder
     stream.getVideoTracks().forEach((track) => {
