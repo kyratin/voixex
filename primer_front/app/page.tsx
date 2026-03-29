@@ -8,16 +8,6 @@ import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient } from "@/lib/voip-client"
 
-/** First WebM Cluster element id (Matroska); media starts here after init segment. */
-function findWebmFirstClusterOffset(buf: Uint8Array): number {
-  for (let i = 4; i <= buf.length - 4; i++) {
-    if (buf[i] === 0x1f && buf[i + 1] === 0x43 && buf[i + 2] === 0xb6 && buf[i + 3] === 0x75) {
-      return i
-    }
-  }
-  return -1
-}
-
 export default function VoIPApp() {
   type SavedServerProfile = {
     serverId: string
@@ -142,8 +132,6 @@ export default function VoIPApp() {
   const remoteSourceBufferRef = useRef<SourceBuffer | null>(null)
   const remoteAppendQueueRef = useRef<ArrayBuffer[]>([])
   const remoteMseUpdateEndRef = useRef<(() => void) | null>(null)
-  /** Set after at least one successful appendBuffer; next EBML chunks may need init stripped (server late-join init + full relay blobs). */
-  const remoteMseAppendedOnceRef = useRef(false)
   const screenEncodeInFlightRef = useRef(false)
   const streamWindowRef = useRef<Window | null>(null)
   /** Tracks from captureStream() fed to the popup; must be stopped when switching modes or closing. */
@@ -152,6 +140,8 @@ export default function VoIPApp() {
   const renderStreamWindowRef = useRef<() => void>(() => {})
   const currentVoiceChannelRef = useRef("")
   const isScreenSharingRef = useRef(false)
+  const screenRecorderResyncAtRef = useRef(0)
+  const screenRecorderRestartingRef = useRef(false)
   const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
   const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
@@ -463,7 +453,6 @@ export default function VoIPApp() {
       if (prev) URL.revokeObjectURL(prev)
       return null
     })
-    remoteMseAppendedOnceRef.current = false
   }
   resetRemoteStreamPlaybackRef.current = resetRemoteStreamPlayback
 
@@ -478,38 +467,24 @@ export default function VoIPApp() {
         ? chunk.buffer
         : chunk.slice().buffer
 
-    // Do not reset MSE on EBML-leading chunks: many fragments start with EBML; resetting
-    // breaks playback. Server sends init-only for late join; live chunks append here.
+    const isWebmInitSegment =
+      chunk.length >= 4 && chunk[0] === 0x1a && chunk[1] === 0x45 && chunk[2] === 0xdf && chunk[3] === 0xa3
+
+    if (isWebmInitSegment && remoteMediaSourceRef.current) {
+      resetRemoteStreamPlayback()
+    }
 
     const drainRemoteMse = () => {
       const sbuf = remoteSourceBufferRef.current
       if (!sbuf || sbuf.updating) return
       const q = remoteAppendQueueRef.current
       if (q.length === 0) return
-      const rawBuf = q.shift()!
-      let raw = new Uint8Array(rawBuf)
-      const isEbml =
-        raw.length >= 4 && raw[0] === 0x1a && raw[1] === 0x45 && raw[2] === 0xdf && raw[3] === 0xa3
-      if (isEbml && remoteMseAppendedOnceRef.current) {
-        const c = findWebmFirstClusterOffset(raw)
-        if (c > 0) {
-          raw = raw.subarray(c)
-        }
-      }
-      if (raw.byteLength === 0) {
-        drainRemoteMse()
-        return
-      }
-      const next =
-        raw.buffer instanceof ArrayBuffer && raw.byteOffset === 0 && raw.byteLength === raw.buffer.byteLength
-          ? raw.buffer
-          : raw.slice().buffer
+      const next = q.shift()!
       try {
         sbuf.appendBuffer(next)
-        remoteMseAppendedOnceRef.current = true
       } catch (e) {
         if (e instanceof DOMException && e.name === "QuotaExceededError") {
-          q.unshift(rawBuf)
+          q.unshift(next)
           try {
             if (sbuf.buffered.length > 0) {
               const a = sbuf.buffered.start(0)
@@ -1048,16 +1023,68 @@ export default function VoIPApp() {
     resetRemoteStreamPlayback()
   }
 
+  const restartScreenRecorderForLateViewers = useCallback(() => {
+    if (!isScreenSharingRef.current) return
+    const stream = screenCaptureStreamRef.current
+    const oldRec = screenMediaRecorderRef.current
+    if (!stream || !oldRec || oldRec.state !== "recording") return
+    const now = Date.now()
+    if (now - screenRecorderResyncAtRef.current < 1200) return
+    screenRecorderResyncAtRef.current = now
+    if (screenRecorderRestartingRef.current) return
+    screenRecorderRestartingRef.current = true
+
+    const mimeType =
+      oldRec.mimeType && MediaRecorder.isTypeSupported(oldRec.mimeType) ? oldRec.mimeType : "video/webm"
+    const bps = Math.max(600_000, Math.min(10_000_000, screenBitrateKbps * 1000))
+
+    const onData = (event: BlobEvent) => {
+      if (!event.data || event.data.size === 0) return
+      void event.data.arrayBuffer().then((buffer) => {
+        const bytes = new Uint8Array(buffer)
+        client.sendScreenVideoChunk(encodeBytesBase64(bytes))
+      })
+    }
+
+    oldRec.onstop = () => {
+      screenRecorderRestartingRef.current = false
+      const cap = screenCaptureStreamRef.current
+      if (!cap || !isScreenSharingRef.current) return
+      try {
+        const next = new MediaRecorder(cap, { mimeType, videoBitsPerSecond: bps })
+        next.ondataavailable = onData
+        next.start(250)
+        screenMediaRecorderRef.current = next
+      } catch {
+        screenMediaRecorderRef.current = null
+        void stopScreenShare()
+      }
+    }
+    try {
+      oldRec.stop()
+    } catch {
+      screenRecorderRestartingRef.current = false
+    }
+  }, [screenBitrateKbps, client])
+
+  useEffect(() => {
+    if (!hasDesktopBridge || !isScreenSharing) return
+    return client.subscribeScreenResyncRequests((roomId) => {
+      if (roomId !== currentVoiceChannelRef.current) return
+      restartScreenRecorderForLateViewers()
+    })
+  }, [hasDesktopBridge, isScreenSharing, client, restartScreenRecorderForLateViewers])
+
   useEffect(() => {
     if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName) return
     const now = Date.now()
     const prev = lastViewerScreenResyncReqRef.current
-    if (prev && prev.room === currentVoiceChannel && now - prev.at < 2500) return
+    if (prev && prev.room === currentVoiceChannel && now - prev.at < 5000) return
     const room = currentVoiceChannel
     const timer = window.setTimeout(() => {
       lastViewerScreenResyncReqRef.current = { room, at: Date.now() }
       client.requestScreenResync(room)
-    }, 80)
+    }, 400)
     return () => clearTimeout(timer)
   }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, client])
 
@@ -1214,7 +1241,7 @@ export default function VoIPApp() {
     // Server drops screen_chunk until set_screen_share(active:true) is applied; register share before any blob.
     setIsScreenSharing(true)
     client.setScreenShare(true)
-    // 250ms timeslice + server-cached WebM init for late join (no sharer recorder restart).
+    // Variant A: smaller timeslice for lower end-to-end latency (more appendBuffer work).
     recorder.start(250)
     screenMediaRecorderRef.current = recorder
     stream.getVideoTracks().forEach((track) => {
