@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.2.2",
+  "version": "0.2.5",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -19,7 +19,9 @@
     "dist:win": "npm run prepare:ui && electron-builder --win nsis",
     "dist:linux": "npm run prepare:ui && electron-builder --linux AppImage deb",
     "dist:mac": "npm run prepare:ui && electron-builder --mac dmg",
-    "dist:mac:zip": "npm run prepare:ui && electron-builder --mac zip"
+    "dist:mac:zip": "npm run prepare:ui && electron-builder --mac zip",
+    "dist:docker": "bash ./scripts/docker-electron-build.sh",
+    "dist:docker:only": "bash ./scripts/docker-electron-build.sh --skip-prepare"
   },
   "dependencies": {
     "voip-voice-client": "file:../voice-client"
