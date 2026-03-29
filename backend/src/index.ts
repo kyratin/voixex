@@ -13,7 +13,6 @@ import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent } from "./contracts.js"
 import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking } from "./media.js"
-import { extractWebmInitPrefix } from "./webm-init.js"
 
 const app = Fastify({ logger: true })
 await app.register(cors, {
@@ -38,8 +37,6 @@ const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string }>(
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
 /** Viewer IDs temporarily forced into WS screen relay after join/resync. */
 const forceScreenRelayByRoom = new Map<string, Map<string, number>>()
-/** WebM init prefix (base64) per active sharer; avoids MediaRecorder restart on late join. */
-const screenWebmInitByClient = new Map<string, { serverId: string; roomId: string; initBase64: string }>()
 const screenWsRateByClient = new Map<string, { sec: number; count: number }>()
 let screenRelayLogCounter = 0
 
@@ -143,20 +140,23 @@ function emitScreenShareState(serverId: string, clientId: string, roomId: string
   emitToServer(serverId, { type: "screen_share_state", clientId, roomId, active })
 }
 
-function sendScreenWebmInitToViewer(serverId: string, roomId: string, viewerSocket: WebSocket, viewerClientId: string) {
-  if (viewerSocket.readyState !== viewerSocket.OPEN) return
+function findOpenSocketForClient(serverId: string, clientId: string): WebSocket | null {
+  for (const ws of clients.get(serverId) ?? []) {
+    if (ws.readyState !== ws.OPEN) continue
+    const meta = wsClientMeta.get(ws)
+    if (meta?.clientId === clientId) return ws
+  }
+  return null
+}
+
+/** New viewer joined a voice room: ask active sharer(s) to restart MediaRecorder so WebM init is sent again. */
+function notifyActiveScreenSharerToResync(serverId: string, joinedRoomId: string, joinedClientId: string) {
   for (const [sharerId, share] of screenShareStateByClient.entries()) {
-    if (sharerId === viewerClientId) continue
-    if (share.serverId !== serverId || !share.active || share.roomId !== roomId) continue
-    const cached = screenWebmInitByClient.get(sharerId)
-    if (!cached || cached.serverId !== serverId || cached.roomId !== roomId) continue
-    viewerSocket.send(
-      JSON.stringify({
-        type: "screen_chunk",
-        fromClientId: sharerId,
-        chunkBase64: cached.initBase64
-      } satisfies WsServerEvent)
-    )
+    if (sharerId === joinedClientId) continue
+    if (share.serverId !== serverId || !share.active || share.roomId !== joinedRoomId) continue
+    const ws = findOpenSocketForClient(serverId, sharerId)
+    if (!ws) continue
+    ws.send(JSON.stringify({ type: "screen_share_resync_request", roomId: joinedRoomId } satisfies WsServerEvent))
   }
 }
 
@@ -955,7 +955,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         emitToServer(auth.serverId, { type: "roster_snapshot", roomId: event.roomId, members: getRoster(auth.serverId, event.roomId) })
         if (isVoiceRoomId(auth.serverId, event.roomId)) {
           markForceScreenRelay(event.roomId, auth.clientId)
-          sendScreenWebmInitToViewer(auth.serverId, event.roomId, socket, auth.clientId)
+          notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
         }
       } else if (event.type === "request_screen_resync") {
         const row = db
@@ -964,7 +964,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         if (row?.room_id !== event.roomId) return
         if (!isVoiceRoomId(auth.serverId, event.roomId)) return
         markForceScreenRelay(event.roomId, auth.clientId)
-        sendScreenWebmInitToViewer(auth.serverId, event.roomId, socket, auth.clientId)
+        notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
       } else if (event.type === "leave_room") {
         db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)
@@ -1096,16 +1096,6 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           }
           return
         }
-        const raw = Buffer.from(event.chunkBase64, "base64")
-        const u8 = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
-        const initPrefix = extractWebmInitPrefix(u8)
-        if (initPrefix && initPrefix.length > 0) {
-          screenWebmInitByClient.set(auth.clientId, {
-            serverId: auth.serverId,
-            roomId,
-            initBase64: Buffer.from(initPrefix).toString("base64")
-          })
-        }
         broadcastScreenChunkWs(app, auth.serverId, roomId, auth.clientId, {
           type: "screen_chunk",
           fromClientId: auth.clientId,
@@ -1117,9 +1107,6 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
         const roomId = room?.room_id ?? null
         const active = Boolean(event.active && roomId)
-        if (!active) {
-          screenWebmInitByClient.delete(auth.clientId)
-        }
         screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId, active })
         if (config.screenLog) {
           app.log.info({ msg: "set_screen_share", clientId: auth.clientId, roomId, active })
@@ -1137,7 +1124,6 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     removeMember(auth.clientId)
     const shareSnap = screenShareStateByClient.get(auth.clientId)
     screenShareStateByClient.delete(auth.clientId)
-    screenWebmInitByClient.delete(auth.clientId)
     for (const forced of forceScreenRelayByRoom.values()) {
       forced.delete(auth.clientId)
     }

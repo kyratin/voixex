@@ -7,7 +7,7 @@ export type WsClientEvent =
   | { type: "set_screen_share"; active: boolean }
   /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
   | { type: "screen_chunk"; chunkBase64: string }
-  /** Viewer asks server for cached WebM init + temporary forced relay (no sharer restart). */
+  /** Viewer asks server to nudge the active sharer (fresh WebM header for MSE). */
   | { type: "request_screen_resync"; roomId: string }
   | { type: "ping"; ts: number }
 
@@ -67,7 +67,7 @@ export type WsServerEvent =
       }
     }
   | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
-  /** Legacy; server uses cached WebM init instead of asking the sharer to restart. */
+  /** Tells the active sharer to restart encoding so late joiners get a fresh WebM header (MSE). */
   | { type: "screen_share_resync_request"; roomId: string }
   | { type: "screen_chunk"; fromClientId: string; chunkBase64: string }
   | { type: "pong"; ts: number }
