@@ -1320,6 +1320,70 @@ export default function VoIPApp() {
     setStatus("Connected to server")
   }
 
+  const fullyDisconnectFromApi = async () => {
+    await stopScreenShare()
+    setIsInVoice(false)
+    setCurrentVoiceChannel("")
+    stopVoicePipeline()
+    client.leaveRoom()
+    void window.electronVoice?.leaveRoom()
+    void window.electronVoice?.disconnect()
+    client.disconnect()
+    setConnectedToApi(false)
+    setActiveChannelId("")
+    setWsConnected(false)
+    setWsReconnecting(false)
+    setStatus("Disconnected")
+    setActiveScreenSharerName("")
+    setError("")
+  }
+
+  const handleRemoveSavedServer = async (serverId: string) => {
+    const entry = savedServers.find((s) => s.serverId === serverId)
+    if (!entry) return
+    if (
+      !window.confirm(
+        `Remove "${entry.serverName}" from your list? You can connect again later with the same host and password.`
+      )
+    ) {
+      return
+    }
+    const isLiveSession = connectedToApi && client.getCurrentServerId() === serverId
+    if (isLiveSession) {
+      await fullyDisconnectFromApi()
+    }
+    const next = savedServers.filter((s) => s.serverId !== serverId)
+    setSavedServers(next)
+    localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
+    setServers(
+      next.map((s) => ({
+        id: s.serverId,
+        name: s.serverName,
+        icon: s.serverName.slice(0, 1).toUpperCase() || "S"
+      }))
+    )
+    if (next.length === 0) {
+      autoConnectAttemptedRef.current = false
+      localStorage.removeItem("voixex-last-server-id")
+      setActiveServerId("")
+      setShowConnectPanel(true)
+      toast.success("Server removed")
+      return
+    }
+    if (activeServerId === serverId) {
+      const pick = next[0]
+      setActiveServerId(pick.serverId)
+      localStorage.setItem("voixex-last-server-id", pick.serverId)
+      setApiHost(pick.apiHost)
+      setApiPort(pick.apiPort)
+      setServerPassword(pick.serverPassword)
+      setDisplayNameInput(pick.displayName)
+      setSuperuserPasswordInput(pick.superuserPassword ?? "")
+      setProfileDisplayName(pick.displayName)
+    }
+    toast.success("Server removed from list")
+  }
+
   const activeChannel = categories.flatMap((c) => c.channels).find((c) => c.id === activeChannelId)
   const allChannels = categories.flatMap((c) => c.channels)
   const voiceChannelName = categories.flatMap((c) => c.channels).find((c) => c.id === currentVoiceChannel)?.name || ""
@@ -1548,6 +1612,7 @@ export default function VoIPApp() {
         servers={servers}
         activeServerId={activeServerId}
         onServerSelect={handleServerSelect}
+        onRemoveServer={handleRemoveSavedServer}
         onAddServer={() => setShowConnectPanel((v) => !v)}
         onOpenSettings={() => {
           const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
