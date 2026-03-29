@@ -7,6 +7,21 @@ import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient } from "@/lib/voip-client"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Slider } from "@/components/ui/slider"
+import { Switch } from "@/components/ui/switch"
+import { Separator } from "@/components/ui/separator"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover"
+import { Badge } from "@/components/ui/badge"
+import { Spinner } from "@/components/ui/spinner"
+import { Monitor, MonitorOff, Users, ExternalLink, EyeOff, ChevronDown, Wifi, WifiOff, Headphones, Server, ScreenShare, BarChart3 } from "lucide-react"
 
 export default function VoIPApp() {
   type SavedServerProfile = {
@@ -971,7 +986,7 @@ export default function VoIPApp() {
   const handleSendMessage = (content: string) => {
     if (!activeServerId || !activeChannelId) return
     void client.sendMessage(activeServerId, activeChannelId, content).catch((e) => {
-      setError(e instanceof Error ? e.message : "send message failed")
+      toast.error(e instanceof Error ? e.message : "Failed to send message")
     })
   }
 
@@ -982,8 +997,9 @@ export default function VoIPApp() {
     try {
       const uploaded = await client.uploadAttachment(activeServerId, activeChannelId, file)
       await client.sendMessage(activeServerId, activeChannelId, "", [uploaded.attachment.id])
+      toast.success("File uploaded")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "attachment upload failed")
+      toast.error(e instanceof Error ? e.message : "Upload failed")
     }
   }
 
@@ -1475,6 +1491,7 @@ export default function VoIPApp() {
       localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
       return next
     })
+    toast.success("Profile updated")
     setStatus("Profile updated")
   }
 
@@ -1490,10 +1507,11 @@ export default function VoIPApp() {
       setError("")
       await client.createRoom(activeServerId, name, roomKindInput)
       await client.getRooms(activeServerId)
+      toast.success(`Channel "${name}" created`)
       setStatus(`Channel created: ${name}`)
       setRoomNameInput("")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "create channel failed")
+      toast.error(e instanceof Error ? e.message : "Failed to create channel")
     } finally {
       setCreatingChannel(false)
     }
@@ -1516,7 +1534,6 @@ export default function VoIPApp() {
 
   return (
     <main className="flex h-screen overflow-hidden bg-background">
-      {/* Server Sidebar */}
       <ServerSidebar
         servers={servers}
         activeServerId={activeServerId}
@@ -1528,59 +1545,75 @@ export default function VoIPApp() {
         }}
       />
 
-      {/* Channel Sidebar + User Panel */}
       <div className="flex h-full flex-col">
         {showConnectPanel && (
-          <div className="m-2 w-[340px] rounded border border-border bg-card p-3 text-xs">
-            <div className="mb-2 font-semibold">Server connection</div>
-            <div className="mb-2 flex gap-2">
-              <input className="w-40 rounded border px-2 py-1" value={apiHost} onChange={(e) => setApiHost(e.target.value)} placeholder="Backend host/ip" />
-              <input className="w-20 rounded border px-2 py-1" value={apiPort} onChange={(e) => setApiPort(e.target.value)} placeholder="Port" />
-              <button className="rounded border px-2 py-1" onClick={() => void connectAndJoin()} disabled={joining}>
-                {joining ? "Connecting..." : "Connect"}
-              </button>
+          <div className="m-3 w-[360px] rounded-xl border border-border bg-card p-4 shadow-lg">
+            <div className="mb-4 flex items-center gap-2">
+              <Server className="h-5 w-5 text-primary" />
+              <h2 className="text-sm font-semibold text-foreground">Server Connection</h2>
             </div>
-            <div className="mb-2 flex gap-2">
-              <input className="w-28 rounded border px-2 py-1" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)} placeholder="Password" />
-              <input className="w-28 rounded border px-2 py-1" value={displayNameInput} onChange={(e) => setDisplayNameInput(e.target.value)} placeholder="Nickname" />
-              <span className="rounded border px-2 py-1 text-muted-foreground">{connectedToApi ? "API OK" : "API ?"} </span>
-            </div>
-            <div className="mb-2 flex gap-2">
-              <input
-                className="w-full rounded border px-2 py-1"
-                type="password"
-                value={superuserPasswordInput}
-                onChange={(e) => setSuperuserPasswordInput(e.target.value)}
-                placeholder="Superuser password (optional, grants admin role)"
-              />
-            </div>
-            <div className="flex items-center justify-between">
-              <div className="text-muted-foreground">Single server mode: join by host/port + password.</div>
-              <button
-                className="rounded border px-2 py-1"
-                onClick={() => {
-                  if (!activeServerId || !canManageServer) return
-                  void openAppSettings("server_general")
-                }}
-                disabled={!activeServerId || !canManageServer}
-              >
-                Server settings
-              </button>
-            </div>
-            <div className="mt-2 flex gap-2">
-              <input className="w-40 rounded border px-2 py-1" value={profileDisplayName} onChange={(e) => setProfileDisplayName(e.target.value)} placeholder="Server profile name" />
-              <button className="rounded border px-2 py-1" onClick={saveProfile} disabled={!activeServerId}>Save profile</button>
-            </div>
-            <div className="mt-2 text-muted-foreground">{status}</div>
-            <div className="mt-1 text-muted-foreground">
-              WS: {wsConnected ? "connected" : wsReconnecting ? "reconnecting..." : "disconnected"}
-            </div>
-            {!hasDesktopBridge ? (
-              <div className="mt-1 text-destructive">
-                Desktop voice bridge not detected. Reinstall/update `voip-desktop-client`.
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <Label className="mb-1 text-xs text-muted-foreground">Host</Label>
+                  <Input className="h-8 text-sm" value={apiHost} onChange={(e) => setApiHost(e.target.value)} placeholder="localhost" />
+                </div>
+                <div className="w-20">
+                  <Label className="mb-1 text-xs text-muted-foreground">Port</Label>
+                  <Input className="h-8 text-sm" value={apiPort} onChange={(e) => setApiPort(e.target.value)} placeholder="18080" />
+                </div>
               </div>
-            ) : null}
-            {error ? <div className="mt-1 text-destructive">{error}</div> : null}
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <Label className="mb-1 text-xs text-muted-foreground">Password</Label>
+                  <Input className="h-8 text-sm" type="password" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)} placeholder="Server password" />
+                </div>
+                <div className="flex-1">
+                  <Label className="mb-1 text-xs text-muted-foreground">Nickname</Label>
+                  <Input className="h-8 text-sm" value={displayNameInput} onChange={(e) => setDisplayNameInput(e.target.value)} placeholder="Your name" />
+                </div>
+              </div>
+              <details className="group">
+                <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                  Advanced options
+                </summary>
+                <div className="mt-2 space-y-2">
+                  <div>
+                    <Label className="mb-1 text-xs text-muted-foreground">Superuser password</Label>
+                    <Input className="h-8 text-sm" type="password" value={superuserPasswordInput} onChange={(e) => setSuperuserPasswordInput(e.target.value)} placeholder="Optional, grants admin" />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <Label className="mb-1 text-xs text-muted-foreground">Display name</Label>
+                      <Input className="h-8 text-sm" value={profileDisplayName} onChange={(e) => setProfileDisplayName(e.target.value)} placeholder="Server profile" />
+                    </div>
+                    <div className="flex items-end">
+                      <Button variant="outline" size="sm" onClick={saveProfile} disabled={!activeServerId}>Save</Button>
+                    </div>
+                  </div>
+                  {activeServerId && canManageServer && (
+                    <Button variant="outline" size="sm" className="w-full" onClick={() => void openAppSettings("server_general")}>
+                      Server settings
+                    </Button>
+                  )}
+                </div>
+              </details>
+              <Button className="w-full" onClick={() => void connectAndJoin()} disabled={joining}>
+                {joining ? <><Spinner className="mr-2" /> Connecting...</> : "Connect"}
+              </Button>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <div className="flex items-center gap-1">
+                  {connectedToApi ? <Wifi className="h-3 w-3 text-accent" /> : <WifiOff className="h-3 w-3" />}
+                  <span>{connectedToApi ? "API" : "API ?"}</span>
+                </div>
+                <span className="text-border">|</span>
+                <span>WS: {wsConnected ? "connected" : wsReconnecting ? "reconnecting..." : "disconnected"}</span>
+              </div>
+              {!hasDesktopBridge && (
+                <p className="text-xs text-destructive">Desktop voice bridge not detected.</p>
+              )}
+              {error && <p className="text-xs text-destructive">{error}</p>}
+            </div>
           </div>
         )}
         {activeServerId ? (
@@ -1616,328 +1649,316 @@ export default function VoIPApp() {
         />
       </div>
 
+      {/* Voice Stats Popover */}
       {showVoiceStatsPanel && (
-        <div className="fixed bottom-24 left-20 z-20 w-[360px] rounded border border-border bg-card p-3 text-xs shadow-lg">
-          <div className="mb-2 flex items-center justify-between font-semibold">
-            <span className={qualityClass}>Voice connection stats</span>
-            <button className="rounded border px-2 py-0.5" onClick={() => setShowVoiceStatsPanel(false)}>Close</button>
+        <div className="fixed bottom-24 left-20 z-20 w-[380px] rounded-xl border border-border bg-card p-4 shadow-xl">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <BarChart3 className={`h-4 w-4 ${qualityClass}`} />
+              <span className={`text-sm font-semibold ${qualityClass}`}>Voice Stats</span>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => setShowVoiceStatsPanel(false)}>Close</Button>
           </div>
           {voiceStats ? (
-            <div className="text-[11px] text-muted-foreground">
-              <div>Voice: {voiceStats.connected ? "connected" : "disconnected"} | Speaking now: {isSpeakingNow ? "yes" : "no"}</div>
-              <div>TX: {voiceStats.txPackets ?? 0} | RX: {voiceStats.rxPackets ?? 0}</div>
-              <div>Lost: {voiceStats.rxLostEstimated ?? 0} ({voiceStats.packetLossPct ?? 0}%)</div>
-              <div className={qualityClass}>Ping now: {voiceStats.pingNowMs ?? 0} ms | Jitter now: {voiceStats.jitterNowMs ?? 0} ms</div>
-              <div className={qualityClass}>Ping 1%: {voiceStats.ping1PctMs ?? 0} ms | Ping 0.1%: {voiceStats.ping01PctMs ?? 0} ms</div>
-              <div className={qualityClass}>Jitter 1%: {voiceStats.jitter1PctMs ?? 0} ms | Jitter 0.1%: {voiceStats.jitter01PctMs ?? 0} ms</div>
+            <div className="space-y-1.5 text-xs text-muted-foreground">
+              <div className="flex justify-between"><span>Status</span><span>{voiceStats.connected ? "Connected" : "Disconnected"} {isSpeakingNow ? "| Speaking" : ""}</span></div>
+              <div className="flex justify-between"><span>TX / RX</span><span>{voiceStats.txPackets ?? 0} / {voiceStats.rxPackets ?? 0}</span></div>
+              <div className="flex justify-between"><span>Loss</span><span>{voiceStats.rxLostEstimated ?? 0} ({voiceStats.packetLossPct ?? 0}%)</span></div>
+              <Separator />
+              <div className={`flex justify-between ${qualityClass}`}><span>Ping</span><span>{voiceStats.pingNowMs ?? 0}ms now / {voiceStats.ping1PctMs ?? 0}ms p1 / {voiceStats.ping01PctMs ?? 0}ms p0.1</span></div>
+              <div className={`flex justify-between ${qualityClass}`}><span>Jitter</span><span>{voiceStats.jitterNowMs ?? 0}ms now / {voiceStats.jitter1PctMs ?? 0}ms p1 / {voiceStats.jitter01PctMs ?? 0}ms p0.1</span></div>
             </div>
           ) : (
-            <div className="text-muted-foreground">No stats yet. Join a voice room and wait 1-2 seconds.</div>
+            <p className="text-sm text-muted-foreground">No stats yet. Join a voice channel.</p>
           )}
         </div>
       )}
 
-      {showAppSettings && (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
-          <div className="w-[760px] max-w-full rounded border border-border bg-card p-4 text-xs shadow-lg">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-semibold">Settings</div>
-              <button className="rounded border px-2 py-1" onClick={() => setShowAppSettings(false)}>
-                Close
-              </button>
-            </div>
-            <div className="mb-3 flex gap-2">
-              <button
-                className={`rounded border px-2 py-1 ${appSettingsTab === "voice" ? "bg-muted" : ""}`}
-                onClick={() => setAppSettingsTab("voice")}
-              >
-                Voice & Video
-              </button>
-              <button
-                className={`rounded border px-2 py-1 ${appSettingsTab === "keybinds" ? "bg-muted" : ""}`}
-                onClick={() => setAppSettingsTab("keybinds")}
-              >
-                Keybinds
-              </button>
+      {/* Settings Dialog */}
+      <Dialog open={showAppSettings} onOpenChange={setShowAppSettings}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Settings</DialogTitle>
+            <DialogDescription>Configure voice, video, keybinds, and server options.</DialogDescription>
+          </DialogHeader>
+          <Tabs value={appSettingsTab} onValueChange={(v) => setAppSettingsTab(v as typeof appSettingsTab)}>
+            <TabsList className="w-full">
+              <TabsTrigger value="voice">Voice & Video</TabsTrigger>
+              <TabsTrigger value="keybinds">Keybinds</TabsTrigger>
               {canOpenServerSettings && (
                 <>
-                  <button
-                    className={`rounded border px-2 py-1 ${appSettingsTab === "server_general" ? "bg-muted" : ""}`}
-                    onClick={() => setAppSettingsTab("server_general")}
-                  >
-                    Server: General
-                  </button>
-                  <button
-                    className={`rounded border px-2 py-1 ${appSettingsTab === "server_channels" ? "bg-muted" : ""}`}
-                    onClick={() => setAppSettingsTab("server_channels")}
-                  >
-                    Server: Channels
-                  </button>
-                  <button
-                    className={`rounded border px-2 py-1 ${appSettingsTab === "server_roles" ? "bg-muted" : ""}`}
-                    onClick={() => setAppSettingsTab("server_roles")}
-                  >
-                    Server: Roles
-                  </button>
+                  <TabsTrigger value="server_general">General</TabsTrigger>
+                  <TabsTrigger value="server_channels">Channels</TabsTrigger>
+                  <TabsTrigger value="server_roles">Roles</TabsTrigger>
                 </>
               )}
-            </div>
+            </TabsList>
 
-            {appSettingsTab === "voice" && (
-              <div className="space-y-3">
-                <div>
-                  <div className="mb-1 text-muted-foreground">Input device</div>
-                  <select
-                    className="w-full rounded border px-2 py-1"
-                    value={selectedDevices.inputId ?? ""}
-                    onChange={(e) => setSelectedDevices((prev) => ({ ...prev, inputId: e.target.value || null }))}
-                  >
-                    <option value="">Default</option>
-                    {audioDevices.input.map((d) => (
-                      <option key={d.id} value={d.id}>{d.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <div className="mb-1 text-muted-foreground">Output device</div>
-                  <select
-                    className="w-full rounded border px-2 py-1"
-                    value={selectedDevices.outputId ?? ""}
-                    onChange={(e) => setSelectedDevices((prev) => ({ ...prev, outputId: e.target.value || null }))}
-                  >
-                    <option value="">Default</option>
-                    {audioDevices.output.map((d) => (
-                      <option key={d.id} value={d.id}>{d.label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <div className="mb-1 text-muted-foreground">Input volume: {micVolumePct}%</div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={200}
-                    step={1}
-                    value={micVolumePct}
-                    onChange={(e) => setMicVolumePct(Number(e.target.value))}
-                    className="w-full"
-                  />
-                </div>
-                <div>
-                  <div className="mb-1 text-muted-foreground">Output volume: {outputVolumePct}%</div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={200}
-                    step={1}
-                    value={outputVolumePct}
-                    onChange={(e) => setOutputVolumePct(Number(e.target.value))}
-                    className="w-full"
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={noiseSuppressionEnabled}
-                    onChange={(e) => setNoiseSuppressionEnabled(e.target.checked)}
-                  />
-                  Active noise suppression (AEC/NS/AGC)
-                </label>
-                <button className="rounded border px-2 py-1" onClick={saveAudioSettings}>Apply</button>
-                {deviceError ? <div className="mt-2 text-destructive">{deviceError}</div> : null}
+            <TabsContent value="voice" className="space-y-5 pt-4">
+              <div className="space-y-2">
+                <Label>Input Device</Label>
+                <select
+                  className="w-full rounded-md border border-input bg-input px-3 py-2 text-sm focus:border-ring focus:outline-none"
+                  value={selectedDevices.inputId ?? ""}
+                  onChange={(e) => setSelectedDevices((prev) => ({ ...prev, inputId: e.target.value || null }))}
+                >
+                  <option value="">Default</option>
+                  {audioDevices.input.map((d) => (
+                    <option key={d.id} value={d.id}>{d.label}</option>
+                  ))}
+                </select>
               </div>
-            )}
+              <div className="space-y-2">
+                <Label>Output Device</Label>
+                <select
+                  className="w-full rounded-md border border-input bg-input px-3 py-2 text-sm focus:border-ring focus:outline-none"
+                  value={selectedDevices.outputId ?? ""}
+                  onChange={(e) => setSelectedDevices((prev) => ({ ...prev, outputId: e.target.value || null }))}
+                >
+                  <option value="">Default</option>
+                  {audioDevices.output.map((d) => (
+                    <option key={d.id} value={d.id}>{d.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Input Volume</Label>
+                  <span className="text-xs text-muted-foreground">{micVolumePct}%</span>
+                </div>
+                <Slider value={[micVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setMicVolumePct(v)} />
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Output Volume</Label>
+                  <span className="text-xs text-muted-foreground">{outputVolumePct}%</span>
+                </div>
+                <Slider value={[outputVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setOutputVolumePct(v)} />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div>
+                  <Label>Noise Suppression</Label>
+                  <p className="text-xs text-muted-foreground">Echo cancellation, noise suppression, auto gain</p>
+                </div>
+                <Switch checked={noiseSuppressionEnabled} onCheckedChange={setNoiseSuppressionEnabled} />
+              </div>
+              <Button onClick={saveAudioSettings}>Apply Audio Settings</Button>
+              {deviceError && <p className="text-sm text-destructive">{deviceError}</p>}
+            </TabsContent>
 
-            {appSettingsTab === "keybinds" && (
+            <TabsContent value="keybinds" className="space-y-5 pt-4">
+              <p className="text-sm text-muted-foreground">Global OS shortcuts (Electron format, e.g. Ctrl+Shift+M)</p>
               <div className="space-y-3">
-                <div className="text-muted-foreground">Global OS shortcuts (Electron format, e.g. Ctrl+Shift+M)</div>
-                <div className="grid grid-cols-[180px_1fr] items-center gap-2">
-                  <div>Toggle Mute</div>
-                  <input
-                    className="rounded border px-2 py-1"
-                    value={keybindDraft.toggleMute}
-                    onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleMute: e.target.value }))}
-                    placeholder="Ctrl+Shift+M"
-                  />
-                  <div>Toggle Deafen</div>
-                  <input
-                    className="rounded border px-2 py-1"
-                    value={keybindDraft.toggleDeafen}
-                    onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleDeafen: e.target.value }))}
-                    placeholder="Ctrl+Shift+D"
-                  />
-                  <div>Push To Talk (pulse)</div>
-                  <input
-                    className="rounded border px-2 py-1"
-                    value={keybindDraft.pushToTalk}
-                    onChange={(e) => setKeybindDraft((prev) => ({ ...prev, pushToTalk: e.target.value }))}
-                    placeholder="Ctrl+Shift+V"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <button className="rounded border px-2 py-1" onClick={saveKeybinds}>Save keybinds</button>
-                  <button className="rounded border px-2 py-1" onClick={clearKeybinds}>Clear</button>
-                </div>
-                <div className="text-muted-foreground">
-                  Active: mute={keybinds.toggleMute ?? "none"}, deafen={keybinds.toggleDeafen ?? "none"}, ptt={keybinds.pushToTalk ?? "none"}
+                <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+                  <Label>Toggle Mute</Label>
+                  <Input value={keybindDraft.toggleMute} onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleMute: e.target.value }))} placeholder="Ctrl+Shift+M" />
+                  <Label>Toggle Deafen</Label>
+                  <Input value={keybindDraft.toggleDeafen} onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleDeafen: e.target.value }))} placeholder="Ctrl+Shift+D" />
+                  <Label>Push To Talk</Label>
+                  <Input value={keybindDraft.pushToTalk} onChange={(e) => setKeybindDraft((prev) => ({ ...prev, pushToTalk: e.target.value }))} placeholder="Ctrl+Shift+V" />
                 </div>
               </div>
-            )}
-
-            {appSettingsTab === "server_general" && canOpenServerSettings && (
-              <div className="space-y-2 text-muted-foreground">
-                <div>Server: {servers.find((s) => s.id === activeServerId)?.name ?? "Unknown"}</div>
-                <div>ID: {activeServerId}</div>
-                <div>General server moderation/admin settings will live here.</div>
+              <div className="flex gap-2">
+                <Button onClick={saveKeybinds}>Save Keybinds</Button>
+                <Button variant="outline" onClick={clearKeybinds}>Clear All</Button>
               </div>
-            )}
+              <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground">
+                Active: mute={keybinds.toggleMute ?? "none"}, deafen={keybinds.toggleDeafen ?? "none"}, ptt={keybinds.pushToTalk ?? "none"}
+              </div>
+            </TabsContent>
 
-            {appSettingsTab === "server_channels" && canOpenServerSettings && (
-              <div className="space-y-3">
-                <div className="text-muted-foreground">
-                  Room/channel creation moved here. Only admins can create/edit channels.
-                </div>
-                <div className="flex gap-2">
-                  <input
-                    className="w-40 rounded border px-2 py-1"
-                    value={roomNameInput}
-                    onChange={(e) => setRoomNameInput(e.target.value)}
-                    placeholder="Channel name"
-                    disabled={creatingChannel}
-                  />
-                  <select
-                    className="w-24 rounded border px-2 py-1"
-                    value={roomKindInput}
-                    onChange={(e) => setRoomKindInput(e.target.value as "voice" | "text")}
-                    disabled={creatingChannel}
-                  >
-                    <option value="voice">voice</option>
-                    <option value="text">text</option>
-                  </select>
-                  <button
-                    className="rounded border px-2 py-1 disabled:opacity-50"
-                    onClick={() => void createChannelFromSettings()}
-                    disabled={creatingChannel || roomNameInput.trim().length === 0}
-                  >
-                    {creatingChannel ? "Creating..." : "Create channel"}
-                  </button>
-                </div>
-                <div className="max-h-52 overflow-auto rounded border p-2">
-                  {allChannels.length === 0 ? (
-                    <div className="text-muted-foreground">No channels.</div>
-                  ) : (
-                    allChannels.map((ch) => (
-                      <div key={ch.id} className="mb-1 flex items-center justify-between rounded border px-2 py-1">
-                        <span>
-                          {ch.type === "voice" ? "Voice" : "Text"}: {ch.name}
-                        </span>
-                        <span className="text-muted-foreground">{ch.id.slice(0, 8)}</span>
+            <TabsContent value="server_general" className="space-y-3 pt-4">
+              <div className="rounded-lg border border-border p-4 space-y-2">
+                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">Server</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? "Unknown"}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">ID</span><span className="text-xs font-mono text-muted-foreground">{activeServerId}</span></div>
+              </div>
+              <p className="text-sm text-muted-foreground">General server moderation/admin settings will live here.</p>
+            </TabsContent>
+
+            <TabsContent value="server_channels" className="space-y-4 pt-4">
+              <p className="text-sm text-muted-foreground">Only admins can create or edit channels.</p>
+              <div className="flex gap-2">
+                <Input className="flex-1" value={roomNameInput} onChange={(e) => setRoomNameInput(e.target.value)} placeholder="Channel name" disabled={creatingChannel} />
+                <select
+                  className="rounded-md border border-input bg-input px-3 py-2 text-sm"
+                  value={roomKindInput}
+                  onChange={(e) => setRoomKindInput(e.target.value as "voice" | "text")}
+                  disabled={creatingChannel}
+                >
+                  <option value="voice">Voice</option>
+                  <option value="text">Text</option>
+                </select>
+                <Button onClick={() => void createChannelFromSettings()} disabled={creatingChannel || roomNameInput.trim().length === 0}>
+                  {creatingChannel ? <><Spinner className="mr-2" /> Creating</> : "Create"}
+                </Button>
+              </div>
+              <div className="max-h-60 overflow-auto rounded-lg border border-border">
+                {allChannels.length === 0 ? (
+                  <div className="p-4 text-center text-sm text-muted-foreground">No channels yet.</div>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {allChannels.map((ch) => (
+                      <div key={ch.id} className="flex items-center justify-between px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className="text-[10px]">{ch.type === "voice" ? "Voice" : "Text"}</Badge>
+                          <span className="text-sm">{ch.name}</span>
+                        </div>
+                        <span className="text-xs font-mono text-muted-foreground">{ch.id.slice(0, 8)}</span>
                       </div>
-                    ))
-                  )}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
+            </TabsContent>
 
-            {appSettingsTab === "server_roles" && canOpenServerSettings && (
-              <div className="text-muted-foreground">
+            <TabsContent value="server_roles" className="pt-4">
+              <p className="text-sm text-muted-foreground">
                 Role permissions (channel access, moderation, speaking/mute controls) will be configured here.
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+              </p>
+            </TabsContent>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
 
       {/* Main Content */}
       {!activeServerId ? (
-        <div className="flex flex-1 items-center justify-center bg-background text-sm text-muted-foreground">
-          Connect and join a server to open chat and voice channels.
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-background p-8">
+          <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-muted">
+            <Headphones className="h-10 w-10 text-muted-foreground" />
+          </div>
+          <div className="text-center">
+            <h2 className="text-lg font-semibold text-foreground">Welcome to Voixex</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Connect to a server to start chatting and talking.</p>
+          </div>
+          <Button variant="outline" onClick={() => setShowConnectPanel(true)}>
+            <Server className="mr-2 h-4 w-4" /> Connect to Server
+          </Button>
         </div>
       ) : activeChannel?.type === "voice" ? (
         <div className="flex h-full flex-1 flex-col bg-background">
-          <div className="flex h-10 shrink-0 items-center justify-between border-b border-border bg-card px-3">
-            <div className="text-sm font-medium text-foreground">{activeChannel.name}</div>
+          {/* Voice channel toolbar */}
+          <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
             <div className="flex items-center gap-2">
-              <select
-                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
-                value={selectedScreenSourceId ?? ""}
-                onChange={(e) => setSelectedScreenSourceId(e.target.value || null)}
-                disabled={screenSources.length === 0}
-              >
-                {screenSources.length === 0 ? (
-                  <option value="">No sources</option>
-                ) : (
-                  screenSources.map((source) => (
-                    <option key={source.id} value={source.id}>
-                      {source.name}
-                    </option>
-                  ))
-                )}
-              </select>
-              <select
-                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
-                value={screenResolution}
-                onChange={(e) => setScreenResolution(e.target.value)}
-              >
-                <option value="854x480">480p</option>
-                <option value="1280x720">720p</option>
-                <option value="1600x900">900p</option>
-                <option value="1920x1080">1080p</option>
-              </select>
-              <select
-                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
-                value={String(screenFps)}
-                onChange={(e) => setScreenFps(Number(e.target.value))}
-              >
-                <option value="10">10 FPS</option>
-                <option value="15">15 FPS</option>
-                <option value="24">24 FPS</option>
-                <option value="30">30 FPS</option>
-                <option value="60">60 FPS</option>
-              </select>
-              <select
-                className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground"
-                value={String(screenBitrateKbps)}
-                onChange={(e) => setScreenBitrateKbps(Number(e.target.value))}
-              >
-                <option value="1200">1.2 Mbps</option>
-                <option value="2000">2.0 Mbps</option>
-                <option value="3500">3.5 Mbps</option>
-                <option value="5000">5.0 Mbps</option>
-                <option value="8000">8.0 Mbps</option>
-              </select>
-              <button
-                onClick={() => void handleScreenShareToggle()}
-                className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-                disabled={!isInVoice || !hasDesktopBridge}
-              >
-                {isScreenSharing ? "Stop Screen Share" : "Start Screen Share"}
-              </button>
-              <button
-                onClick={toggleStreamWindow}
-                className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-                disabled={!activeScreenSharerName && !screenImageUrl && !screenVideoUrl && !isScreenSharing}
-              >
-                {showingStreamWindow ? "Close Stream Window" : "Open Stream Window"}
-              </button>
-              <button
-                onClick={() => setShowMemberList(!showMemberList)}
-                className="rounded-sm border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-              >
-                {showMemberList ? "Hide members" : "Show members"}
-              </button>
+              <ScreenShare className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-semibold text-foreground">{activeChannel.name}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Select value={selectedScreenSourceId ?? ""} onValueChange={(v) => setSelectedScreenSourceId(v || null)}>
+                <SelectTrigger size="sm" className="h-7 w-40 text-xs" disabled={screenSources.length === 0}>
+                  <SelectValue placeholder="No sources" />
+                </SelectTrigger>
+                <SelectContent>
+                  {screenSources.map((source) => (
+                    <SelectItem key={source.id} value={source.id}>{source.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={screenResolution} onValueChange={setScreenResolution}>
+                <SelectTrigger size="sm" className="h-7 w-20 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="854x480">480p</SelectItem>
+                  <SelectItem value="1280x720">720p</SelectItem>
+                  <SelectItem value="1600x900">900p</SelectItem>
+                  <SelectItem value="1920x1080">1080p</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={String(screenFps)} onValueChange={(v) => setScreenFps(Number(v))}>
+                <SelectTrigger size="sm" className="h-7 w-20 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="10">10 FPS</SelectItem>
+                  <SelectItem value="15">15 FPS</SelectItem>
+                  <SelectItem value="24">24 FPS</SelectItem>
+                  <SelectItem value="30">30 FPS</SelectItem>
+                  <SelectItem value="60">60 FPS</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={String(screenBitrateKbps)} onValueChange={(v) => setScreenBitrateKbps(Number(v))}>
+                <SelectTrigger size="sm" className="h-7 w-24 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1200">1.2 Mbps</SelectItem>
+                  <SelectItem value="2000">2.0 Mbps</SelectItem>
+                  <SelectItem value="3500">3.5 Mbps</SelectItem>
+                  <SelectItem value="5000">5.0 Mbps</SelectItem>
+                  <SelectItem value="8000">8.0 Mbps</SelectItem>
+                </SelectContent>
+              </Select>
+
+              <Separator orientation="vertical" className="h-5" />
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={isScreenSharing ? "destructive" : "outline"}
+                    size="sm"
+                    onClick={() => void handleScreenShareToggle()}
+                    disabled={!isInVoice || !hasDesktopBridge}
+                    className="h-7 gap-1 text-xs"
+                  >
+                    {isScreenSharing ? <MonitorOff className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
+                    {isScreenSharing ? "Stop" : "Share"}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{isScreenSharing ? "Stop Screen Share" : "Start Screen Share"}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={toggleStreamWindow}
+                    disabled={!activeScreenSharerName && !screenImageUrl && !screenVideoUrl && !isScreenSharing}
+                    className="h-7 gap-1 text-xs"
+                  >
+                    {showingStreamWindow ? <EyeOff className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                    {showingStreamWindow ? "Close" : "Pop-out"}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{showingStreamWindow ? "Close Stream Window" : "Open Stream Window"}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={showMemberList ? "secondary" : "ghost"}
+                    size="icon-sm"
+                    className="h-7 w-7"
+                    onClick={() => setShowMemberList(!showMemberList)}
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{showMemberList ? "Hide Members" : "Show Members"}</TooltipContent>
+              </Tooltip>
             </div>
           </div>
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-sm text-muted-foreground">
-            {error ? <div className="rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive">{error}</div> : null}
-            {activeScreenSharerName ? <div>Screen share by: {activeScreenSharerName}</div> : <div>No active screen share.</div>}
+
+          {/* Voice channel body */}
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6">
+            {error && (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-sm text-destructive">
+                {error}
+              </div>
+            )}
             {activeScreenSharerName ? (
-              <div>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <ScreenShare className="h-4 w-4 text-accent" />
+                <span><span className="font-medium text-foreground">{activeScreenSharerName}</span> is sharing their screen</span>
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">No active screen share</div>
+            )}
+            {activeScreenSharerName && (
+              <div className="text-xs text-muted-foreground">
                 Watching: {(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"}
               </div>
-            ) : null}
+            )}
             {isScreenSharing ? (
-              <video ref={localPreviewVideoRef} autoPlay muted playsInline className="max-h-[70vh] w-auto rounded border border-border" />
+              <video ref={localPreviewVideoRef} autoPlay muted playsInline className="max-h-[70vh] w-auto rounded-xl border border-border shadow-lg" />
             ) : screenVideoUrl || screenImageUrl ? (
               <video
                 ref={remoteStreamVideoRef}
@@ -1946,10 +1967,17 @@ export default function VoIPApp() {
                 muted
                 playsInline
                 controls
-                className="max-h-[70vh] w-auto rounded border border-border"
+                className="max-h-[70vh] w-auto rounded-xl border border-border shadow-lg"
               />
             ) : (
-              <div>Voice channel selected. Text chat is available only in text channels.</div>
+              <div className="flex flex-col items-center gap-3 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+                  <ScreenShare className="h-8 w-8 text-muted-foreground" />
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Voice channel selected. Share your screen or wait for someone to start streaming.
+                </p>
+              </div>
             )}
           </div>
         </div>
@@ -1966,7 +1994,6 @@ export default function VoIPApp() {
         />
       )}
 
-      {/* Member List */}
       {showMemberList && activeServerId && (
         <MemberList members={members} roles={[]} />
       )}

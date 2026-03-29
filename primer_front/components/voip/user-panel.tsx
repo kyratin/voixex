@@ -1,7 +1,9 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Mic, MicOff, Headphones, HeadphoneOff, Settings, PhoneOff, Circle } from "lucide-react"
+import { Mic, MicOff, Headphones, HeadphoneOff, Settings, PhoneOff, Signal } from "lucide-react"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
+import { Button } from "@/components/ui/button"
 
 interface UserPanelProps {
   user: {
@@ -23,6 +25,13 @@ interface UserPanelProps {
   voiceStatsSummary?: string
 }
 
+const statusColors: Record<string, string> = {
+  online: "bg-accent",
+  idle: "bg-yellow-500",
+  dnd: "bg-destructive",
+  offline: "bg-muted-foreground"
+}
+
 export function UserPanel({ 
   user, 
   isMuted, 
@@ -36,80 +45,98 @@ export function UserPanel({
   onToggleVoiceStats,
   voiceStatsSummary
 }: UserPanelProps) {
-  const statusColors = {
-    online: "fill-accent text-accent",
-    idle: "fill-yellow-500 text-yellow-500",
-    dnd: "fill-destructive text-destructive",
-    offline: "fill-muted-foreground text-muted-foreground"
-  }
-
   return (
-    <div className="border-r border-t border-border bg-sidebar">
-      {/* Voice Connected Panel */}
+    <div className="bg-sidebar/80 border-t border-border">
       {isInVoice && (
-        <div className="flex items-center justify-between border-b border-border px-2 py-1.5">
-          <button onClick={onToggleVoiceStats} className="text-left">
-            <div className="text-[10px] font-semibold text-accent">Voice Connected</div>
-            <div className="text-[10px] text-muted-foreground">{voiceChannelName}</div>
-            {voiceStatsSummary ? <div className="text-[10px] text-muted-foreground">{voiceStatsSummary}</div> : null}
+        <div className="flex items-center justify-between border-b border-border px-3 py-2">
+          <button onClick={onToggleVoiceStats} className="flex items-center gap-2 text-left">
+            <Signal className="h-4 w-4 text-accent" />
+            <div>
+              <div className="text-xs font-semibold text-accent">Voice Connected</div>
+              <div className="text-[11px] text-muted-foreground">{voiceChannelName}</div>
+              {voiceStatsSummary ? <div className="text-[10px] text-muted-foreground">{voiceStatsSummary}</div> : null}
+            </div>
           </button>
-          <button 
-            onClick={onDisconnect}
-            className="rounded border border-border p-1 text-muted-foreground hover:bg-muted hover:text-destructive"
-            title="Disconnect"
-          >
-            <PhoneOff className="h-3.5 w-3.5" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onDisconnect}
+                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              >
+                <PhoneOff className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Disconnect</TooltipContent>
+          </Tooltip>
         </div>
       )}
 
-      {/* User Info */}
-      <div className="flex items-center gap-2 p-2">
-        {/* Avatar with Status */}
+      <div className="flex items-center gap-2.5 px-3 py-2">
         <div className="relative shrink-0">
-          <div className="h-8 w-8 rounded border border-border bg-muted flex items-center justify-center text-xs font-medium text-muted-foreground">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
             {user.avatar}
           </div>
-          <Circle className={cn("absolute -bottom-0.5 -right-0.5 h-3 w-3", statusColors[user.status])} />
+          <div className={cn(
+            "absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full ring-2 ring-sidebar",
+            statusColors[user.status]
+          )} />
         </div>
 
-        {/* Name */}
         <div className="flex-1 min-w-0">
-          <div className="truncate text-xs font-medium text-foreground">{user.name}</div>
-          <div className="truncate text-[10px] text-muted-foreground">#{user.discriminator}</div>
+          <div className="truncate text-sm font-medium text-foreground">{user.name}</div>
+          <div className="truncate text-[11px] text-muted-foreground">#{user.discriminator}</div>
         </div>
 
-        {/* Control Buttons */}
-        <div className="flex gap-0.5">
-          <button
-            onClick={onToggleMute}
-            className={cn(
-              "rounded border border-border p-1 text-muted-foreground hover:bg-muted hover:text-foreground",
-              isMuted && "text-destructive hover:text-destructive"
-            )}
-            title={isMuted ? "Unmute" : "Mute"}
-          >
-            {isMuted ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
-          </button>
+        <div className="flex gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onToggleMute}
+                className={cn(
+                  "text-muted-foreground",
+                  isMuted && "text-destructive hover:text-destructive"
+                )}
+              >
+                {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{isMuted ? "Unmute" : "Mute"}</TooltipContent>
+          </Tooltip>
 
-          <button
-            onClick={onToggleDeafen}
-            className={cn(
-              "rounded border border-border p-1 text-muted-foreground hover:bg-muted hover:text-foreground",
-              isDeafened && "text-destructive hover:text-destructive"
-            )}
-            title={isDeafened ? "Undeafen" : "Deafen"}
-          >
-            {isDeafened ? <HeadphoneOff className="h-3.5 w-3.5" /> : <Headphones className="h-3.5 w-3.5" />}
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onToggleDeafen}
+                className={cn(
+                  "text-muted-foreground",
+                  isDeafened && "text-destructive hover:text-destructive"
+                )}
+              >
+                {isDeafened ? <HeadphoneOff className="h-4 w-4" /> : <Headphones className="h-4 w-4" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{isDeafened ? "Undeafen" : "Deafen"}</TooltipContent>
+          </Tooltip>
 
-          <button
-            onClick={onOpenSettings}
-            className="rounded border border-border p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            title="Settings"
-          >
-            <Settings className="h-3.5 w-3.5" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onOpenSettings}
+                className="text-muted-foreground"
+              >
+                <Settings className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Settings</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </div>
