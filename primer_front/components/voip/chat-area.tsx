@@ -1,8 +1,13 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Users, Send, Paperclip } from "lucide-react"
+import { Hash, Users, Send, Paperclip, MessageSquare } from "lucide-react"
 import { useState, useRef, useEffect } from "react"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
+import { Badge } from "@/components/ui/badge"
+import { Spinner } from "@/components/ui/spinner"
 
 export interface Message {
   id: string
@@ -95,131 +100,146 @@ export function ChatArea({
     return `${hours}:${minutes}`
   }
 
-  const formatDate = (date: Date) => {
+  const formatRelativeTime = (date: Date) => {
     const now = new Date()
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    const yesterday = new Date(today)
-    yesterday.setDate(yesterday.getDate() - 1)
-    const msgDate = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+    const diffMs = now.getTime() - date.getTime()
+    const diffMin = Math.floor(diffMs / 60000)
+    if (diffMin < 1) return "just now"
+    if (diffMin < 60) return `${diffMin}m ago`
+    const diffHr = Math.floor(diffMin / 60)
+    if (diffHr < 24) return `${diffHr}h ago`
+    const diffDay = Math.floor(diffHr / 24)
+    if (diffDay < 7) return `${diffDay}d ago`
+    return formatFullDate(date)
+  }
 
-    if (msgDate.getTime() === today.getTime()) {
-      return `Today ${formatTime(date)}`
-    } else if (msgDate.getTime() === yesterday.getTime()) {
-      return `Yesterday ${formatTime(date)}`
-    } else {
-      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-      return `${months[date.getMonth()]} ${date.getDate()} ${formatTime(date)}`
-    }
+  const formatFullDate = (date: Date) => {
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()} ${formatTime(date)}`
   }
 
   return (
     <div className="flex h-full flex-1 flex-col bg-background">
-      {/* Channel Header */}
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border bg-card px-3">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
         <div className="flex items-center gap-2">
-          <Hash className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium text-foreground">{channelName}</span>
+          <Hash className="h-5 w-5 text-muted-foreground" />
+          <span className="text-sm font-semibold text-foreground">{channelName}</span>
         </div>
-        <button 
-          onClick={onToggleMemberList}
-          className={cn(
-            "rounded-sm border border-border p-1 text-muted-foreground hover:bg-muted hover:text-foreground",
-            showMemberList && "bg-muted text-foreground"
-          )}
-          title="Toggle member list"
-        >
-          <Users className="h-4 w-4" />
-        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant={showMemberList ? "secondary" : "ghost"}
+              size="icon-sm"
+              onClick={onToggleMemberList}
+            >
+              <Users className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Toggle member list</TooltipContent>
+        </Tooltip>
       </div>
 
-      {/* Messages Area */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto border-b border-border">
-        <div className="p-3">
-          {/* Welcome Message */}
-          <div className="mb-4 border-b border-border pb-3">
-            <div className="text-sm font-semibold text-foreground">
-              Welcome to #{channelName}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        {messages.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+              <MessageSquare className="h-8 w-8 text-muted-foreground" />
             </div>
-            <p className="text-xs text-muted-foreground">
-              This is the beginning of the channel.
-            </p>
+            <div>
+              <h3 className="text-base font-semibold text-foreground">Welcome to #{channelName}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                This is the start of the channel. Send a message to begin the conversation.
+              </p>
+            </div>
           </div>
+        ) : (
+          <div className="p-4">
+            <div className="mb-4 pb-4 border-b border-border">
+              <h3 className="text-base font-semibold text-foreground">Welcome to #{channelName}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                This is the beginning of the channel.
+              </p>
+            </div>
 
-          {/* Messages */}
-          <div className="space-y-2">
-            {messages.map((message) => (
-              <div key={message.id} className="flex gap-2">
-                {/* Avatar */}
-                <div className="h-8 w-8 shrink-0 rounded border border-border bg-muted flex items-center justify-center text-xs font-medium text-muted-foreground">
-                  {message.author.avatar}
-                </div>
-                
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-sm font-semibold text-foreground">
-                      {message.author.name}
-                    </span>
-                    {message.author.isBot && (
-                      <span className="rounded border border-primary bg-primary/10 px-1 text-[10px] font-medium text-primary">
-                        BOT
-                      </span>
-                    )}
-                    <span className="text-[10px] text-muted-foreground">
-                      {formatDate(message.timestamp)}
-                    </span>
+            <div className="space-y-4">
+              {messages.map((message) => (
+                <div key={message.id} className="group flex gap-3 rounded-lg px-2 py-1 -mx-2 hover:bg-muted/30">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-muted-foreground">
+                    {message.author.avatar}
                   </div>
-                  <p className="text-sm text-foreground break-words">{message.content}</p>
-                  {message.attachments && message.attachments.length > 0 && (
-                    <div className="mt-2 space-y-2">
-                      {message.attachments.map((attachment) => (
-                        <div key={attachment.id} className="rounded border border-border bg-card p-2">
-                          <div className="mb-1 text-xs text-muted-foreground">
-                            {attachment.name} ({formatFileSize(attachment.sizeBytes)})
-                          </div>
-                          {attachment.mime.startsWith("image/") ? (
-                            <img src={attachment.url} alt={attachment.name} className="max-h-56 rounded border border-border" />
-                          ) : attachment.mime.startsWith("video/") ? (
-                            <video controls className="max-h-56 w-full rounded border border-border" src={attachment.url} />
-                          ) : attachment.mime.startsWith("audio/") ? (
-                            <audio controls className="w-full" src={attachment.url} />
-                          ) : (
-                            <a href={attachment.url} target="_blank" rel="noreferrer" className="text-xs text-primary underline">
-                              Download attachment
-                            </a>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
                   
-                  {/* Reactions */}
-                  {message.reactions && message.reactions.length > 0 && (
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {message.reactions.map((reaction, i) => (
-                        <button
-                          key={i}
-                          className={cn(
-                            "flex items-center gap-1 rounded border border-border bg-muted px-1.5 py-0.5 text-xs hover:bg-secondary",
-                            reaction.reacted && "border-primary bg-primary/10"
-                          )}
-                        >
-                          <span>{reaction.emoji}</span>
-                          <span className="text-muted-foreground">{reaction.count}</span>
-                        </button>
-                      ))}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-semibold text-foreground">
+                        {message.author.name}
+                      </span>
+                      {message.author.isBot && (
+                        <Badge variant="default" className="h-4 px-1 text-[9px]">BOT</Badge>
+                      )}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-[11px] text-muted-foreground cursor-default">
+                            {formatRelativeTime(message.timestamp)}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          {formatFullDate(message.timestamp)}
+                        </TooltipContent>
+                      </Tooltip>
+                      {message.isEdited && (
+                        <span className="text-[10px] text-muted-foreground">(edited)</span>
+                      )}
                     </div>
-                  )}
+                    <p className="text-sm text-foreground/90 break-words leading-relaxed">{message.content}</p>
+                    {message.attachments && message.attachments.length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        {message.attachments.map((attachment) => (
+                          <div key={attachment.id} className="max-w-md rounded-lg border border-border bg-card p-3">
+                            <div className="mb-2 text-xs text-muted-foreground">
+                              {attachment.name} ({formatFileSize(attachment.sizeBytes)})
+                            </div>
+                            {attachment.mime.startsWith("image/") ? (
+                              <img src={attachment.url} alt={attachment.name} className="max-h-64 rounded-md" />
+                            ) : attachment.mime.startsWith("video/") ? (
+                              <video controls className="max-h-64 w-full rounded-md" src={attachment.url} />
+                            ) : attachment.mime.startsWith("audio/") ? (
+                              <audio controls className="w-full" src={attachment.url} />
+                            ) : (
+                              <a href={attachment.url} target="_blank" rel="noreferrer" className="text-sm text-primary hover:underline">
+                                Download attachment
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {message.reactions && message.reactions.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {message.reactions.map((reaction, i) => (
+                          <button
+                            key={i}
+                            className={cn(
+                              "flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors hover:bg-muted",
+                              reaction.reacted ? "border-primary/50 bg-primary/10" : "border-border"
+                            )}
+                          >
+                            <span>{reaction.emoji}</span>
+                            <span className="text-muted-foreground">{reaction.count}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Message Input */}
-      <div className="shrink-0 bg-card p-3">
-        <div className="flex items-center gap-2">
+      <div className="shrink-0 border-t border-border px-4 py-3">
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-input px-3 py-1 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring/50">
           <input
             ref={fileInputRef}
             type="file"
@@ -227,30 +247,44 @@ export function ChatArea({
             onChange={handleSelectAttachment}
             disabled={!canSend || uploading}
           />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={!canSend || uploading}
-            className="rounded border border-border px-2 py-2 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-            title="Attach file"
-          >
-            <Paperclip className="h-4 w-4" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={!canSend || uploading}
+                className="shrink-0 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+              >
+                {uploading ? <Spinner className="h-5 w-5" /> : <Paperclip className="h-5 w-5" />}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{uploading ? "Uploading..." : "Attach file"}</TooltipContent>
+          </Tooltip>
           <input
             type="text"
             value={messageInput}
             onChange={(e) => setMessageInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={canSend ? `Message #${channelName}` : "Messaging disabled for this channel"}
+            placeholder={canSend ? `Message #${channelName}` : "Messaging disabled"}
             disabled={!canSend}
-            className="flex-1 rounded border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+            className="flex-1 bg-transparent py-1.5 text-sm text-foreground placeholder:text-muted-foreground outline-none disabled:cursor-not-allowed"
           />
-          <button
-            onClick={handleSend}
-            disabled={!messageInput.trim() || !canSend}
-            className="rounded border border-border bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Send className="h-4 w-4" />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                onClick={handleSend}
+                disabled={!messageInput.trim() || !canSend}
+                className={cn(
+                  "shrink-0 rounded-md p-1.5 transition-colors",
+                  messageInput.trim() && canSend
+                    ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                    : "text-muted-foreground opacity-50"
+                )}
+              >
+                <Send className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Send message</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </div>
