@@ -465,12 +465,8 @@ export default function VoIPApp() {
         ? chunk.buffer
         : chunk.slice().buffer
 
-    const isWebmInitSegment =
-      chunk.length >= 4 && chunk[0] === 0x1a && chunk[1] === 0x45 && chunk[2] === 0xdf && chunk[3] === 0xa3
-
-    if (isWebmInitSegment && remoteMediaSourceRef.current) {
-      resetRemoteStreamPlayback()
-    }
+    // Do not reset MSE on every EBML-leading chunk: MediaRecorder often emits a full WebM
+    // header at the start of each timeslice fragment; resetting here destroys playback.
 
     const drainRemoteMse = () => {
       const sbuf = remoteSourceBufferRef.current
