@@ -170,11 +170,11 @@ export default function VoIPApp() {
 
   const currentUser = useMemo(
     () => ({
-      id: "me",
+  id: "me",
       name: profileDisplayName,
-      discriminator: "0001",
+  discriminator: "0001",
       avatar: profileDisplayName.slice(0, 1).toUpperCase() || "U",
-      status: "online" as const
+  status: "online" as const
     }),
     [profileDisplayName]
   )
@@ -689,6 +689,16 @@ export default function VoIPApp() {
           echoCancellation: noiseSuppressionEnabled,
           noiseSuppression: noiseSuppressionEnabled,
           autoGainControl: noiseSuppressionEnabled
+        }
+        if (window.electronVoice?.requestMicrophoneAccess) {
+          const micAccess = await window.electronVoice.requestMicrophoneAccess()
+          if (!micAccess.granted) {
+            const msg =
+              "Microphone access was denied. Allow Voixex in System Settings → Privacy & Security → Microphone."
+            setDeviceError(msg)
+            toast.error(msg)
+            return
+          }
         }
         let stream: MediaStream
         try {
@@ -1617,13 +1627,13 @@ export default function VoIPApp() {
           </div>
         )}
         {activeServerId ? (
-          <ChannelSidebar
+        <ChannelSidebar
             serverName={servers.find((s) => s.id === activeServerId)?.name || "No Server"}
-            categories={categories}
-            activeChannelId={activeChannelId}
-            onChannelSelect={handleChannelSelect}
-            voiceUsers={voiceUsers}
-          />
+          categories={categories}
+          activeChannelId={activeChannelId}
+          onChannelSelect={handleChannelSelect}
+          voiceUsers={voiceUsers}
+        />
         ) : null}
         <UserPanel
           user={currentUser}
@@ -1982,16 +1992,16 @@ export default function VoIPApp() {
           </div>
         </div>
       ) : (
-        <ChatArea
-          channelName={activeChannel?.name || "general"}
-          channelType={activeChannel?.type || "text"}
-          messages={messages}
-          onSendMessage={handleSendMessage}
+      <ChatArea
+        channelName={activeChannel?.name || "general"}
+        channelType={activeChannel?.type || "text"}
+        messages={messages}
+        onSendMessage={handleSendMessage}
           onUploadAttachment={handleUploadAttachment}
           canSend={Boolean(activeServerId && activeChannelId && isTextChannel)}
-          showMemberList={showMemberList}
-          onToggleMemberList={() => setShowMemberList(!showMemberList)}
-        />
+        showMemberList={showMemberList}
+        onToggleMemberList={() => setShowMemberList(!showMemberList)}
+      />
       )}
 
       {showMemberList && activeServerId && (

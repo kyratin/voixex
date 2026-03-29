@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron")
 
 const electronVoice = {
+  requestMicrophoneAccess: () => ipcRenderer.invoke("voice:requestMicrophoneAccess"),
   connect: (payload) => ipcRenderer.invoke("voice:connect", payload),
   joinRoom: (roomId) => ipcRenderer.invoke("voice:joinRoom", roomId),
   leaveRoom: () => ipcRenderer.invoke("voice:leaveRoom"),

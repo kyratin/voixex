@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, session } from "electron"
+import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, session, systemPreferences } from "electron"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { join } from "node:path"
@@ -114,6 +114,18 @@ app.whenReady().then(() => {
       win.webContents.send("voice:screenChunk", chunkBase64)
     }
   })
+  ipcMain.handle("voice:requestMicrophoneAccess", async () => {
+    if (process.platform !== "darwin") {
+      return { granted: true as const }
+    }
+    try {
+      const granted = await systemPreferences.askForMediaAccess("microphone")
+      return { granted }
+    } catch {
+      return { granted: false as const }
+    }
+  })
+
   ipcMain.handle("voice:connect", (_event, payload: { host: string; port: number; mediaToken: string }) => {
     return voice.connect(payload)
   })
