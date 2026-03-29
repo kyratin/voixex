@@ -18,7 +18,8 @@
     "dist": "npm run prepare:ui && electron-builder",
     "dist:win": "npm run prepare:ui && electron-builder --win nsis",
     "dist:linux": "npm run prepare:ui && electron-builder --linux AppImage deb",
-    "dist:mac": "npm run prepare:ui && electron-builder --mac dmg"
+    "dist:mac": "npm run prepare:ui && electron-builder --mac dmg",
+    "dist:mac:zip": "npm run prepare:ui && electron-builder --mac zip"
   },
   "dependencies": {
     "voip-voice-client": "file:../voice-client"
@@ -62,7 +63,11 @@
         "dmg"
       ],
       "category": "public.app-category.social-networking",
-      "identity": null
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Voixex uses the microphone for voice chat in channels.",
+        "NSScreenCaptureUsageDescription": "Voixex needs screen capture permission to share your display with others."
+      }
     },
     "dmg": {
       "backgroundColor": "#111111",
