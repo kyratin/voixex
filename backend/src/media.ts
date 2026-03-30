@@ -1,6 +1,7 @@
 import dgram, { type RemoteInfo } from "node:dgram"
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto"
 import type { FastifyBaseLogger } from "fastify"
+import OpusScript from "opusscript"
 import { MEDIA_MAGIC } from "./contracts.js"
 import { config } from "./config.js"
 import { verifyToken } from "./token.js"
@@ -8,6 +9,10 @@ import { verifyToken } from "./token.js"
 const MEDIA_CIPHER = "aes-256-gcm"
 const MEDIA_KIND_AUDIO = 0
 const MEDIA_KIND_SCREEN = 1
+const MEDIA_KIND_OPUS = 2
+
+const OPUS_SAMPLE_RATE = 48_000
+const OPUS_CHANNELS = 1
 
 type MemberSession = {
   clientId: string
@@ -196,6 +201,7 @@ type MediaHooks = {
 
 export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks = {}) {
   const socket = dgram.createSocket("udp4")
+  const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO)
 
   socket.on("message", (packet: Buffer, rinfo: RemoteInfo) => {
     if (packet.length < 20) return
@@ -331,11 +337,23 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       return
     }
 
-    if (decoded.kind === MEDIA_KIND_AUDIO) {
-      if (session.muted) {
-        return
+    if (decoded.kind === MEDIA_KIND_AUDIO || decoded.kind === MEDIA_KIND_OPUS) {
+      if (session.muted) return
+
+      let pcm16: Buffer | null = null
+      if (decoded.kind === MEDIA_KIND_AUDIO) {
+        pcm16 = decoded.payload
+      } else {
+        try {
+          const out = opusDecoder.decode(decoded.payload)
+          pcm16 = Buffer.isBuffer(out) ? out : Buffer.from(out)
+        } catch {
+          session.rxDecryptDropped += 1
+          return
+        }
       }
-      const energy = calcRmsEnergyPcm16(decoded.payload)
+
+      const energy = calcRmsEnergyPcm16(pcm16)
       const nowEnergyTs = Date.now()
       const speakingThreshold = 0.02
       if (energy > speakingThreshold) {
@@ -348,7 +366,7 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       }
 
       const list = roomFrames.get(session.roomId) ?? []
-      list.push({ clientId: session.clientId, pcm16: decoded.payload })
+      list.push({ clientId: session.clientId, pcm16 })
       roomFrames.set(session.roomId, list)
       return
     }
