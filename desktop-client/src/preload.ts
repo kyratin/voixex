@@ -19,6 +19,7 @@ const electronVoice = {
     ipcRenderer.invoke("voice:setKeybinds", keybinds),
   clearKeybinds: () => ipcRenderer.invoke("voice:clearKeybinds"),
   sendPcm16Frame: (pcm16Base64: string) => ipcRenderer.invoke("voice:sendPcm16Frame", pcm16Base64),
+  sendOpusFrame: (opusBase64: string) => ipcRenderer.invoke("voice:sendOpusFrame", opusBase64),
   sendScreenChunk: (chunkBase64: string) => ipcRenderer.invoke("voice:sendScreenChunk", chunkBase64),
   listScreenSources: () => ipcRenderer.invoke("screenShare:listSources"),
   setScreenSource: (sourceId: string | null) => ipcRenderer.invoke("screenShare:setSource", sourceId),

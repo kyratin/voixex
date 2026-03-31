@@ -5,6 +5,7 @@ const MEDIA_MAGIC = Buffer.from([0x56, 0x50, 0x01])
 const MEDIA_CIPHER = "aes-256-gcm"
 const MEDIA_KIND_AUDIO = 0
 const MEDIA_KIND_SCREEN = 1
+const MEDIA_KIND_OPUS = 2
 
 type VoiceClientOptions = {
   host: string
@@ -118,6 +119,14 @@ export class VoiceEngine {
     if (!this.connected || !this.roomId || this.muted) return
     if (Date.now() - this.lastHelloAtMs > 5000) this.sendHello()
     const packet = this.encrypt(this.roomId, frame, MEDIA_KIND_AUDIO)
+    this.socket.send(packet, this.port, this.host)
+    this.txPackets += 1
+  }
+
+  sendOpusFrame(packetPayload: Buffer) {
+    if (!this.connected || !this.roomId || this.muted) return
+    if (Date.now() - this.lastHelloAtMs > 5000) this.sendHello()
+    const packet = this.encrypt(this.roomId, packetPayload, MEDIA_KIND_OPUS)
     this.socket.send(packet, this.port, this.host)
     this.txPackets += 1
   }

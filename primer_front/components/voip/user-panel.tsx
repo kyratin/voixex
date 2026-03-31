@@ -9,7 +9,6 @@ interface UserPanelProps {
   user: {
     id: string
     name: string
-    discriminator: string
     avatar: string
     status: "online" | "idle" | "dnd" | "offline"
   }
@@ -86,7 +85,6 @@ export function UserPanel({
 
         <div className="flex-1 min-w-0">
           <div className="truncate text-sm font-medium text-foreground">{user.name}</div>
-          <div className="truncate text-[11px] text-muted-foreground">#{user.discriminator}</div>
         </div>
 
         <div className="flex gap-1">

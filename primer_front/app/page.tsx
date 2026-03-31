@@ -1,12 +1,14 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Buffer } from "buffer"
 import { ServerSidebar } from "@/components/voip/server-sidebar"
 import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-sidebar"
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient, type RealtimeState } from "@/lib/voip-client"
+import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -55,10 +57,13 @@ export default function VoIPApp() {
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
     captureSinkNode: MediaStreamAudioDestinationNode
+    monitorDestNode: MediaStreamAudioDestinationNode
     playbackCtx: AudioContext
     playbackNode: ScriptProcessorNode
     playbackFilterNode: BiquadFilterNode
     outputGainNode: GainNode
+    monitorSourceNode: MediaStreamAudioSourceNode
+    monitorGainNode: GainNode
     queue: Int16Array[]
     txRemainder: Int16Array
     txResampleInput: Float32Array
@@ -69,6 +74,7 @@ export default function VoIPApp() {
     unsubscribeScreenChunk: (() => void) | null
     lastIncomingAudioAtMs: number
     playbackIdleTimer: ReturnType<typeof setInterval> | null
+    captureGateOpenUntilMs: number
   }
 
   const [activeServerId, setActiveServerId] = useState("")
@@ -88,6 +94,9 @@ export default function VoIPApp() {
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
   const [categories, setCategories] = useState<ChannelCategory[]>([])
   const [voiceUsers, setVoiceUsers] = useState<Record<string, Array<{ id: string; name: string; avatar: string; isMuted?: boolean; isDeafened?: boolean; isSpeaking?: boolean }>>>({})
+  /** Bumps when peer volume localStorage changes so sidebar sliders re-read stored values. */
+  const [peerVolumeRevision, setPeerVolumeRevision] = useState(0)
+  const [myVoiceClientId, setMyVoiceClientId] = useState<string | null>(null)
   const [members, setMembers] = useState<Member[]>([])
   const [status, setStatus] = useState("Disconnected")
   const [error, setError] = useState("")
@@ -119,6 +128,15 @@ export default function VoIPApp() {
   const [micVolumePct, setMicVolumePct] = useState(100)
   const [outputVolumePct, setOutputVolumePct] = useState(100)
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true)
+  const [echoCancellationEnabled, setEchoCancellationEnabled] = useState(true)
+  const [autoGainControlEnabled, setAutoGainControlEnabled] = useState(true)
+  const [useOpusUplink, setUseOpusUplink] = useState(false)
+  const [monitorEnabled, setMonitorEnabled] = useState(false)
+  const [monitorVolumePct, setMonitorVolumePct] = useState(15)
+  const [gateEnabled, setGateEnabled] = useState(false)
+  const [gateThreshold, setGateThreshold] = useState(150)
+  const [gateReleaseMs, setGateReleaseMs] = useState(180)
+  const [micMeter, setMicMeter] = useState<{ rms: number; peak: number } | null>(null)
   const [keybinds, setKeybinds] = useState<{ toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }>({
     toggleMute: null,
     toggleDeafen: null,
@@ -176,6 +194,13 @@ export default function VoIPApp() {
   const voicePipelineRef = useRef<VoicePipelineRuntime | null>(null)
   const mutedRef = useRef(isMuted)
   const deafenedRef = useRef(isDeafened)
+  const micVolumePctRef = useRef(micVolumePct)
+  const outputVolumePctRef = useRef(outputVolumePct)
+  const monitorEnabledRef = useRef(monitorEnabled)
+  const monitorVolumePctRef = useRef(monitorVolumePct)
+  const gateEnabledRef = useRef(gateEnabled)
+  const gateThresholdRef = useRef(gateThreshold)
+  const gateReleaseMsRef = useRef(gateReleaseMs)
   const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   /** Serializes sidebar server switches so disconnect + connect never overlap. */
@@ -187,7 +212,6 @@ export default function VoIPApp() {
     () => ({
   id: "me",
       name: profileDisplayName,
-  discriminator: "0001",
       avatar: profileDisplayName.slice(0, 1).toUpperCase() || "U",
   status: "online" as const
     }),
@@ -211,6 +235,54 @@ export default function VoIPApp() {
 
   const getVoiceWsClientRef = useRef(getVoiceWsClient)
   getVoiceWsClientRef.current = getVoiceWsClient
+
+  const peerVolTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  const peerVolServerId = voiceServerId || activeServerId
+  const peerVolumePct = useMemo(() => {
+    if (!peerVolServerId) return {}
+    const out: Record<string, number> = {}
+    for (const roomId of Object.keys(voiceUsers)) {
+      for (const u of voiceUsers[roomId] ?? []) {
+        out[`${roomId}:${u.id}`] = getPeerVolume(peerVolServerId, roomId, u.id, u.name)
+      }
+    }
+    return out
+  }, [peerVolServerId, voiceUsers, peerVolumeRevision])
+
+  const peerVolRosterSig = useMemo(() => {
+    if (!peerVolServerId) return ""
+    const parts: string[] = []
+    for (const roomId of Object.keys(voiceUsers).sort()) {
+      const ids = (voiceUsers[roomId] ?? [])
+        .map((u) => u.id)
+        .sort()
+        .join(",")
+      parts.push(`${roomId}:${ids}`)
+    }
+    return parts.join("|")
+  }, [peerVolServerId, voiceUsers])
+
+  const handlePeerVolumeChange = useCallback((roomId: string, targetClientId: string, targetName: string, volumePct: number) => {
+    const sid = voiceServerIdRef.current || activeServerIdRef.current
+    if (!sid || !roomId) return
+    setPeerVolumeStored(sid, roomId, targetClientId, targetName, volumePct)
+    setPeerVolumeRevision((r) => r + 1)
+    const prev = peerVolTimersRef.current[targetClientId]
+    if (prev) clearTimeout(prev)
+    peerVolTimersRef.current[targetClientId] = setTimeout(() => {
+      getVoiceWsClientRef.current().setPeerVolume(roomId, targetClientId, volumePct)
+      delete peerVolTimersRef.current[targetClientId]
+    }, 100)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      for (const t of Object.values(peerVolTimersRef.current)) {
+        clearTimeout(t)
+      }
+    }
+  }, [])
 
   const isInVoiceRef = useRef(isInVoice)
   useEffect(() => {
@@ -238,6 +310,9 @@ export default function VoIPApp() {
       const uVu = uiClient.toVoiceUsers()
       const vVu = split && v ? voiceClient.toVoiceUsers() : {}
       setVoiceUsers({ ...uVu, ...vVu })
+
+      const voiceWs = split ? voiceClient : uiClient
+      setMyVoiceClientId(voiceWs.getMeState()?.clientId ?? null)
 
       setWsConnected(u.connection.wsConnected)
       setWsReconnecting(u.connection.reconnecting)
@@ -329,6 +404,20 @@ export default function VoIPApp() {
   const wsForVoiceJoin = isVoiceSplit ? voiceSigWsConnected : wsConnected
 
   useEffect(() => {
+    if (!hasDesktopBridge || !wsForVoiceJoin || !isInVoice || !peerVolServerId) return
+    const ws = getVoiceWsClientRef.current()
+    const me = ws.getMeState()?.clientId
+    if (!me) return
+    for (const roomId of Object.keys(voiceUsers)) {
+      for (const u of voiceUsers[roomId] ?? []) {
+        if (u.id === me) continue
+        const pct = getPeerVolume(peerVolServerId, roomId, u.id, u.name)
+        ws.setPeerVolume(roomId, u.id, pct)
+      }
+    }
+  }, [hasDesktopBridge, wsForVoiceJoin, isInVoice, peerVolServerId, peerVolRosterSig])
+
+  useEffect(() => {
     // WS may reconnect while desktop voice transport keeps running;
     // re-send join_room so server routes screen chunks to this viewer.
     if (!wsForVoiceJoin || !isInVoice || !currentVoiceChannel) return
@@ -390,10 +479,32 @@ export default function VoIPApp() {
     const raw = localStorage.getItem("voip-audio-settings")
     if (!raw) return
     try {
-      const parsed = JSON.parse(raw) as { micVolumePct?: number; outputVolumePct?: number; noiseSuppressionEnabled?: boolean }
+      const parsed = JSON.parse(raw) as {
+        micVolumePct?: number
+        outputVolumePct?: number
+        noiseSuppressionEnabled?: boolean
+        echoCancellationEnabled?: boolean
+        autoGainControlEnabled?: boolean
+        monitorEnabled?: boolean
+        monitorVolumePct?: number
+        gateEnabled?: boolean
+        gateThreshold?: number
+        gateReleaseMs?: number
+        useOpusUplink?: boolean
+      }
       if (typeof parsed.micVolumePct === "number") setMicVolumePct(Math.max(0, Math.min(200, Math.round(parsed.micVolumePct))))
       if (typeof parsed.outputVolumePct === "number") setOutputVolumePct(Math.max(0, Math.min(200, Math.round(parsed.outputVolumePct))))
       if (typeof parsed.noiseSuppressionEnabled === "boolean") setNoiseSuppressionEnabled(parsed.noiseSuppressionEnabled)
+      if (typeof parsed.echoCancellationEnabled === "boolean") setEchoCancellationEnabled(parsed.echoCancellationEnabled)
+      else if (typeof parsed.noiseSuppressionEnabled === "boolean") setEchoCancellationEnabled(parsed.noiseSuppressionEnabled)
+      if (typeof parsed.autoGainControlEnabled === "boolean") setAutoGainControlEnabled(parsed.autoGainControlEnabled)
+      else if (typeof parsed.noiseSuppressionEnabled === "boolean") setAutoGainControlEnabled(parsed.noiseSuppressionEnabled)
+      if (typeof parsed.monitorEnabled === "boolean") setMonitorEnabled(parsed.monitorEnabled)
+      if (typeof parsed.monitorVolumePct === "number") setMonitorVolumePct(Math.max(0, Math.min(200, Math.round(parsed.monitorVolumePct))))
+      if (typeof parsed.gateEnabled === "boolean") setGateEnabled(parsed.gateEnabled)
+      if (typeof parsed.gateThreshold === "number") setGateThreshold(Math.max(0, Math.min(4000, Math.round(parsed.gateThreshold))))
+      if (typeof parsed.gateReleaseMs === "number") setGateReleaseMs(Math.max(0, Math.min(2000, Math.round(parsed.gateReleaseMs))))
+      if (typeof parsed.useOpusUplink === "boolean") setUseOpusUplink(parsed.useOpusUplink)
     } catch {
       // ignore broken localStorage payload
     }
@@ -402,9 +513,33 @@ export default function VoIPApp() {
   useEffect(() => {
     localStorage.setItem(
       "voip-audio-settings",
-      JSON.stringify({ micVolumePct, outputVolumePct, noiseSuppressionEnabled })
+      JSON.stringify({
+        micVolumePct,
+        outputVolumePct,
+        noiseSuppressionEnabled,
+        echoCancellationEnabled,
+        autoGainControlEnabled,
+        monitorEnabled,
+        monitorVolumePct,
+        gateEnabled,
+        gateThreshold,
+        gateReleaseMs,
+        useOpusUplink
+      })
     )
-  }, [micVolumePct, outputVolumePct, noiseSuppressionEnabled])
+  }, [
+    micVolumePct,
+    outputVolumePct,
+    noiseSuppressionEnabled,
+    echoCancellationEnabled,
+    autoGainControlEnabled,
+    monitorEnabled,
+    monitorVolumePct,
+    gateEnabled,
+    gateThreshold,
+    gateReleaseMs,
+    useOpusUplink
+  ])
 
   useEffect(() => {
     if (!hasDesktopBridge || !window.electronVoice) return
@@ -445,6 +580,37 @@ export default function VoIPApp() {
     deafenedRef.current = isDeafened
   }, [isDeafened])
 
+  useEffect(() => {
+    micVolumePctRef.current = micVolumePct
+    const rt = voicePipelineRef.current
+    if (rt) rt.micGainNode.gain.value = micVolumePct / 100
+  }, [micVolumePct])
+
+  useEffect(() => {
+    outputVolumePctRef.current = outputVolumePct
+    const rt = voicePipelineRef.current
+    if (rt) rt.outputGainNode.gain.value = outputVolumePct / 100
+  }, [outputVolumePct])
+
+  useEffect(() => {
+    monitorEnabledRef.current = monitorEnabled
+    monitorVolumePctRef.current = monitorVolumePct
+    const rt = voicePipelineRef.current
+    if (!rt) return
+    rt.monitorGainNode.gain.value = monitorEnabled ? monitorVolumePct / 100 : 0
+    if (monitorEnabled && monitorVolumePct > 0) {
+      void rt.playbackCtx.resume()
+    } else if (rt.bufferedSamples === 0) {
+      void rt.playbackCtx.suspend()
+    }
+  }, [monitorEnabled, monitorVolumePct])
+
+  useEffect(() => {
+    gateEnabledRef.current = gateEnabled
+    gateThresholdRef.current = gateThreshold
+    gateReleaseMsRef.current = gateReleaseMs
+  }, [gateEnabled, gateThreshold, gateReleaseMs])
+
   const stopVoicePipeline = () => {
     const runtime = voicePipelineRef.current
     if (!runtime) return
@@ -454,9 +620,12 @@ export default function VoIPApp() {
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
     runtime.captureSinkNode.disconnect()
+    runtime.monitorDestNode.disconnect()
     runtime.playbackNode.disconnect()
     runtime.playbackFilterNode.disconnect()
     runtime.outputGainNode.disconnect()
+    runtime.monitorSourceNode.disconnect()
+    runtime.monitorGainNode.disconnect()
     if (runtime.playbackIdleTimer) {
       clearInterval(runtime.playbackIdleTimer)
       runtime.playbackIdleTimer = null
@@ -711,6 +880,20 @@ export default function VoIPApp() {
     return out
   }
 
+  const calcFrameEnergy = (frame: Int16Array) => {
+    if (frame.length === 0) return { rms: 0, peak: 0 }
+    let peak = 0
+    let sumSq = 0
+    for (let i = 0; i < frame.length; i += 1) {
+      const v = Math.abs(frame[i])
+      peak = Math.max(peak, v)
+      const f = frame[i] / 32768
+      sumSq += f * f
+    }
+    const rms = Math.sqrt(sumSq / frame.length)
+    return { rms, peak }
+  }
+
   const normalizeLatencyMs = (value: number | undefined) => {
     if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) return 0
     if (value < 0) return 0
@@ -758,9 +941,9 @@ export default function VoIPApp() {
           channelCount: 1,
           sampleRate: 48000,
           sampleSize: 16,
-          echoCancellation: noiseSuppressionEnabled,
+          echoCancellation: echoCancellationEnabled,
           noiseSuppression: noiseSuppressionEnabled,
-          autoGainControl: noiseSuppressionEnabled
+          autoGainControl: autoGainControlEnabled
         }
         if (window.electronVoice?.requestMicrophoneAccess) {
           const micAccess = await window.electronVoice.requestMicrophoneAccess()
@@ -796,15 +979,19 @@ export default function VoIPApp() {
         const captureSource = captureCtx.createMediaStreamSource(stream)
         const captureNode = captureCtx.createScriptProcessor(1024, 1, 1)
         const micGainNode = captureCtx.createGain()
-        micGainNode.gain.value = micVolumePct / 100
+        micGainNode.gain.value = micVolumePctRef.current / 100
         const captureSinkNode = captureCtx.createMediaStreamDestination()
+        const monitorDestNode = captureCtx.createMediaStreamDestination()
         const playbackNode = playbackCtx.createScriptProcessor(1024, 1, 1)
         const playbackFilterNode = playbackCtx.createBiquadFilter()
         playbackFilterNode.type = "highpass"
         playbackFilterNode.frequency.value = 85
         playbackFilterNode.Q.value = 0.707
         const outputGainNode = playbackCtx.createGain()
-        outputGainNode.gain.value = outputVolumePct / 100
+        outputGainNode.gain.value = outputVolumePctRef.current / 100
+        const monitorSourceNode = playbackCtx.createMediaStreamSource(monitorDestNode.stream)
+        const monitorGainNode = playbackCtx.createGain()
+        monitorGainNode.gain.value = monitorEnabledRef.current ? monitorVolumePctRef.current / 100 : 0
         const runtime: VoicePipelineRuntime = {
           stream,
           captureCtx,
@@ -812,10 +999,13 @@ export default function VoIPApp() {
           captureSource,
           micGainNode,
           captureSinkNode,
+          monitorDestNode,
           playbackCtx,
           playbackNode,
           playbackFilterNode,
           outputGainNode,
+          monitorSourceNode,
+          monitorGainNode,
           queue: [],
           txRemainder: new Int16Array(0),
           txResampleInput: new Float32Array(0),
@@ -825,11 +1015,24 @@ export default function VoIPApp() {
           unsubscribeIncoming: null,
           unsubscribeScreenChunk: null,
           lastIncomingAudioAtMs: 0,
-          playbackIdleTimer: null
+          playbackIdleTimer: null,
+          captureGateOpenUntilMs: 0
         }
         voicePipelineRef.current = runtime
 
         const frameSize = 960
+        let opusEncoder: unknown = null
+        if (useOpusUplink && window.electronVoice?.sendOpusFrame) {
+          try {
+            const mod = await import("opusscript")
+            const OpusScript = (mod as unknown as { default: typeof import("opusscript") }).default
+            opusEncoder = new OpusScript(48_000, 1, OpusScript.Application.AUDIO)
+          } catch {
+            setDeviceError("Opus encoder failed to load in renderer; falling back to PCM uplink.")
+            opusEncoder = null
+          }
+        }
+        let lastMeterEmitAt = 0
         captureNode.onaudioprocess = (event) => {
           const input = event.inputBuffer.getChannelData(0)
           const resampled = resampleFloat32Chunk(input, runtime.captureCtx.sampleRate, 48000, runtime)
@@ -842,8 +1045,37 @@ export default function VoIPApp() {
           let offset = 0
           while (offset + frameSize <= merged.length) {
             if (!mutedRef.current) {
-              const frame = merged.subarray(offset, offset + frameSize)
-              void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
+              let frame = merged.subarray(offset, offset + frameSize)
+
+              const now = Date.now()
+              if (now - lastMeterEmitAt >= 120) {
+                lastMeterEmitAt = now
+                const energy = calcFrameEnergy(frame)
+                setMicMeter(energy)
+              }
+
+              if (gateEnabledRef.current) {
+                const energy = calcFrameEnergy(frame)
+                const thresholdNorm = gateThresholdRef.current / 32768
+                if (energy.rms >= thresholdNorm) {
+                  runtime.captureGateOpenUntilMs = now + gateReleaseMsRef.current
+                }
+                if (now > runtime.captureGateOpenUntilMs) {
+                  frame = new Int16Array(frame.length)
+                }
+              }
+
+              if (opusEncoder && window.electronVoice?.sendOpusFrame) {
+                try {
+                  const pcmBytes = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength)
+                  const encoded = (opusEncoder as { encode: (pcm: Buffer, frameSize: number) => Uint8Array }).encode(pcmBytes, frameSize)
+                  void window.electronVoice.sendOpusFrame(encodeBytesBase64(encoded))
+                } catch {
+                  void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
+                }
+              } else {
+                void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
+              }
             }
             offset += frameSize
           }
@@ -904,19 +1136,27 @@ export default function VoIPApp() {
 
         captureSource.connect(micGainNode)
         micGainNode.connect(captureNode)
+        micGainNode.connect(monitorDestNode)
         // Keep ScriptProcessor running without routing mic signal to speakers.
         captureNode.connect(captureSinkNode)
+        monitorSourceNode.connect(monitorGainNode)
+        monitorGainNode.connect(playbackCtx.destination)
         playbackNode.connect(playbackFilterNode)
         playbackFilterNode.connect(outputGainNode)
         outputGainNode.connect(playbackCtx.destination)
         runtime.playbackIdleTimer = setInterval(() => {
           const idleForMs = Date.now() - runtime.lastIncomingAudioAtMs
-          if (runtime.bufferedSamples === 0 && idleForMs > 700 && runtime.playbackCtx.state === "running") {
+          const monitorActive = monitorEnabledRef.current && monitorVolumePctRef.current > 0
+          if (!monitorActive && runtime.bufferedSamples === 0 && idleForMs > 700 && runtime.playbackCtx.state === "running") {
             void runtime.playbackCtx.suspend()
           }
         }, 300)
         await captureCtx.resume()
-        await playbackCtx.suspend()
+        if (monitorEnabledRef.current && monitorVolumePctRef.current > 0) {
+          await playbackCtx.resume()
+        } else {
+          await playbackCtx.suspend()
+        }
         setStatus((prev) => {
           if (prev.includes("Voice I/O active")) return prev
           return prev.includes("In room:") ? `${prev} | Voice I/O active` : "Voice I/O active"
@@ -931,7 +1171,7 @@ export default function VoIPApp() {
       cancelled = true
       stopVoicePipeline()
     }
-  }, [hasDesktopBridge, isInVoice, currentVoiceChannel, audioDevicesRevision, noiseSuppressionEnabled, micVolumePct, outputVolumePct])
+  }, [hasDesktopBridge, isInVoice, currentVoiceChannel, audioDevicesRevision, noiseSuppressionEnabled, echoCancellationEnabled, autoGainControlEnabled])
 
   useEffect(() => {
     if (isInVoice) {
@@ -1389,7 +1629,7 @@ export default function VoIPApp() {
         setVoiceServerId(activeServerId)
         voiceServerIdRef.current = activeServerId
         setCurrentVoiceChannel(channelId)
-        setIsInVoice(true)
+      setIsInVoice(true)
         isInVoiceRef.current = true
         uiClient.joinRoom(channelId)
         await window.electronVoice.joinRoom(channelId)
@@ -1912,6 +2152,10 @@ export default function VoIPApp() {
           activeChannelId={activeChannelId}
           onChannelSelect={handleChannelSelect}
           voiceUsers={voiceUsers}
+          selfClientId={myVoiceClientId}
+          peerVolumePct={peerVolumePct}
+          onPeerVolumeChange={handlePeerVolumeChange}
+          enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
         />
         ) : null}
         <UserPanel
@@ -2024,12 +2268,101 @@ export default function VoIPApp() {
                 </div>
                 <Slider value={[outputVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setOutputVolumePct(v)} />
               </div>
-              <div className="flex items-center justify-between rounded-lg border border-border p-3">
-                <div>
-                  <Label>Noise Suppression</Label>
-                  <p className="text-xs text-muted-foreground">Echo cancellation, noise suppression, auto gain</p>
+              <div className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label>Microphone Meter</Label>
+                    <p className="text-xs text-muted-foreground">Helps you set gate thresholds and levels.</p>
+                  </div>
+                  <div className="text-right text-xs text-muted-foreground tabular-nums">
+                    <div>Peak: {micMeter ? Math.round(micMeter.peak) : 0}</div>
+                    <div>RMS: {micMeter ? micMeter.rms.toFixed(3) : "0.000"}</div>
+                  </div>
                 </div>
-                <Switch checked={noiseSuppressionEnabled} onCheckedChange={setNoiseSuppressionEnabled} />
+                <div className="h-2 w-full overflow-hidden rounded bg-muted">
+                  <div
+                    className="h-full bg-primary transition-[width]"
+                    style={{ width: `${Math.min(100, Math.round(((micMeter?.peak ?? 0) / 4000) * 100))}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border p-3 space-y-3">
+                <div>
+                  <Label>Capture DSP (getUserMedia constraints)</Label>
+                  <p className="text-xs text-muted-foreground">
+                    These flags affect microphone capture in Electron/Chromium. They do not change your UDP transport.
+                  </p>
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">Noise Suppression</Label>
+                  <Switch checked={noiseSuppressionEnabled} onCheckedChange={setNoiseSuppressionEnabled} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">Echo Cancellation (AEC)</Label>
+                  <Switch checked={echoCancellationEnabled} onCheckedChange={setEchoCancellationEnabled} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">Auto Gain Control (AGC)</Label>
+                  <Switch checked={autoGainControlEnabled} onCheckedChange={setAutoGainControlEnabled} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Tip: your OS may have stronger mic noise reduction (Windows Studio Effects, macOS Voice Isolation).
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label>Opus Uplink (beta)</Label>
+                    <p className="text-xs text-muted-foreground">Encodes mic audio to Opus before sending to server.</p>
+                  </div>
+                  <Switch checked={useOpusUplink} onCheckedChange={setUseOpusUplink} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  If unsupported, the app falls back to PCM uplink automatically.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label>Mic Monitor (listen to yourself)</Label>
+                    <p className="text-xs text-muted-foreground">Use headphones to avoid feedback.</p>
+                  </div>
+                  <Switch checked={monitorEnabled} onCheckedChange={setMonitorEnabled} />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">Monitor Volume</Label>
+                    <span className="text-xs text-muted-foreground">{monitorVolumePct}%</span>
+                  </div>
+                  <Slider value={[monitorVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setMonitorVolumePct(v)} />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label>Noise Gate</Label>
+                    <p className="text-xs text-muted-foreground">Simple RMS gate before sending audio.</p>
+                  </div>
+                  <Switch checked={gateEnabled} onCheckedChange={setGateEnabled} />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">Gate Threshold</Label>
+                    <span className="text-xs text-muted-foreground">{gateThreshold}</span>
+                  </div>
+                  <Slider value={[gateThreshold]} min={0} max={4000} step={10} onValueChange={([v]) => setGateThreshold(v)} />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">Release</Label>
+                    <span className="text-xs text-muted-foreground">{gateReleaseMs}ms</span>
+                  </div>
+                  <Slider value={[gateReleaseMs]} min={0} max={800} step={10} onValueChange={([v]) => setGateReleaseMs(v)} />
+                </div>
               </div>
               <Button onClick={saveAudioSettings}>Apply Audio Settings</Button>
               {deviceError && <p className="text-sm text-destructive">{deviceError}</p>}

@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -74,8 +74,16 @@
     "dmg": {
       "backgroundColor": "#111111",
       "contents": [
-        { "x": 130, "y": 220 },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ],
       "window": {
         "width": 540,

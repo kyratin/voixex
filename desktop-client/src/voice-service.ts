@@ -136,6 +136,11 @@ export class VoiceService {
     this.engine.sendPcm16Frame(Buffer.from(pcm16Base64, "base64"))
   }
 
+  sendOpusFrame(opusBase64: string) {
+    if (!this.engine) return
+    this.engine.sendOpusFrame(Buffer.from(opusBase64, "base64"))
+  }
+
   sendScreenChunk(chunkBase64: string) {
     if (!this.engine) return
     this.engine.sendScreenChunk(Buffer.from(chunkBase64, "base64"))
