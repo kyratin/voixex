@@ -17,8 +17,16 @@ docker build -t "$IMAGE" "$ROOT/backend"
 echo "Pushing: $IMAGE"
 docker push "$IMAGE"
 
+# Pin :latest to the same digest as the version tag (not when building only "latest").
+if [[ "$TAG" != "latest" ]]; then
+  LATEST_IMAGE="${DEFAULT_IMAGE}:latest"
+  echo "Tagging and pushing: $LATEST_IMAGE (same as $TAG)"
+  docker tag "$IMAGE" "$LATEST_IMAGE"
+  docker push "$LATEST_IMAGE"
+fi
+
 echo
-echo "Example (pin version):  TAG=0.1.8 $0"
+echo "Example (pin version):  TAG=0.1.9 $0"
 echo "On the VPS, in the directory with docker-compose.yml and .env:"
 echo "  export VOIP_BACKEND_IMAGE=$IMAGE   # or put in .env"
 echo "  docker compose pull"
