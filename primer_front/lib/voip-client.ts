@@ -56,6 +56,31 @@ export type ChatMessage = {
   }>
 }
 
+/** Parse server time: ISO with Z, or legacy SQLite "YYYY-MM-DD HH:MM:SS" (UTC). Avoids local-vs-UTC sort bugs. */
+function parseMessageTimeMs(createdAt: string): number {
+  if (!createdAt) return 0
+  const direct = Date.parse(createdAt)
+  if (!Number.isNaN(direct)) return direct
+  const m = createdAt.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/)
+  if (m) return Date.parse(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.000Z`)
+  return 0
+}
+
+function normalizeCreatedAt(raw: string): string {
+  if (!raw) return raw
+  if (raw.includes("T")) return raw
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/)
+  if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.000Z`
+  return raw
+}
+
+function compareMessagesByTime(a: ChatMessage, b: ChatMessage) {
+  const ta = parseMessageTimeMs(a.createdAt)
+  const tb = parseMessageTimeMs(b.createdAt)
+  if (ta !== tb) return ta - tb
+  return a.id.localeCompare(b.id)
+}
+
 export class VoipClient {
   private apiBase: string = DEFAULT_API_BASE
   private ws: WebSocket | null = null
@@ -173,7 +198,7 @@ export class VoipClient {
     const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${this.authToken}` } })
     if (!res.ok) throw new Error("messages load failed")
     const body = (await res.json()) as { messages: ChatMessage[]; nextCursor: string | null }
-    this.state.messagesByChannel[channelId] = body.messages.map((m) => this.normalizeMessage(m))
+    this.state.messagesByChannel[channelId] = body.messages.map((m) => this.normalizeMessage(m)).sort(compareMessagesByTime)
     this.emit()
     return body
   }
@@ -327,7 +352,9 @@ export class VoipClient {
       } else if (typed.type === "chat_message") {
         const channel = typed.message.channelId
         const existing = this.state.messagesByChannel[channel] ?? []
-        this.state.messagesByChannel[channel] = [...existing, this.normalizeMessage(typed.message)].slice(-200)
+        this.state.messagesByChannel[channel] = [...existing, this.normalizeMessage(typed.message)]
+          .sort(compareMessagesByTime)
+          .slice(-200)
       } else if (typed.type === "screen_share_state") {
         if (typed.active && typed.roomId) {
           this.state.activeScreenShareByRoom[typed.roomId] = typed.clientId
@@ -380,6 +407,11 @@ export class VoipClient {
 
   setDeafen(deafened: boolean) {
     this.sendWsEvent({ type: "set_deafen", deafened })
+  }
+
+  /** Per-listener volume for another participant in the same voice room (0–200, 100 = default). */
+  setPeerVolume(roomId: string, targetClientId: string, volumePct: number) {
+    this.sendWsEvent({ type: "set_peer_volume", roomId, targetClientId, volumePct })
   }
 
   setScreenShare(active: boolean) {
@@ -473,6 +505,7 @@ export class VoipClient {
   private normalizeMessage(message: ChatMessage): ChatMessage {
     return {
       ...message,
+      createdAt: normalizeCreatedAt(message.createdAt),
       attachments: (message.attachments ?? []).map((attachment) => ({
         ...attachment,
         url: this.normalizeAttachmentUrl(attachment.url)

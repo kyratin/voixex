@@ -61,6 +61,14 @@ function isVoiceRoomId(serverId: string, roomId: string): boolean {
   return row?.kind === "voice"
 }
 
+/** SQLite `datetime('now')` is UTC without TZ marker. Expose as ISO-8601 with Z so clients sort the same as WS payloads. */
+function sqliteUtcToIso(createdAt: string): string {
+  if (createdAt.includes("T")) return createdAt
+  const m = createdAt.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/)
+  if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.000Z`
+  return createdAt
+}
+
 function allowScreenWsRate(clientId: string): boolean {
   const sec = Math.floor(Date.now() / 1000)
   let e = screenWsRateByClient.get(clientId)
@@ -800,9 +808,9 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
   /** Pagination by time: UUID order is not chronological. Cursor = id of oldest message in previous page. */
   const cursorClause = query.cursor
     ? `AND (
-         m.created_at < (SELECT created_at FROM messages WHERE id = ? AND server_id = ? AND channel_id = ?)
+         datetime(m.created_at) < (SELECT datetime(created_at) FROM messages WHERE id = ? AND server_id = ? AND channel_id = ?)
          OR (
-           m.created_at = (SELECT created_at FROM messages WHERE id = ? AND server_id = ? AND channel_id = ?)
+           datetime(m.created_at) = (SELECT datetime(created_at) FROM messages WHERE id = ? AND server_id = ? AND channel_id = ?)
            AND m.id < ?
          )
        )`
@@ -813,7 +821,7 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
        FROM messages m
        JOIN server_members sm ON sm.server_id = m.server_id AND sm.client_id = m.client_id
        WHERE m.server_id = ? AND m.channel_id = ? ${cursorClause}
-       ORDER BY m.created_at DESC, m.id DESC LIMIT ?`
+       ORDER BY datetime(m.created_at) DESC, m.id DESC LIMIT ?`
     )
     .all(
       ...(query.cursor
@@ -846,7 +854,7 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
       channelId: row.channel_id,
       author: { clientId: row.client_id, displayName: row.display_name },
       body: row.body,
-      createdAt: row.created_at,
+      createdAt: sqliteUtcToIso(row.created_at),
       attachments: attachmentsByMessageId.get(row.id) ?? []
     }))
     .reverse()
@@ -901,12 +909,16 @@ app.post("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) 
   const member = db
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
     .get(params.serverId, auth.clientId) as { display_name: string } | undefined
+  const createdRow = db
+    .prepare("SELECT created_at FROM messages WHERE id = ? AND server_id = ?")
+    .get(id, params.serverId) as { created_at: string } | undefined
+  const createdAt = sqliteUtcToIso(createdRow?.created_at ?? new Date().toISOString())
   const message = {
     id,
     channelId: params.channelId,
     author: { clientId: auth.clientId, displayName: member?.display_name ?? auth.clientId },
     body: body.body.trim(),
-    createdAt: new Date().toISOString(),
+    createdAt,
     attachments: getAttachmentsByMessageIds(params.serverId, [id], token).get(id) ?? []
   }
   emitToServer(params.serverId, { type: "chat_message", message })
