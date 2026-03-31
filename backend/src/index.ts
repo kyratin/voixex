@@ -12,7 +12,7 @@ import { config } from "./config.js"
 import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent } from "./contracts.js"
-import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking } from "./media.js"
+import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 
 const app = Fastify({ logger: true })
 await app.register(cors, {
@@ -59,6 +59,14 @@ function emitToServer(serverId: string, event: WsServerEvent) {
 function isVoiceRoomId(serverId: string, roomId: string): boolean {
   const row = db.prepare("SELECT kind FROM rooms WHERE server_id = ? AND id = ? LIMIT 1").get(serverId, roomId) as { kind: string } | undefined
   return row?.kind === "voice"
+}
+
+/** SQLite `datetime('now')` is UTC without TZ marker. Expose as ISO-8601 with Z so clients sort the same as WS payloads. */
+function sqliteUtcToIso(createdAt: string): string {
+  if (createdAt.includes("T")) return createdAt
+  const m = createdAt.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/)
+  if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.000Z`
+  return createdAt
 }
 
 function allowScreenWsRate(clientId: string): boolean {
@@ -797,16 +805,40 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
   const token = req.headers.authorization?.replace("Bearer ", "") ?? ""
   const auth = (req as any).auth as { serverId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
-  const cursorClause = query.cursor ? "AND m.id < ?" : ""
+  /** Pagination by time: UUID order is not chronological. Cursor = id of oldest message in previous page. */
+  const cursorClause = query.cursor
+    ? `AND (
+         datetime(m.created_at) < (SELECT datetime(created_at) FROM messages WHERE id = ? AND server_id = ? AND channel_id = ?)
+         OR (
+           datetime(m.created_at) = (SELECT datetime(created_at) FROM messages WHERE id = ? AND server_id = ? AND channel_id = ?)
+           AND m.id < ?
+         )
+       )`
+    : ""
   const rows = db
     .prepare(
       `SELECT m.id, m.channel_id, m.body, m.created_at, m.client_id, sm.display_name
        FROM messages m
        JOIN server_members sm ON sm.server_id = m.server_id AND sm.client_id = m.client_id
        WHERE m.server_id = ? AND m.channel_id = ? ${cursorClause}
-       ORDER BY m.id DESC LIMIT ?`
+       ORDER BY datetime(m.created_at) DESC, m.id DESC LIMIT ?`
     )
-    .all(...(query.cursor ? [params.serverId, params.channelId, query.cursor, query.limit] : [params.serverId, params.channelId, query.limit])) as Array<{
+    .all(
+      ...(query.cursor
+        ? [
+            params.serverId,
+            params.channelId,
+            query.cursor,
+            params.serverId,
+            params.channelId,
+            query.cursor,
+            params.serverId,
+            params.channelId,
+            query.cursor,
+            query.limit
+          ]
+        : [params.serverId, params.channelId, query.limit])
+    ) as Array<{
       id: string
       channel_id: string
       body: string
@@ -822,7 +854,7 @@ app.get("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) =
       channelId: row.channel_id,
       author: { clientId: row.client_id, displayName: row.display_name },
       body: row.body,
-      createdAt: row.created_at,
+      createdAt: sqliteUtcToIso(row.created_at),
       attachments: attachmentsByMessageId.get(row.id) ?? []
     }))
     .reverse()
@@ -877,12 +909,16 @@ app.post("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) 
   const member = db
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
     .get(params.serverId, auth.clientId) as { display_name: string } | undefined
+  const createdRow = db
+    .prepare("SELECT created_at FROM messages WHERE id = ? AND server_id = ?")
+    .get(id, params.serverId) as { created_at: string } | undefined
+  const createdAt = sqliteUtcToIso(createdRow?.created_at ?? new Date().toISOString())
   const message = {
     id,
     channelId: params.channelId,
     author: { clientId: auth.clientId, displayName: member?.display_name ?? auth.clientId },
     body: body.body.trim(),
-    createdAt: new Date().toISOString(),
+    createdAt,
     attachments: getAttachmentsByMessageIds(params.serverId, [id], token).get(id) ?? []
   }
   emitToServer(params.serverId, { type: "chat_message", message })
@@ -1027,6 +1063,23 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
             }
           })
         }
+      } else if (event.type === "set_peer_volume") {
+        if (
+          typeof event.roomId !== "string" ||
+          typeof event.targetClientId !== "string" ||
+          typeof event.volumePct !== "number"
+        ) {
+          return
+        }
+        const row = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        if (!row?.room_id || row.room_id !== event.roomId) return
+        if (!isVoiceRoomId(auth.serverId, event.roomId)) return
+        if (event.targetClientId === auth.clientId) return
+        const roster = getRoster(auth.serverId, event.roomId)
+        if (!roster.some((m) => m.clientId === event.targetClientId)) return
+        setPeerVolume(auth.clientId, event.targetClientId, event.volumePct)
       } else if (event.type === "set_profile") {
         db.prepare("UPDATE server_members SET display_name = ?, updated_at = datetime('now') WHERE server_id = ? AND client_id = ?").run(
           event.displayName,

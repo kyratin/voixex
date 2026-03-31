@@ -60,6 +60,8 @@ const roomScreenChunks = new Map<string, ScreenChunkEntry[]>()
 const desiredRoomByClient = new Map<string, string | null>()
 const desiredFlagsByClient = new Map<string, { muted: boolean; deafened: boolean }>()
 const desiredSpeakingByClient = new Map<string, boolean>()
+/** listenerClientId -> (targetClientId -> gain 0..2, from volumePct 0..200) */
+const peerVolumeByListener = new Map<string, Map<string, number>>()
 
 export function setMemberRoom(clientId: string, roomId: string | null) {
   desiredRoomByClient.set(clientId, roomId)
@@ -84,10 +86,31 @@ export function setMemberSpeaking(clientId: string, speaking: boolean) {
 }
 
 export function removeMember(clientId: string) {
+  peerVolumeByListener.delete(clientId)
+  for (const m of peerVolumeByListener.values()) {
+    m.delete(clientId)
+  }
   sessions.delete(clientId)
   desiredRoomByClient.delete(clientId)
   desiredFlagsByClient.delete(clientId)
   desiredSpeakingByClient.delete(clientId)
+}
+
+/** Per-listener volume for other participants (0–200%, default 100%). */
+export function setPeerVolume(listenerClientId: string, targetClientId: string, volumePct: number) {
+  const pct = Math.max(0, Math.min(200, Math.round(volumePct)))
+  const gain = pct / 100
+  let m = peerVolumeByListener.get(listenerClientId)
+  if (!m) {
+    m = new Map()
+    peerVolumeByListener.set(listenerClientId, m)
+  }
+  if (pct === 100) {
+    m.delete(targetClientId)
+    if (m.size === 0) peerVolumeByListener.delete(listenerClientId)
+  } else {
+    m.set(targetClientId, gain)
+  }
 }
 
 function deriveKey(mediaSeedB64: string) {
@@ -148,17 +171,26 @@ function decryptFrame(key: Buffer, packet: Buffer) {
   return { seq, ts, roomId, kind, payload }
 }
 
-function mixPcm16(buffers: Buffer[]): Buffer {
-  if (buffers.length === 0) return Buffer.alloc(0)
-  const minLen = Math.min(...buffers.map((b) => b.length))
+function mixPcm16WeightedForListener(frames: FrameEntry[], listenerClientId: string): Buffer {
+  const gains = peerVolumeByListener.get(listenerClientId)
+  if (frames.length === 0) return Buffer.alloc(0)
+  const minLen = Math.min(...frames.map((f) => f.pcm16.length))
   const out = Buffer.alloc(minLen)
   for (let i = 0; i < minLen; i += 2) {
     let sum = 0
-    for (const b of buffers) {
-      sum += b.readInt16LE(i)
+    let wsum = 0
+    for (const f of frames) {
+      const g = gains?.get(f.clientId) ?? 1
+      if (g <= 0) continue
+      sum += f.pcm16.readInt16LE(i) * g
+      wsum += g
     }
-    const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / buffers.length)))
-    out.writeInt16LE(mixed, i)
+    if (wsum <= 0) {
+      out.writeInt16LE(0, i)
+    } else {
+      const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / wsum)))
+      out.writeInt16LE(mixed, i)
+    }
   }
   return out
 }
@@ -383,10 +415,10 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       if (frames.length === 0) continue
       for (const session of sessions.values()) {
         if (!session.roomId || session.roomId !== roomId || !session.remote || !session.key || session.deafened) continue
-        // Avoid sidetone: each recipient gets room mix without own frame.
-        const otherFrames = frames.filter((f) => f.clientId !== session.clientId).map((f) => f.pcm16)
+        // Avoid sidetone: each recipient gets room mix without own frame (per-listener volume weights).
+        const otherFrames = frames.filter((f) => f.clientId !== session.clientId)
         if (otherFrames.length === 0) continue
-        const mixed = mixPcm16(otherFrames)
+        const mixed = mixPcm16WeightedForListener(otherFrames, session.clientId)
         const packet = encryptFrame(session.key, session.seqOut++, Date.now(), roomId, mixed)
         socket.send(packet, session.remote.port, session.remote.address)
         session.txPackets += 1

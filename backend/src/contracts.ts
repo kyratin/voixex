@@ -1,6 +1,8 @@
 export type WsClientEvent =
   | { type: "join_room"; roomId: string }
   | { type: "leave_room" }
+  /** Per-listener volume for another participant in the same voice room (0–200, 100 = default). */
+  | { type: "set_peer_volume"; roomId: string; targetClientId: string; volumePct: number }
   | { type: "set_mute"; muted: boolean }
   | { type: "set_deafen"; deafened: boolean }
   | { type: "set_profile"; displayName: string }
