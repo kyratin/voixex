@@ -183,6 +183,10 @@ app.whenReady().then(() => {
     voice.sendPcm16Frame(pcm16Base64)
     return { ok: true }
   })
+  ipcMain.handle("voice:sendOpusFrame", (_event, opusBase64: string) => {
+    voice.sendOpusFrame(opusBase64)
+    return { ok: true }
+  })
   ipcMain.handle("voice:sendScreenChunk", (_event, chunkBase64: string) => {
     voice.sendScreenChunk(chunkBase64)
     return { ok: true }

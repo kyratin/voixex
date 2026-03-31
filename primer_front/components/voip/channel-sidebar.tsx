@@ -5,6 +5,9 @@ import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones } from "lucide-rea
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Slider } from "@/components/ui/slider"
+import { Label } from "@/components/ui/label"
 
 export interface Channel {
   id: string
@@ -36,6 +39,11 @@ interface ChannelSidebarProps {
   activeChannelId: string
   onChannelSelect: (channelId: string) => void
   voiceUsers?: Record<string, VoiceUser[]>
+  /** When set, voice rows can open per-user output volume (desktop UDP mixer on server). */
+  selfClientId?: string | null
+  peerVolumePct?: Record<string, number>
+  onPeerVolumeChange?: (roomId: string, targetClientId: string, targetName: string, volumePct: number) => void
+  enablePeerVolume?: boolean
 }
 
 export function ChannelSidebar({ 
@@ -43,7 +51,11 @@ export function ChannelSidebar({
   categories, 
   activeChannelId, 
   onChannelSelect,
-  voiceUsers = {}
+  voiceUsers = {},
+  selfClientId = null,
+  peerVolumePct = {},
+  onPeerVolumeChange,
+  enablePeerVolume = false
 }: ChannelSidebarProps) {
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
 
@@ -117,26 +129,15 @@ export function ChannelSidebar({
                         {channel.type === "voice" && voiceUsers[channel.id] && voiceUsers[channel.id].length > 0 && (
                           <div className="ml-4 border-l-2 border-border/50 py-0.5 pl-3">
                             {voiceUsers[channel.id].map((user) => (
-                              <div
+                              <VoiceChannelUserRow
                                 key={user.id}
-                                className="flex items-center gap-2 rounded-md px-1.5 py-1 text-xs text-muted-foreground"
-                              >
-                                <div className={cn(
-                                  "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-medium transition-all",
-                                  user.isSpeaking
-                                    ? "bg-accent/20 text-accent ring-2 ring-accent"
-                                    : "bg-muted text-muted-foreground"
-                                )}>
-                                  {user.avatar.slice(0, 1).toUpperCase()}
-                                </div>
-                                <span className={cn("truncate", user.isSpeaking && "text-foreground")}>
-                                  {user.name}
-                                </span>
-                                <div className="ml-auto flex gap-0.5">
-                                  {user.isMuted && <MicOff className="h-3 w-3 text-destructive/70" />}
-                                  {user.isDeafened && <Headphones className="h-3 w-3 text-destructive/70" />}
-                                </div>
-                              </div>
+                                roomId={channel.id}
+                                user={user}
+                                selfClientId={selfClientId}
+                                volumePct={peerVolumePct[`${channel.id}:${user.id}`] ?? 100}
+                                enablePeerVolume={enablePeerVolume && Boolean(onPeerVolumeChange)}
+                                onPeerVolumeChange={onPeerVolumeChange}
+                              />
                             ))}
                           </div>
                         )}
@@ -149,6 +150,72 @@ export function ChannelSidebar({
           ))}
         </div>
       </ScrollArea>
+    </div>
+  )
+}
+
+function VoiceChannelUserRow({
+  roomId,
+  user,
+  selfClientId,
+  volumePct,
+  enablePeerVolume,
+  onPeerVolumeChange
+}: {
+  roomId: string
+  user: VoiceUser
+  selfClientId: string | null
+  volumePct: number
+  enablePeerVolume: boolean
+  onPeerVolumeChange?: (roomId: string, targetClientId: string, targetName: string, volumePct: number) => void
+}) {
+  const showVol = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
+  return (
+    <div className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground">
+      <div className={cn(
+        "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-medium transition-all",
+        user.isSpeaking
+          ? "bg-accent/20 text-accent ring-2 ring-accent"
+          : "bg-muted text-muted-foreground"
+      )}>
+        {user.avatar.slice(0, 1).toUpperCase()}
+      </div>
+      <span className={cn("min-w-0 flex-1 truncate", user.isSpeaking && "text-foreground")}>
+        {user.name}
+      </span>
+      <div className="flex shrink-0 items-center gap-0.5">
+        {user.isMuted && <MicOff className="h-3 w-3 text-destructive/70" />}
+        {user.isDeafened && <Headphones className="h-3 w-3 text-destructive/70" />}
+        {showVol && (
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Their volume"
+              >
+                <Volume2 className="h-3.5 w-3.5" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent className="w-56 p-3" align="end" onOpenAutoFocus={(e) => e.preventDefault()}>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-xs">Their volume</Label>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">{volumePct}%</span>
+                </div>
+                <Slider
+                  value={[volumePct]}
+                  min={0}
+                  max={200}
+                  step={1}
+                  onValueChange={([v]) => onPeerVolumeChange(roomId, user.id, user.name, v)}
+                />
+                <p className="text-[10px] text-muted-foreground">100% = default. Saved for this server.</p>
+              </div>
+            </PopoverContent>
+          </Popover>
+        )}
+      </div>
     </div>
   )
 }
