@@ -1,7 +1,8 @@
-# Server: Voixex API + WebSocket + UDP (image from Docker Hub).
+# Voixex backend: REST + WebSocket + UDP voice mixer.
+# Image: Docker Hub kyratinkokko/voixex (override with VOIP_BACKEND_IMAGE).
+#
+# On a VPS: set PUBLIC_UDP_HOST to the server's public IP or DNS name.
 #   docker compose up -d
-# Optional UI preview (Next.js):
-#   docker compose --profile ui up -d
 
 services:
   backend:
@@ -13,7 +14,6 @@ services:
       PORT: 8080
       UDP_HOST: 0.0.0.0
       UDP_PORT: ${UDP_PORT:-50000}
-      # Hostname/IP clients use for UDP voice (set to your VPS public IP or DNS).
       PUBLIC_UDP_HOST: ${PUBLIC_UDP_HOST:-localhost}
       TOKEN_SECRET: ${TOKEN_SECRET:-change-me-token-secret}
       SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:-change-me-superuser}
@@ -29,19 +29,6 @@ services:
       - "${UDP_PORT:-50000}:${UDP_PORT:-50000}/udp"
     volumes:
       - voip_data:/data
-
-  primer_front:
-    profiles:
-      - ui
-    build:
-      context: ./primer_front
-      dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:18080}
-    ports:
-      - "3000:3000"
-    depends_on:
-      - backend
 
 volumes:
   voip_data:
