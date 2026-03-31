@@ -2,7 +2,9 @@
 
 Голосовые и текстовые каналы в стиле Discord: **десктоп (Electron)**, веб-интерфейс (**Next.js**) и сервер (**Fastify + WebSocket + UDP-микшер**).
 
-Эта ветка — **`macos`** (основная клиентская): здесь живут `primer_front`, `desktop-client`, `voice-client`.
+Эта ветка — **`windows`**: клиентское приложение и UI для релизов и разработки под **Windows**. Код синхронизируй с веткой **`macos`** (основная линия), когда готовишь общий релиз.
+
+Здесь лежат `primer_front`, `desktop-client`, `voice-client`.
 
 | Путь | Назначение |
 |------|------------|
@@ -68,6 +70,8 @@ docker pull electronuserland/builder:wine
 ./desktop-client/scripts/docker-electron-build.sh
 ```
 
+На **Windows** можно собрать установщик нативно: `cd desktop-client && npm run dist:win` (после `npm run prepare:ui`).
+
 Артефакты попадают в `desktop-client/release/` (каталог обычно в `.gitignore`).
 
 После правок в [`primer_front/`](primer_front) обнови встроенный UI:
@@ -80,8 +84,8 @@ cd desktop-client && npm run prepare:ui
 
 ## Ветки клиента
 
-- **`macos`** — основная линия разработки клиента; от неё удобно делать merge в `windows` / `linux`.
-- **`windows`** — клиент для релизов/правок под Windows (содержимое синхронизируй с `macos`, где это уместно).
+- **`macos`** — основная линия разработки клиента.
+- **`windows`** — эта ветка; удобна для Win-специфичных правок и релизов, периодически подтягивай изменения из `macos`.
 - **`linux`** — при наличии: клиент под Linux.
 
 Серверная часть **не** входит в эти ветки; см. ветку **`server`**.
