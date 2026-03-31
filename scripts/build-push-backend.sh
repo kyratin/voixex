@@ -7,8 +7,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${TAG:-latest}"
-# GitLab Container Registry for this project (enable Registry in GitLab project settings).
-DEFAULT_IMAGE="registry.gitlab.com/superkokkon/voixex/voip-backend"
+# Docker Hub: https://hub.docker.com/r/kyratinkokko/voixex
+DEFAULT_IMAGE="kyratinkokko/voixex"
 IMAGE="${IMAGE:-${DEFAULT_IMAGE}:${TAG}}"
 
 echo "Building: $IMAGE"
@@ -18,10 +18,11 @@ echo "Pushing: $IMAGE"
 docker push "$IMAGE"
 
 echo
+echo "Example (pin version):  TAG=0.1.8 $0"
 echo "On the VPS, in the directory with docker-compose.yml and .env:"
 echo "  export VOIP_BACKEND_IMAGE=$IMAGE   # or put in .env"
 echo "  docker compose pull"
 echo "  docker compose up -d"
 echo
-echo "Login once from your PC if needed:"
-echo "  docker login registry.gitlab.com"
+echo "Login once if needed:"
+echo "  docker login"
