@@ -81,6 +81,12 @@ function compareMessagesByTime(a: ChatMessage, b: ChatMessage) {
   return a.id.localeCompare(b.id)
 }
 
+function compareRosterMembersByName(a: RosterMember, b: RosterMember) {
+  const byName = a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" })
+  if (byName !== 0) return byName
+  return a.clientId.localeCompare(b.clientId)
+}
+
 export class VoipClient {
   private apiBase: string = DEFAULT_API_BASE
   private ws: WebSocket | null = null
@@ -329,8 +335,11 @@ export class VoipClient {
       } else if (typed.type === "rooms_updated") {
         this.state.rooms = typed.rooms
       } else if (typed.type === "roster_snapshot") {
-        if (typed.roomId) this.state.rosterByRoom[typed.roomId] = typed.members
-        else this.state.lobby = typed.members
+        if (typed.roomId) {
+          this.state.rosterByRoom[typed.roomId] = [...typed.members].sort(compareRosterMembersByName)
+        } else {
+          this.state.lobby = [...typed.members].sort(compareRosterMembersByName)
+        }
       } else if (typed.type === "member_updated") {
         for (const roomId of Object.keys(this.state.rosterByRoom)) {
           this.state.rosterByRoom[roomId] = this.state.rosterByRoom[roomId].filter((m) => m.clientId !== typed.member.clientId)
@@ -345,9 +354,9 @@ export class VoipClient {
         }
         if (typed.member.roomId) {
           const next = this.state.rosterByRoom[typed.member.roomId] ?? []
-          this.state.rosterByRoom[typed.member.roomId] = [...next, member]
+          this.state.rosterByRoom[typed.member.roomId] = [...next, member].sort(compareRosterMembersByName)
         } else {
-          this.state.lobby = [...this.state.lobby, member]
+          this.state.lobby = [...this.state.lobby, member].sort(compareRosterMembersByName)
         }
       } else if (typed.type === "chat_message") {
         const channel = typed.message.channelId
@@ -455,7 +464,9 @@ export class VoipClient {
   toVoiceUsers(): Record<string, VoiceUser[]> {
     const out: Record<string, VoiceUser[]> = {}
     for (const [roomId, users] of Object.entries(this.state.rosterByRoom)) {
-      out[roomId] = users.map((u) => ({
+      out[roomId] = [...users]
+        .sort(compareRosterMembersByName)
+        .map((u) => ({
         id: u.clientId,
         name: u.displayName,
         avatar: u.displayName.slice(0, 1).toUpperCase(),
