@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, session, systemPreferences } from "electron"
+import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, Menu, session, systemPreferences } from "electron"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { join } from "node:path"
@@ -10,6 +10,7 @@ let preferredScreenSourceId: string | null = null
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
 const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000"
 const bundledUiPath = join(__dirname, "../ui/index.html")
+const runtimeIconPath = join(__dirname, "../build/icons/icon-512.png")
 type HotkeyAction = "toggle_mute" | "toggle_deafen" | "push_to_talk"
 type KeybindConfig = { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }
 let keybinds: KeybindConfig = {
@@ -72,6 +73,7 @@ function createWindow() {
     height: 900,
     backgroundColor: "#111111",
     show: false,
+    icon: existsSync(runtimeIconPath) ? runtimeIconPath : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload.cjs"),
       contextIsolation: true,
@@ -94,6 +96,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === "win32") {
+    // Keep Windows title bar clean like on macOS build.
+    Menu.setApplicationMenu(null)
+  }
   session.defaultSession.setDisplayMediaRequestHandler(
     async (_request, callback) => {
       const sources = await desktopCapturer.getSources({ types: ["screen", "window"] })
