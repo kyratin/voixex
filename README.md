@@ -1,60 +1,89 @@
 # Voixex — backend
 
-Ветка **`server`** содержит **только сервер**: REST API, WebSocket (чат, screen share relay), **UDP-микшер голоса**, SQLite, загрузки вложений. Образ публикуется в Docker Hub: [`kyratinkokko/voixex`](https://hub.docker.com/r/kyratinkokko/voixex).
+<p align="center">
+  <img src="trace.svg" alt="Voixex logo" width="180" />
+</p>
 
-Клиенты (**Electron**, Next UI, `voice-client`) — в ветках **`macos`** / **`windows`** (и при необходимости **`linux`**).
+<p align="center">
+  <strong>Voixex backend</strong> — REST API, WebSocket signaling/chat, UDP voice mixer, SQLite storage, and attachment uploads.
+</p>
+
+<p align="center">
+  <img src="voixex.png" alt="Voixex app preview" width="780" />
+</p>
+
+<p align="center">
+  <em>Client UI preview; this branch contains server code only.</em>
+</p>
 
 ---
 
-## Структура репозитория
+This branch is **`server`** and contains **backend only**.
 
-| Путь | Назначение |
-|------|------------|
-| [`backend/`](backend) | Node.js (Fastify): HTTP, WS, медиа UDP, БД |
-| [`docker-compose.yml`](docker-compose.yml) | Запуск готового образа + том для данных |
-| [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) | Сборка образа из `backend/` и push в реестр |
+| Path | Description |
+|------|-------------|
+| [`backend/`](backend) | Node.js + Fastify API, WebSocket, UDP media, SQLite |
+| [`docker-compose.yml`](docker-compose.yml) | Runs backend container and persists `/data` |
+| [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) | Build and push backend image |
+
+Client code (`desktop-client`, `primer_front`, `voice-client`) lives on `macos` / `windows` / `linux` branches.
 
 ---
 
-## Быстрый старт (Docker)
+## Quick start (Docker)
 
 ```bash
 cp .env.example .env
-# Заполни TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST (на VPS).
+# Set TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST for VPS
 
 docker compose up -d
 ```
 
-| Сервис | По умолчанию |
-|--------|----------------|
-| HTTP + WebSocket | `http://localhost:18080` (маппинг `HTTP_PORT` → 8080 в контейнере) |
-| UDP голос | хост: `UDP_PORT` (по умолчанию **50000**), проброс 1:1 |
+Default endpoints:
 
-**Важно:** в `.env` на проде укажи **`PUBLIC_UDP_HOST`** — публичный IP или DNS машины. Клиенты открывают UDP на этот адрес; иначе голос не пройдёт через NAT/фаервол.
+| Service | Default |
+|---------|---------|
+| HTTP + WebSocket | `http://localhost:18080` (`HTTP_PORT` -> container 8080) |
+| UDP voice | host `UDP_PORT` (default `50000`) |
 
-Открой на фаерволе **TCP** порт API (например 18080) и **UDP** `UDP_PORT`.
+Set **`PUBLIC_UDP_HOST`** to your public IP/DNS in production. Clients must reach this address for voice over UDP.
 
 ---
 
-## Сборка образа и push (с ПК или CI)
-
-Не собирай тяжёлый `docker build` на слабом VPS — лучше локально или в CI:
+## Run from source
 
 ```bash
-# Тег образа (совпадает с полем version в backend/package.json, например 0.1.9).
-# Скрипт также пушит :latest тем же digest.
+cd backend
+npm ci
+npm run build
+npm start
+```
+
+For development:
+
+```bash
+cd backend
+npm run dev
+```
+
+---
+
+## Build and push image
+
+Avoid heavy Docker builds on weak VPS hosts; build locally or in CI:
+
+```bash
 TAG=0.1.9 ./scripts/build-push-backend.sh
 ```
 
-Предварительно: `docker login` (Docker Hub или другой реестр — поменяй образ в скрипте).
-
-На сервере после пуша:
+Then deploy:
 
 ```bash
-docker compose pull && docker compose up -d
+docker compose pull
+docker compose up -d
 ```
 
-Переопределение образа:
+Override image at deploy time:
 
 ```bash
 VOIP_BACKEND_IMAGE=kyratinkokko/voixex:0.1.9 docker compose up -d
@@ -62,53 +91,35 @@ VOIP_BACKEND_IMAGE=kyratinkokko/voixex:0.1.9 docker compose up -d
 
 ---
 
-## Запуск из исходников (без Docker)
+## Environment variables
 
-```bash
-cd backend
-npm ci
-npm run build
-# задай переменные окружения (см. backend/src/config.ts и .env.example)
-npm start
-```
+See full list in [`backend/src/config.ts`](backend/src/config.ts). Common ones:
 
-Удобно для отладки: `npm run dev` (tsx watch).
-
----
-
-## Переменные окружения (выборочно)
-
-Полный список — [`backend/src/config.ts`](backend/src/config.ts). Часто используемые:
-
-| Переменная | Назначение |
-|------------|------------|
-| `PORT` | HTTP внутри контейнера (в compose проброшен как `HTTP_PORT`) |
-| `UDP_PORT` | UDP медиа |
-| `PUBLIC_UDP_HOST` | Что клиенты используют для UDP (должно быть достижимо из интернета на VPS) |
-| `TOKEN_SECRET` | Подпись JWT/сессий — **смени в проде** |
-| `SUPERUSER_PASSWORD` | Пароль суперпользователя |
-| `DB_PATH` | SQLite (в Docker по умолчанию `/data/voip.sqlite`) |
-| `UPLOAD_DIR` | Файлы вложений |
-| `SCREEN_LOG` | `1` — логировать отладку screen relay |
+- `PORT` — backend HTTP port inside container
+- `UDP_PORT` — UDP media port
+- `PUBLIC_UDP_HOST` — externally reachable host for client UDP traffic
+- `TOKEN_SECRET` — JWT/session signing secret
+- `SUPERUSER_PASSWORD` — superuser password
+- `DB_PATH` — SQLite path (in Docker: `/data/voip.sqlite`)
+- `UPLOAD_DIR` — attachment storage
+- `SCREEN_LOG` — set `1` for screen relay debug logs
 
 ---
 
-## API и протоколы (кратко)
+## Protocol overview
 
-- **REST:** создание сервера, join, профиль, комнаты, сообщения, вложения.
-- **WebSocket:** `GET /v1/ws?token=...` — чат, обновление ростеров, **`screen_chunk`** / демонстрация экрана.
-- **UDP:** бинарные кадры (PCM16 и при поддержке клиента **Opus**), микшер по комнатам, лимиты по скорости.
+- REST endpoints for servers/channels/messages/profiles
+- WebSocket at `GET /v1/ws?token=...` for chat, presence, and `screen_chunk`
+- UDP binary media frames (PCM16 and Opus when supported)
 
-Событие **`set_peer_volume`** задаёт индивидуальную громкость участника для конкретного слушателя (микширование на сервере).
-
----
-
-## Публикация на GitHub
-
-Можно зеркалировать репозиторий на GitHub и пушить ветку **`server`** отдельно — в ней нет клиентского кода, только backend и Docker-складка.
+Event `set_peer_volume` applies per-listener participant volume on the server mixer.
 
 ---
 
-## Клиенты
+## Related branches
 
-Сборка десктопа и веб-UI описана в **README** веток `macos` / `windows`.
+- `macos` — primary client branch
+- `windows` — Windows client branch
+- `linux` — Linux client branch
+
+Docker image: [`kyratinkokko/voixex`](https://hub.docker.com/r/kyratinkokko/voixex)
