@@ -266,13 +266,15 @@ export default function VoIPApp() {
   const handlePeerVolumeChange = useCallback((roomId: string, targetClientId: string, targetName: string, volumePct: number) => {
     const sid = voiceServerIdRef.current || activeServerIdRef.current
     if (!sid || !roomId) return
-    setPeerVolumeStored(sid, roomId, targetClientId, targetName, volumePct)
+    const nextVolume = Number.isFinite(volumePct) ? Math.max(0, Math.min(200, Math.round(volumePct))) : 100
+    setPeerVolumeStored(sid, roomId, targetClientId, targetName, nextVolume)
     setPeerVolumeRevision((r) => r + 1)
-    const prev = peerVolTimersRef.current[targetClientId]
+    const timerKey = `${roomId}:${targetClientId}`
+    const prev = peerVolTimersRef.current[timerKey]
     if (prev) clearTimeout(prev)
-    peerVolTimersRef.current[targetClientId] = setTimeout(() => {
-      getVoiceWsClientRef.current().setPeerVolume(roomId, targetClientId, volumePct)
-      delete peerVolTimersRef.current[targetClientId]
+    peerVolTimersRef.current[timerKey] = setTimeout(() => {
+      getVoiceWsClientRef.current().setPeerVolume(roomId, targetClientId, nextVolume)
+      delete peerVolTimersRef.current[timerKey]
     }, 100)
   }, [])
 
