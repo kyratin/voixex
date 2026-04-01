@@ -1,80 +1,92 @@
 # Voixex
 
-Голосовые и текстовые каналы в стиле Discord: **десктоп (Electron)**, веб-интерфейс (**Next.js**) и сервер (**Fastify + WebSocket + UDP-микшер**).
+<p align="center">
+  <img src="trace.svg" alt="Voixex logo" width="180" />
+</p>
 
-Эта ветка — **`windows`**: клиентское приложение и UI для релизов и разработки под **Windows**. Код синхронизируй с веткой **`macos`** (основная линия), когда готовишь общий релиз.
+<p align="center">
+  <strong>Voixex</strong> — voice and text channels with a Discord-like layout: <strong>Electron</strong> desktop app, <strong>Next.js</strong> web UI, and a <strong>Fastify + WebSocket + UDP mixer</strong> server.
+</p>
 
-Здесь лежат `primer_front`, `desktop-client`, `voice-client`.
+<p align="center">
+  <img src="voixex.png" alt="Voixex app preview" width="780" />
+</p>
 
-| Путь | Назначение |
-|------|------------|
-| [`primer_front/`](primer_front) | UI на Next.js; при сборке клиента экспорт статики копируется в `desktop-client/ui` |
-| [`desktop-client/`](desktop-client) | Electron: окно, IPC, захват экрана, инсталляторы |
-| [`voice-client/`](voice-client) | UDP-движок голоса (`file:`-зависимость десктопа) |
-
-**Версия десктопа** — поле `version` в [`desktop-client/package.json`](desktop-client/package.json).
-
-**Сервер** (REST, WebSocket, микшер UDP, SQLite) — отдельная ветка **[`server`](../tree/server)** (или форк только с backend). Подключение в приложении: `http://<хост>:<порт>` (часто `18080`).
+<p align="center">
+  <em>Example: desktop client connected to a server.</em>
+</p>
 
 ---
 
-## Требования
+This branch is **`windows`** — the client line used for Windows-focused releases. It contains `primer_front`, `desktop-client`, and `voice-client`.
 
-- **Node.js** 20+ (рекомендуется 22)
+| Path | Description |
+|------|-------------|
+| [`primer_front/`](primer_front) | Next.js UI; static export is copied into `desktop-client/ui` for Electron |
+| [`desktop-client/`](desktop-client) | Electron shell, IPC, screen capture, installers |
+| [`voice-client/`](voice-client) | UDP voice engine (`file:` dependency of the desktop app) |
+
+**Desktop app version** — the `version` field in [`desktop-client/package.json`](desktop-client/package.json).
+
+**Backend** (REST, WebSocket, UDP mixer, SQLite) lives on the **`server`** branch (or a fork that only tracks the API). In the app, connect to your API at `http://<host>:<port>` (often port **18080** in the connect panel).
+
+---
+
+## Requirements
+
+- **Node.js** 20+ (22 recommended)
 - **npm**
-- Работающий **backend** (локально или на VPS), если нужен полный функционал
+- A running **backend** (local or VPS) for full functionality
 
 ---
 
-## Быстрый старт: десктоп в dev
+## Quick start (desktop, dev)
 
 ```bash
 cd voice-client && npm install && npm run build
 cd ../desktop-client && npm install && npm run build && npm start
 ```
 
-В приложении укажи адрес API бекенда (и при необходимости пароль сервера).
+Set the API URL (and server password if required) in the app.
 
 ---
 
-## Веб-UI (опционально)
+## Web UI (optional)
 
-Нужен запущенный backend. Переменная [`NEXT_PUBLIC_API_BASE`](.env.example) — базовый URL API **как его видит браузер** (не внутренний адрес Docker, если UI снаружи).
+Requires a running backend. [`NEXT_PUBLIC_API_BASE`](.env.example) is the API base URL **as seen by the browser** (not an internal Docker hostname if you open the UI from another machine).
 
 ```bash
 cp .env.example .env
-# при необходимости поправь NEXT_PUBLIC_API_BASE
+# adjust NEXT_PUBLIC_API_BASE if needed
 
 docker compose up --build
 ```
 
-Открой `http://localhost:3000`. Electron по умолчанию использует уже собранный бандл в `desktop-client/ui`, а не этот dev-сервер.
+Open **http://localhost:3000**. Electron uses the bundled build under `desktop-client/ui`, not this dev server.
 
 ---
 
-## Сборка установщиков
+## Building installers
 
-Из каталога [`desktop-client/`](desktop-client):
+From [`desktop-client/`](desktop-client):
 
-| Команда | Назначение |
-|---------|------------|
-| `npm run dist` | Текущая ОС |
+| Command | Output |
+|---------|--------|
+| `npm run dist` | Current OS |
 | `npm run dist:win` | Windows NSIS |
 | `npm run dist:linux` | Linux AppImage / deb |
-| `npm run dist:docker` | **Win NSIS + macOS zip** через Docker (с Linux/WSL) |
+| `npm run dist:docker` | **Windows NSIS + macOS zip** via Docker (from Linux/WSL) |
 
-Кросс-сборка Win + mac из корня репозитория:
+Cross-build Windows + macOS from the repo root:
 
 ```bash
 docker pull electronuserland/builder:wine
 ./desktop-client/scripts/docker-electron-build.sh
 ```
 
-На **Windows** можно собрать установщик нативно: `cd desktop-client && npm run dist:win` (после `npm run prepare:ui`).
+Artifacts go to `desktop-client/release/` (usually gitignored).
 
-Артефакты попадают в `desktop-client/release/` (каталог обычно в `.gitignore`).
-
-После правок в [`primer_front/`](primer_front) обнови встроенный UI:
+After changing [`primer_front/`](primer_front), refresh the embedded UI:
 
 ```bash
 cd desktop-client && npm run prepare:ui
@@ -82,37 +94,43 @@ cd desktop-client && npm run prepare:ui
 
 ---
 
-## Ветки клиента
+## Client branches
 
-- **`macos`** — основная линия разработки клиента.
-- **`windows`** — эта ветка; удобна для Win-специфичных правок и релизов, периодически подтягивай изменения из `macos`.
-- **`linux`** — при наличии: клиент под Linux.
+- **`macos`** — primary development branch for the client.
+- **`windows`** — Windows-focused releases; merge from `macos` when you cut a release.
+- **`linux`** — Linux client when present.
 
-Серверная часть **не** входит в эти ветки; см. ветку **`server`**.
-
----
-
-## Возможности (клиент)
-
-- Голос по UDP, статистика (потери, пинг, джиттер)
-- Текстовые каналы, вложения
-- Демонстрация экрана (WebSocket `screen_chunk`; на сервере должен быть relay)
-- Настройки устройств, шумоподавление ОС, шумовой gate, Opus uplink (при поддержке сервера)
-- Индивидуальная громкость участников голосового канала (настройки сохраняются локально; на сервере — взвешенный микс)
+Server code is **not** in these branches; use **`server`**.
 
 ---
 
-## Частые проблемы
+## Features (client)
 
-| Симптом | Что проверить |
-|--------|----------------|
-| Пустой список микрофонов | Разрешения ОС на микрофон, перезапуск |
-| Нет звука / обрывы | Firewall (TCP к API + UDP к медиа-порту), `PUBLIC_UDP_HOST` на сервере |
-| Ошибка прав после Docker-сборки | Скрипт `docker-electron-build.sh` делает `chown`; либо `sudo chown -R "$USER:$USER" desktop-client/node_modules` |
-| Смена сервера в голосе | Приложение переподключается; сессия голоса на предыдущем сервере завершается |
+- Voice over UDP with stats (loss, ping, jitter)
+- Text channels and attachments
+- Screen sharing over WebSocket (`screen_chunk`; server must relay)
+- Device settings, OS noise suppression, noise gate, Opus uplink (when the server supports it)
+- Per-participant voice levels in a voice channel (stored locally; server applies a weighted downlink mix)
 
 ---
 
-## Публикация на GitHub
+## Troubleshooting
 
-Этот репозиторий можно зеркалировать или перенести на GitHub: добавь remote `origin` на GitHub и пушни ветки `macos`, `windows`, `server` (и при необходимости `linux`). Лицензию и `SECURITY.md` при желании положи в корень каждой «главной» ветки или используй один репозиторий с несколькими ветками, как сейчас.
+| Issue | What to check |
+|-------|----------------|
+| Empty mic list | OS microphone permission; restart the app |
+| No audio / dropouts | Firewall (TCP to API + UDP to media port); **`PUBLIC_UDP_HOST`** on the server |
+| `npm install` permission errors after Docker builds | Run `docker-electron-build.sh` (it fixes ownership) or `sudo chown -R "$USER:$USER" desktop-client/node_modules` |
+| Switching servers while in voice | Voice session ends; client reconnects to the selected server |
+
+---
+
+## Backend
+
+Deploy and configure the server from the **`server`** branch (Docker image `kyratinkokko/voixex` on Docker Hub).
+
+---
+
+## Publishing to GitHub
+
+Add a GitHub remote and push the branches you need (`macos`, `windows`, `server`, `linux`, …). Add a **LICENSE** and **SECURITY.md** if you open the repo publicly.
