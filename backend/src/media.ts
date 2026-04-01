@@ -380,7 +380,15 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       } else {
         try {
           const out = opusDecoder.decode(decoded.payload)
-          pcm16 = Buffer.isBuffer(out) ? out : Buffer.from(out)
+          if (Buffer.isBuffer(out)) {
+            pcm16 = out
+          } else if (ArrayBuffer.isView(out)) {
+            const view = out as ArrayBufferView
+            pcm16 = Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+          } else {
+            // Fallback for unexpected decoder output shape.
+            pcm16 = Buffer.from(out as ArrayLike<number>)
+          }
         } catch {
           session.rxDecryptDropped += 1
           return
