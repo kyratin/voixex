@@ -29,6 +29,13 @@ const statusColors: Record<string, string> = {
 
 export function MemberList({ members, roles = [] }: MemberListProps) {
   const statusOrder: Record<string, number> = { online: 0, idle: 1, dnd: 2, offline: 3 }
+  const sortByStatusThenName = (a: Member, b: Member) => {
+    const byStatus = statusOrder[a.status] - statusOrder[b.status]
+    if (byStatus !== 0) return byStatus
+    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    if (byName !== 0) return byName
+    return a.id.localeCompare(b.id)
+  }
 
   const groupedMembers: Record<string, Member[]> = {}
   const onlineMembers = members.filter(m => m.status !== "offline")
@@ -37,12 +44,18 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
   roles.forEach(role => {
     groupedMembers[role.id] = onlineMembers
       .filter(m => m.roles?.includes(role.id))
-      .sort((a, b) => statusOrder[a.status] - statusOrder[b.status])
+      .sort(sortByStatusThenName)
   })
 
   const noRoleMembers = onlineMembers
     .filter(m => !m.roles || m.roles.length === 0)
-    .sort((a, b) => statusOrder[a.status] - statusOrder[b.status])
+    .sort(sortByStatusThenName)
+
+  const sortedOfflineMembers = [...offlineMembers].sort((a, b) => {
+    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    if (byName !== 0) return byName
+    return a.id.localeCompare(b.id)
+  })
 
   return (
     <div className="flex h-full w-56 flex-col bg-card">
@@ -86,13 +99,13 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
             </div>
           )}
 
-          {offlineMembers.length > 0 && (
+          {sortedOfflineMembers.length > 0 && (
             <div>
               <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Offline — {offlineMembers.length}
+                Offline — {sortedOfflineMembers.length}
               </div>
               <div className="space-y-0.5">
-                {offlineMembers.map(member => (
+                {sortedOfflineMembers.map(member => (
                   <MemberItem key={member.id} member={member} isOffline />
                 ))}
               </div>
