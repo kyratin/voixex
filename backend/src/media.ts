@@ -178,17 +178,19 @@ function mixPcm16WeightedForListener(frames: FrameEntry[], listenerClientId: str
   const out = Buffer.alloc(minLen)
   for (let i = 0; i < minLen; i += 2) {
     let sum = 0
-    let wsum = 0
+    let contributors = 0
     for (const f of frames) {
       const g = gains?.get(f.clientId) ?? 1
       if (g <= 0) continue
       sum += f.pcm16.readInt16LE(i) * g
-      wsum += g
+      contributors += 1
     }
-    if (wsum <= 0) {
+    if (contributors <= 0) {
       out.writeInt16LE(0, i)
     } else {
-      const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / wsum)))
+      // Average by active participants (not by gain sum), so per-user gain
+      // also affects 1-on-1 sessions where only one remote frame exists.
+      const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / contributors)))
       out.writeInt16LE(mixed, i)
     }
   }
