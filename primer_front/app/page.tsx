@@ -57,6 +57,7 @@ export default function VoIPApp() {
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
     captureSinkNode: MediaStreamAudioDestinationNode
+    capturePumpGainNode: GainNode
     monitorDestNode: MediaStreamAudioDestinationNode
     playbackCtx: AudioContext
     playbackNode: ScriptProcessorNode
@@ -136,6 +137,11 @@ export default function VoIPApp() {
   const [gateEnabled, setGateEnabled] = useState(false)
   const [gateThreshold, setGateThreshold] = useState(150)
   const [gateReleaseMs, setGateReleaseMs] = useState(180)
+  const [playbackGateEnabled, setPlaybackGateEnabled] = useState(false)
+  const [playbackGateThreshold, setPlaybackGateThreshold] = useState(96)
+  const [playbackHighpassEnabled, setPlaybackHighpassEnabled] = useState(false)
+  const [playbackHighpassHz, setPlaybackHighpassHz] = useState(85)
+  const [playbackLimiterEnabled, setPlaybackLimiterEnabled] = useState(true)
   const [micMeter, setMicMeter] = useState<{ rms: number; peak: number } | null>(null)
   const [keybinds, setKeybinds] = useState<{ toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }>({
     toggleMute: null,
@@ -201,6 +207,11 @@ export default function VoIPApp() {
   const gateEnabledRef = useRef(gateEnabled)
   const gateThresholdRef = useRef(gateThreshold)
   const gateReleaseMsRef = useRef(gateReleaseMs)
+  const playbackGateEnabledRef = useRef(playbackGateEnabled)
+  const playbackGateThresholdRef = useRef(playbackGateThreshold)
+  const playbackHighpassEnabledRef = useRef(playbackHighpassEnabled)
+  const playbackHighpassHzRef = useRef(playbackHighpassHz)
+  const playbackLimiterEnabledRef = useRef(playbackLimiterEnabled)
   const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   /** Serializes sidebar server switches so disconnect + connect never overlap. */
@@ -339,13 +350,19 @@ export default function VoIPApp() {
         }
       }
       setMembers(
-        Array.from(onlineByClientId.values()).map((m) => ({
-          id: m.clientId,
-          name: m.displayName,
-          avatar: m.displayName.slice(0, 1).toUpperCase(),
-          status: "online",
-          roles: []
-        }))
+        Array.from(onlineByClientId.values())
+          .sort((a, b) => {
+            const byName = a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" })
+            if (byName !== 0) return byName
+            return a.clientId.localeCompare(b.clientId)
+          })
+          .map((m) => ({
+            id: m.clientId,
+            name: m.displayName,
+            avatar: m.displayName.slice(0, 1).toUpperCase(),
+            status: "online",
+            roles: []
+          }))
       )
 
       const activeMessages = uiClient.getMessagesState(activeChannelId)
@@ -492,6 +509,11 @@ export default function VoIPApp() {
         gateEnabled?: boolean
         gateThreshold?: number
         gateReleaseMs?: number
+        playbackGateEnabled?: boolean
+        playbackGateThreshold?: number
+        playbackHighpassEnabled?: boolean
+        playbackHighpassHz?: number
+        playbackLimiterEnabled?: boolean
         useOpusUplink?: boolean
       }
       if (typeof parsed.micVolumePct === "number") setMicVolumePct(Math.max(0, Math.min(200, Math.round(parsed.micVolumePct))))
@@ -506,6 +528,15 @@ export default function VoIPApp() {
       if (typeof parsed.gateEnabled === "boolean") setGateEnabled(parsed.gateEnabled)
       if (typeof parsed.gateThreshold === "number") setGateThreshold(Math.max(0, Math.min(4000, Math.round(parsed.gateThreshold))))
       if (typeof parsed.gateReleaseMs === "number") setGateReleaseMs(Math.max(0, Math.min(2000, Math.round(parsed.gateReleaseMs))))
+      if (typeof parsed.playbackGateEnabled === "boolean") setPlaybackGateEnabled(parsed.playbackGateEnabled)
+      if (typeof parsed.playbackGateThreshold === "number") {
+        setPlaybackGateThreshold(Math.max(0, Math.min(2000, Math.round(parsed.playbackGateThreshold))))
+      }
+      if (typeof parsed.playbackHighpassEnabled === "boolean") setPlaybackHighpassEnabled(parsed.playbackHighpassEnabled)
+      if (typeof parsed.playbackHighpassHz === "number") {
+        setPlaybackHighpassHz(Math.max(20, Math.min(240, Math.round(parsed.playbackHighpassHz))))
+      }
+      if (typeof parsed.playbackLimiterEnabled === "boolean") setPlaybackLimiterEnabled(parsed.playbackLimiterEnabled)
       if (typeof parsed.useOpusUplink === "boolean") setUseOpusUplink(parsed.useOpusUplink)
     } catch {
       // ignore broken localStorage payload
@@ -526,6 +557,11 @@ export default function VoIPApp() {
         gateEnabled,
         gateThreshold,
         gateReleaseMs,
+        playbackGateEnabled,
+        playbackGateThreshold,
+        playbackHighpassEnabled,
+        playbackHighpassHz,
+        playbackLimiterEnabled,
         useOpusUplink
       })
     )
@@ -540,6 +576,11 @@ export default function VoIPApp() {
     gateEnabled,
     gateThreshold,
     gateReleaseMs,
+    playbackGateEnabled,
+    playbackGateThreshold,
+    playbackHighpassEnabled,
+    playbackHighpassHz,
+    playbackLimiterEnabled,
     useOpusUplink
   ])
 
@@ -613,6 +654,17 @@ export default function VoIPApp() {
     gateReleaseMsRef.current = gateReleaseMs
   }, [gateEnabled, gateThreshold, gateReleaseMs])
 
+  useEffect(() => {
+    playbackGateEnabledRef.current = playbackGateEnabled
+    playbackGateThresholdRef.current = playbackGateThreshold
+    playbackHighpassEnabledRef.current = playbackHighpassEnabled
+    playbackHighpassHzRef.current = playbackHighpassHz
+    playbackLimiterEnabledRef.current = playbackLimiterEnabled
+    const rt = voicePipelineRef.current
+    if (!rt) return
+    rt.playbackFilterNode.frequency.value = playbackHighpassEnabled ? playbackHighpassHz : 20
+  }, [playbackGateEnabled, playbackGateThreshold, playbackHighpassEnabled, playbackHighpassHz, playbackLimiterEnabled])
+
   const stopVoicePipeline = () => {
     const runtime = voicePipelineRef.current
     if (!runtime) return
@@ -622,6 +674,7 @@ export default function VoIPApp() {
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
     runtime.captureSinkNode.disconnect()
+    runtime.capturePumpGainNode.disconnect()
     runtime.monitorDestNode.disconnect()
     runtime.playbackNode.disconnect()
     runtime.playbackFilterNode.disconnect()
@@ -859,25 +912,37 @@ export default function VoIPApp() {
     return out
   }
 
-  const applyPlaybackNoiseGate = (frame: Int16Array) => {
+  const applyAmplitudeGate = (frame: Int16Array, threshold: number, quietAttenuation = 0.2) => {
     if (frame.length === 0) return frame
-    let peak = 0
-    let sumSq = 0
-    for (let i = 0; i < frame.length; i += 1) {
-      const abs = Math.abs(frame[i])
-      if (abs > peak) peak = abs
-      sumSq += abs * abs
-    }
-    const rms = Math.sqrt(sumSq / frame.length)
-    const gateThreshold = 96
-    // If the whole frame is near-noise floor, mute it completely.
-    if (peak < gateThreshold || rms < gateThreshold * 0.6) {
-      return new Int16Array(frame.length)
-    }
+    const gateThreshold = Math.max(8, threshold)
+    const atten = Math.max(0, Math.min(1, quietAttenuation))
     const out = new Int16Array(frame.length)
     for (let i = 0; i < frame.length; i += 1) {
       const sample = frame[i]
-      out[i] = Math.abs(sample) < gateThreshold ? 0 : sample
+      out[i] = Math.abs(sample) < gateThreshold ? Math.round(sample * atten) : sample
+    }
+    return out
+  }
+
+  const applyPlaybackNoiseGate = (frame: Int16Array, enabled: boolean, threshold: number) => {
+    if (!enabled) return frame
+    // Keep amplitude continuity and avoid frame-level RMS hard cuts.
+    return applyAmplitudeGate(frame, Math.max(12, threshold), 0.35)
+  }
+
+  const applySoftLimiter = (frame: Int16Array, enabled: boolean) => {
+    if (!enabled || frame.length === 0) return frame
+    let peak = 0
+    for (let i = 0; i < frame.length; i += 1) {
+      const abs = Math.abs(frame[i])
+      if (abs > peak) peak = abs
+    }
+    if (peak <= 30_000) return frame
+    const drive = Math.max(0.6, 30_000 / peak)
+    const out = new Int16Array(frame.length)
+    for (let i = 0; i < frame.length; i += 1) {
+      const x = (frame[i] / 32768) * drive * 1.35
+      out[i] = Math.max(-32768, Math.min(32767, Math.round(Math.tanh(x) * 32767)))
     }
     return out
   }
@@ -983,11 +1048,13 @@ export default function VoIPApp() {
         const micGainNode = captureCtx.createGain()
         micGainNode.gain.value = micVolumePctRef.current / 100
         const captureSinkNode = captureCtx.createMediaStreamDestination()
+        const capturePumpGainNode = captureCtx.createGain()
+        capturePumpGainNode.gain.value = 0
         const monitorDestNode = captureCtx.createMediaStreamDestination()
         const playbackNode = playbackCtx.createScriptProcessor(1024, 1, 1)
         const playbackFilterNode = playbackCtx.createBiquadFilter()
         playbackFilterNode.type = "highpass"
-        playbackFilterNode.frequency.value = 85
+        playbackFilterNode.frequency.value = playbackHighpassEnabledRef.current ? playbackHighpassHzRef.current : 20
         playbackFilterNode.Q.value = 0.707
         const outputGainNode = playbackCtx.createGain()
         outputGainNode.gain.value = outputVolumePctRef.current / 100
@@ -1001,6 +1068,7 @@ export default function VoIPApp() {
           captureSource,
           micGainNode,
           captureSinkNode,
+          capturePumpGainNode,
           monitorDestNode,
           playbackCtx,
           playbackNode,
@@ -1057,14 +1125,9 @@ export default function VoIPApp() {
               }
 
               if (gateEnabledRef.current) {
-                const energy = calcFrameEnergy(frame)
-                const thresholdNorm = gateThresholdRef.current / 32768
-                if (energy.rms >= thresholdNorm) {
-                  runtime.captureGateOpenUntilMs = now + gateReleaseMsRef.current
-                }
-                if (now > runtime.captureGateOpenUntilMs) {
-                  frame = new Int16Array(frame.length)
-                }
+                const thresholdAmp = Math.max(0, Math.round(gateThresholdRef.current))
+                // Amplitude-based gate for uplink: no RMS/noise-classification hard mute.
+                frame = applyAmplitudeGate(frame, thresholdAmp, 0.2)
               }
 
               if (opusEncoder && window.electronVoice?.sendOpusFrame) {
@@ -1113,7 +1176,9 @@ export default function VoIPApp() {
 
         runtime.unsubscribeIncoming = window.electronVoice?.onPcm16Frame((pcm16Base64) => {
           const frame48k = decodePcm16Base64(pcm16Base64)
-          const frame = applyPlaybackNoiseGate(resampleInt16Frame(frame48k, 48000, runtime.playbackSampleRate))
+          const resampled = resampleInt16Frame(frame48k, 48000, runtime.playbackSampleRate)
+          const gated = applyPlaybackNoiseGate(resampled, playbackGateEnabledRef.current, playbackGateThresholdRef.current)
+          const frame = applySoftLimiter(gated, playbackLimiterEnabledRef.current)
           let hasSignal = false
           for (let i = 0; i < frame.length; i += 1) {
             if (frame[i] !== 0) {
@@ -1139,8 +1204,11 @@ export default function VoIPApp() {
         captureSource.connect(micGainNode)
         micGainNode.connect(captureNode)
         micGainNode.connect(monitorDestNode)
-        // Keep ScriptProcessor running without routing mic signal to speakers.
+        // Keep ScriptProcessor actively pulled on all platforms (especially macOS)
+        // while keeping output silent to avoid sidetone.
         captureNode.connect(captureSinkNode)
+        captureNode.connect(capturePumpGainNode)
+        capturePumpGainNode.connect(captureCtx.destination)
         monitorSourceNode.connect(monitorGainNode)
         monitorGainNode.connect(playbackCtx.destination)
         playbackNode.connect(playbackFilterNode)
@@ -2364,6 +2432,41 @@ export default function VoIPApp() {
                     <span className="text-xs text-muted-foreground">{gateReleaseMs}ms</span>
                   </div>
                   <Slider value={[gateReleaseMs]} min={0} max={800} step={10} onValueChange={([v]) => setGateReleaseMs(v)} />
+                </div>
+              </div>
+              <div className="rounded-lg border border-border p-3 space-y-3">
+                <div>
+                  <Label>Playback DSP (incoming voice)</Label>
+                  <p className="text-xs text-muted-foreground">Tune this if remote voice sounds robotic, metallic, or too bright.</p>
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">Playback Gate</Label>
+                  <Switch checked={playbackGateEnabled} onCheckedChange={setPlaybackGateEnabled} />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">Playback Gate Threshold</Label>
+                    <span className="text-xs text-muted-foreground">{playbackGateThreshold}</span>
+                  </div>
+                  <Slider value={[playbackGateThreshold]} min={0} max={2000} step={10} onValueChange={([v]) => setPlaybackGateThreshold(v)} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">High-pass Filter</Label>
+                  <Switch checked={playbackHighpassEnabled} onCheckedChange={setPlaybackHighpassEnabled} />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">High-pass Cutoff</Label>
+                    <span className="text-xs text-muted-foreground">{playbackHighpassHz}Hz</span>
+                  </div>
+                  <Slider value={[playbackHighpassHz]} min={20} max={240} step={5} onValueChange={([v]) => setPlaybackHighpassHz(v)} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label className="text-sm">Soft Limiter / Clip Guard</Label>
+                    <p className="text-xs text-muted-foreground">Protects from harsh clipping at high levels.</p>
+                  </div>
+                  <Switch checked={playbackLimiterEnabled} onCheckedChange={setPlaybackLimiterEnabled} />
                 </div>
               </div>
               <Button onClick={saveAudioSettings}>Apply Audio Settings</Button>

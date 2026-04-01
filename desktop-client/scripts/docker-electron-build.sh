@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build Windows (.exe NSIS) and macOS (.zip) using the official Wine image.
+# Build Windows (.exe NSIS), macOS arm64 (.zip), and Linux (AppImage/deb)
+# using the official builder image.
 # Prereq: docker pull electronuserland/builder:wine
 #
 # From repo root:
@@ -71,7 +72,7 @@ if [[ "$SKIP_PREPARE" != true ]]; then
   (cd "$REPO_ROOT/desktop-client" && npm install && npm run build && npm run prepare:ui)
 fi
 
-echo "==> electron-builder (mac zip + win nsis) в electronuserland/builder:wine"
+echo "==> electron-builder (mac arm64 zip + linux + win nsis) в electronuserland/builder:wine"
 docker run --rm -i \
   -v "$REPO_ROOT:/repo" \
   -w /repo/desktop-client \
@@ -82,7 +83,8 @@ DMG_JS="node_modules/dmg-builder/out/dmg.js"
 if [[ -f "$DMG_JS" ]]; then
   sed -i 's|const dmgLicense_1 = require("./dmgLicense");|let dmgLicense_1; try { dmgLicense_1 = require("./dmgLicense"); } catch(e) { dmgLicense_1 = { addLicenseToDmg: async () => null }; }|' "$DMG_JS" 2>/dev/null || true
 fi
-npx electron-builder --mac zip --publish never
+npx electron-builder --mac zip --arm64 --publish never
+npx electron-builder --linux AppImage deb --x64 --publish never
 npx electron-builder --win nsis --publish never
 EOF
 

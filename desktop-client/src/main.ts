@@ -185,6 +185,18 @@ app.whenReady().then(() => {
     registerHotkeys()
     return { ...keybinds }
   })
+  // High-frequency media packets should not use invoke/handle RPC.
+  // send/on avoids per-packet Promise churn and lowers renderer/main CPU.
+  ipcMain.on("voice:sendPcm16Frame", (_event, pcm16Base64: string) => {
+    voice.sendPcm16Frame(pcm16Base64)
+  })
+  ipcMain.on("voice:sendOpusFrame", (_event, opusBase64: string) => {
+    voice.sendOpusFrame(opusBase64)
+  })
+  ipcMain.on("voice:sendScreenChunk", (_event, chunkBase64: string) => {
+    voice.sendScreenChunk(chunkBase64)
+  })
+  // Backward compatibility for any callers still using invoke/handle.
   ipcMain.handle("voice:sendPcm16Frame", (_event, pcm16Base64: string) => {
     voice.sendPcm16Frame(pcm16Base64)
     return { ok: true }
