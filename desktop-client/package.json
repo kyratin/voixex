@@ -39,10 +39,12 @@
     "directories": {
       "output": "release"
     },
+    "icon": "build/icons/icon-1024.png",
     "files": [
       "dist/**/*",
       "preload.cjs",
       "ui/**/*",
+      "build/icons/**/*",
       "node_modules/**/*",
       "package.json"
     ],
@@ -52,15 +54,18 @@
         "AppImage",
         "deb"
       ],
+      "icon": "build/icons/icon-512.png",
       "category": "Network"
     },
     "win": {
       "signAndEditExecutable": false,
+      "icon": "build/icons/icon.ico",
       "target": [
         "nsis"
       ]
     },
     "mac": {
+      "icon": "build/icons/icon.icns",
       "target": [
         "dmg"
       ],

@@ -208,7 +208,10 @@ function VoiceChannelUserRow({
                   min={0}
                   max={200}
                   step={1}
-                  onValueChange={([v]) => onPeerVolumeChange(roomId, user.id, user.name, v)}
+                  onValueChange={([v]) => {
+                    const next = Number.isFinite(v) ? Math.max(0, Math.min(200, Math.round(v))) : 100
+                    onPeerVolumeChange(roomId, user.id, user.name, next)
+                  }}
                 />
                 <p className="text-[10px] text-muted-foreground">100% = default. Saved for this server.</p>
               </div>

@@ -47,13 +47,13 @@ export function UserPanel({
   return (
     <div className="bg-sidebar/80 border-t border-border">
       {isInVoice && (
-        <div className="flex items-center justify-between border-b border-border px-3 py-2">
-          <button onClick={onToggleVoiceStats} className="flex items-center gap-2 text-left">
+        <div className="flex items-center gap-2 border-b border-border pl-3 pr-2 py-2">
+          <button onClick={onToggleVoiceStats} className="flex min-w-0 flex-1 items-center gap-2 text-left">
             <Signal className="h-4 w-4 text-accent" />
-            <div>
+            <div className="min-w-0">
               <div className="text-xs font-semibold text-accent">Voice Connected</div>
-              <div className="text-[11px] text-muted-foreground">{voiceChannelName}</div>
-              {voiceStatsSummary ? <div className="text-[10px] text-muted-foreground">{voiceStatsSummary}</div> : null}
+              <div className="truncate text-[11px] text-muted-foreground">{voiceChannelName}</div>
+              {voiceStatsSummary ? <div className="truncate text-[10px] text-muted-foreground">{voiceStatsSummary}</div> : null}
             </div>
           </button>
           <Tooltip>
