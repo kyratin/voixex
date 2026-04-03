@@ -34,7 +34,7 @@ This branch is **`windows`** — the client line used for Windows-focused releas
 
 ## Latest updates
 
-- Client **`0.2.16`** builds published.
+- Client **`0.2.18`** builds published (Opus uplink on by default; backend **`0.1.14`** Docker).
 - Docker build script now generates **macOS arm64**, **Linux (AppImage/deb)**, and **Windows NSIS** installers.
 - Presence lists are now stable and sorted alphabetically (no reordering when someone starts speaking).
 - Voice path updates include IPC optimization and playback DSP tuning options.
@@ -113,7 +113,7 @@ Artifacts are written to `desktop-client/release/`.
 |-------|----------------|
 | Empty mic list | OS microphone permission; restart app |
 | No audio / dropouts | Firewall (TCP API + UDP media); `PUBLIC_UDP_HOST` on server |
-| Metallic/robotic voice through server | Update backend to image `kyratinkokko/voixex:0.1.13` or newer |
+| Metallic/robotic voice through server | Update backend to image `kyratinkokko/voixex:0.1.14` or newer |
 | `npm install` EACCES after Docker build | Re-run `docker-electron-build.sh` (it fixes ownership) |
 
 ---
