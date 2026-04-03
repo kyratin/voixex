@@ -8,3 +8,5 @@ primer_front/tsconfig.tsbuildinfo
 *.log
 backend_logs.txt
 .env
+.DS_Store
+**/.DS_Store
