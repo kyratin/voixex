@@ -58,6 +58,7 @@ export default function VoIPApp() {
     captureNode: ScriptProcessorNode
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
+    captureHighpass: BiquadFilterNode
     captureSinkNode: MediaStreamAudioDestinationNode
     capturePumpGainNode: GainNode
     monitorDestNode: MediaStreamAudioDestinationNode
@@ -139,11 +140,13 @@ export default function VoIPApp() {
   const [outputVolumePct, setOutputVolumePct] = useState(100)
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true)
   const [echoCancellationEnabled, setEchoCancellationEnabled] = useState(true)
-  const [autoGainControlEnabled, setAutoGainControlEnabled] = useState(true)
-  const [useOpusUplink, setUseOpusUplink] = useState(false)
+  /** AGC often boosts constant hiss between words; prefer manual mic level + Opus. */
+  const [autoGainControlEnabled, setAutoGainControlEnabled] = useState(false)
+  /** Opus masks noise/hiss far better than raw PCM; PCM uplink sends full ADC noise floor (~768 kb/s). */
+  const [useOpusUplink, setUseOpusUplink] = useState(true)
   const [monitorEnabled, setMonitorEnabled] = useState(false)
   const [monitorVolumePct, setMonitorVolumePct] = useState(15)
-  const [gateEnabled, setGateEnabled] = useState(false)
+  const [gateEnabled, setGateEnabled] = useState(true)
   const [gateThreshold, setGateThreshold] = useState(150)
   const [gateReleaseMs, setGateReleaseMs] = useState(180)
   const [playbackGateEnabled, setPlaybackGateEnabled] = useState(false)
@@ -682,6 +685,7 @@ export default function VoIPApp() {
     runtime.captureNode.disconnect()
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
+    runtime.captureHighpass.disconnect()
     runtime.captureSinkNode.disconnect()
     runtime.capturePumpGainNode.disconnect()
     runtime.monitorDestNode.disconnect()
@@ -904,6 +908,23 @@ export default function VoIPApp() {
     return out
   }
 
+  /** Envelope follower + soft attenuation for steady wind/bed noise (less grainy than per-sample gate). */
+  const applyUplinkNoiseAttenuate = (frame: Int16Array, threshold: number, floorRatio = 0.14) => {
+    if (frame.length === 0) return frame
+    const t = Math.max(24, threshold)
+    const floor = Math.max(0.05, Math.min(0.45, floorRatio))
+    const out = new Int16Array(frame.length)
+    let env = 0
+    for (let i = 0; i < frame.length; i += 1) {
+      const a = Math.abs(frame[i])
+      env = a > env ? a : env * 0.992 + a * 0.008
+      const g = env < t ? floor + (1 - floor) * (env / t) * (env / t) : 1
+      const s = frame[i]
+      out[i] = Math.round(s * g)
+    }
+    return out
+  }
+
   const applyPlaybackNoiseGate = (frame: Int16Array, enabled: boolean, threshold: number) => {
     if (!enabled) return frame
     // Keep amplitude continuity and avoid frame-level RMS hard cuts.
@@ -1027,12 +1048,20 @@ export default function VoIPApp() {
         const captureNode = captureCtx.createScriptProcessor(1024, 1, 1)
         const micGainNode = captureCtx.createGain()
         micGainNode.gain.value = micVolumePctRef.current / 100
+        const captureHighpass = captureCtx.createBiquadFilter()
+        captureHighpass.type = "highpass"
+        captureHighpass.frequency.value = 110
+        captureHighpass.Q.value = 0.707
         const captureSinkNode = captureCtx.createMediaStreamDestination()
         const capturePumpGainNode = captureCtx.createGain()
         capturePumpGainNode.gain.value = 0
         const monitorDestNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
-        const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, 80)
+        const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
+          startMs: 260,
+          tickMs: 10,
+          maxQueuedSec: 0.5
+        })
         playbackWorklet.port.onmessage = (ev: MessageEvent) => {
           const d = ev.data as { type?: string; bufferedSamples?: number; underruns?: number; overflowDrops?: number }
           if (d?.type !== "stats") return
@@ -1060,6 +1089,7 @@ export default function VoIPApp() {
           captureNode,
           captureSource,
           micGainNode,
+          captureHighpass,
           captureSinkNode,
           capturePumpGainNode,
           monitorDestNode,
@@ -1096,7 +1126,19 @@ export default function VoIPApp() {
           try {
             const mod = await import("opusscript")
             const OpusScript = (mod as unknown as { default: typeof import("opusscript") }).default
-            opusEncoder = new OpusScript(48_000, 1, OpusScript.Application.AUDIO)
+            const enc = new OpusScript(48_000, 1, OpusScript.Application.VOIP)
+            enc.setBitrate(48_000)
+            try {
+              enc.encoderCTL(4024, 3001)
+            } catch {
+              /* OPUS_SET_SIGNAL(4024) + OPUS_SIGNAL_VOICE(3001) — optional */
+            }
+            try {
+              enc.encoderCTL(4016, 1)
+            } catch {
+              /* OPUS_SET_DTX — optional silence packets */
+            }
+            opusEncoder = enc
           } catch {
             setDeviceError("Opus encoder failed to load in renderer; falling back to PCM uplink.")
             opusEncoder = null
@@ -1126,8 +1168,7 @@ export default function VoIPApp() {
 
               if (gateEnabledRef.current) {
                 const thresholdAmp = Math.max(0, Math.round(gateThresholdRef.current))
-                // Amplitude-based gate for uplink: no RMS/noise-classification hard mute.
-                frame = applyAmplitudeGate(frame, thresholdAmp, 0.2)
+                frame = applyUplinkNoiseAttenuate(frame, thresholdAmp, 0.14)
               }
 
               if (opusEncoder && window.electronVoice?.sendOpusFrame) {
@@ -1175,8 +1216,9 @@ export default function VoIPApp() {
         runtime.unsubscribeScreenChunk = null
 
         captureSource.connect(micGainNode)
-        micGainNode.connect(captureNode)
-        micGainNode.connect(monitorDestNode)
+        micGainNode.connect(captureHighpass)
+        captureHighpass.connect(captureNode)
+        captureHighpass.connect(monitorDestNode)
         // Keep ScriptProcessor actively pulled on all platforms (especially macOS)
         // while keeping output silent to avoid sidetone.
         captureNode.connect(captureSinkNode)
@@ -2249,7 +2291,10 @@ export default function VoIPApp() {
                   <div className="flex justify-between"><span>Capture SR</span><span>{Math.round(audioPipelineDiag.captureSampleRate)} Hz</span></div>
                   <div className="flex justify-between"><span>Playback SR</span><span>{Math.round(audioPipelineDiag.playbackSampleRate)} Hz</span></div>
                   <div className="flex justify-between"><span>Playout buffer</span><span>{audioPipelineDiag.playoutBufferedSamples} samples</span></div>
-                  <div className="flex justify-between"><span>Underruns</span><span>{audioPipelineDiag.playoutUnderruns}</span></div>
+                  <div className="flex justify-between">
+                    <span>Underruns</span>
+                    <span title="Empty-buffer events per ~1s (not samples)">{audioPipelineDiag.playoutUnderruns}</span>
+                  </div>
                   <div className="flex justify-between"><span>Overflow drops</span><span>{audioPipelineDiag.playoutOverflowDrops}</span></div>
                 </>
               )}
@@ -2367,8 +2412,10 @@ export default function VoIPApp() {
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label>Opus Uplink (beta)</Label>
-                    <p className="text-xs text-muted-foreground">Encodes mic audio to Opus before sending to server.</p>
+                    <Label>Opus uplink (recommended)</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Voice-optimized Opus (VOIP). Raw PCM sends the full noise floor and often sounds like constant hiss.
+                    </p>
                   </div>
                   <Switch checked={useOpusUplink} onCheckedChange={setUseOpusUplink} />
                 </div>

@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.2.16",
+  "version": "0.2.18",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -15,11 +15,11 @@
     "prepare:ui": "node ./scripts/sync-ui.mjs",
     "start": "electron ./dist/main.js",
     "pack": "electron-builder --dir",
-    "dist": "npm run prepare:ui && electron-builder",
-    "dist:win": "npm run prepare:ui && electron-builder --win nsis",
-    "dist:linux": "npm run prepare:ui && electron-builder --linux AppImage deb",
-    "dist:mac": "npm run prepare:ui && electron-builder --mac dmg",
-    "dist:mac:zip": "npm run prepare:ui && electron-builder --mac zip",
+    "dist": "npm run prepare:ui && electron-builder --publish never",
+    "dist:win": "npm run prepare:ui && electron-builder --win nsis --x64 --publish never",
+    "dist:linux": "npm run prepare:ui && electron-builder --linux AppImage deb --publish never",
+    "dist:mac": "npm run prepare:ui && electron-builder --mac dmg --publish never",
+    "dist:mac:zip": "npm run prepare:ui && electron-builder --mac zip --publish never",
     "dist:docker": "bash ./scripts/docker-electron-build.sh",
     "dist:docker:only": "bash ./scripts/docker-electron-build.sh --skip-prepare"
   },
