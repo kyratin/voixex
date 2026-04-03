@@ -31,13 +31,12 @@ app.addContentTypeParser(
   (_req, body, done) => done(null, body)
 )
 const db = initDb(config.dbPath)
-/** WebSocket `onclose` does not run on process exit/redeploy, so SQLite keeps stale voice rows. Ghosts break UDP mix (no "other" frames → no audio back → RX=0). */
 {
   const r = db.prepare("DELETE FROM member_state").run()
   if (r.changes > 0) {
     app.log.info(
       { clearedRows: r.changes },
-      "startup: cleared member_state (stale voice presence after restart); reconnect and re-enter voice channels"
+      "startup: cleared member_state (stale voice presence after restart)"
     )
   }
 }

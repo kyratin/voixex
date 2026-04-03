@@ -171,6 +171,17 @@ function decryptFrame(key: Buffer, packet: Buffer) {
   return { seq, ts, roomId, kind, payload }
 }
 
+/** VoIP frames are 20ms @ 48kHz mono = 1920 bytes. Pad/truncate so mixing stays phase-aligned. */
+const PCM20MS_BYTES = 960 * 2
+
+function normalizePcm20ms(pcm: Buffer): Buffer {
+  if (pcm.length === PCM20MS_BYTES) return pcm
+  if (pcm.length > PCM20MS_BYTES) return pcm.subarray(0, PCM20MS_BYTES)
+  const out = Buffer.alloc(PCM20MS_BYTES)
+  pcm.copy(out, 0, 0, pcm.length)
+  return out
+}
+
 function mixPcm16WeightedForListener(frames: FrameEntry[], listenerClientId: string): Buffer {
   const gains = peerVolumeByListener.get(listenerClientId)
   if (frames.length === 0) return Buffer.alloc(0)
@@ -235,7 +246,7 @@ type MediaHooks = {
 
 export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks = {}) {
   const socket = dgram.createSocket("udp4")
-  const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO)
+  const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.VOIP)
 
   socket.on("message", (packet: Buffer, rinfo: RemoteInfo) => {
     if (packet.length < 20) return
@@ -394,6 +405,8 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
           return
         }
       }
+
+      pcm16 = normalizePcm20ms(pcm16)
 
       const energy = calcRmsEnergyPcm16(pcm16)
       const nowEnergyTs = Date.now()
