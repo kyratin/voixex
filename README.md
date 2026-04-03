@@ -26,7 +26,7 @@ Client code (`desktop-client`, `primer_front`, `voice-client`) lives on `macos` 
 
 ## Latest updates
 
-- Backend image **`kyratinkokko/voixex:0.1.11`** published.
+- Backend image **`kyratinkokko/voixex:0.1.13`** published.
 - Fixed Opus decode path to preserve PCM16 bytes (removes metallic/electronic distortion in relayed voice).
 - Per-listener peer volume remains active for both multi-user rooms and 1-on-1 calls.
 
@@ -75,7 +75,7 @@ npm run dev
 Avoid heavy Docker builds on weak VPS hosts; build locally or in CI:
 
 ```bash
-TAG=0.1.11 ./scripts/build-push-backend.sh
+TAG=0.1.13 ./scripts/build-push-backend.sh
 ```
 
 Then deploy:
@@ -88,7 +88,7 @@ docker compose up -d
 Override image at deploy time:
 
 ```bash
-VOIP_BACKEND_IMAGE=kyratinkokko/voixex:0.1.11 docker compose up -d
+VOIP_BACKEND_IMAGE=kyratinkokko/voixex:0.1.13 docker compose up -d
 ```
 
 ---
