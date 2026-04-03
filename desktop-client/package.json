@@ -1,12 +1,12 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
     "email": "kyratin@example.com"
   },
-  "homepage": "https://example.com/voip-desktop-client",
+  "homepage": "https://github.com/kyratin/voixex",
   "private": true,
   "type": "module",
   "main": "dist/main.js",

@@ -9,6 +9,8 @@ import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient, type RealtimeState } from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
+import { resampleFloat32Chunk, resampleInt16Frame } from "@/lib/voice-resample"
+import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -60,17 +62,16 @@ export default function VoIPApp() {
     capturePumpGainNode: GainNode
     monitorDestNode: MediaStreamAudioDestinationNode
     playbackCtx: AudioContext
-    playbackNode: ScriptProcessorNode
+    playbackWorklet: AudioWorkletNode
+    playoutPrefetch: VoicePlayoutPrefetch
     playbackFilterNode: BiquadFilterNode
     outputGainNode: GainNode
     monitorSourceNode: MediaStreamAudioSourceNode
     monitorGainNode: GainNode
-    queue: Int16Array[]
     txRemainder: Int16Array
     txResampleInput: Float32Array
     txResamplePos: number
     playbackSampleRate: number
-    bufferedSamples: number
     unsubscribeIncoming: (() => void) | null
     unsubscribeScreenChunk: (() => void) | null
     lastIncomingAudioAtMs: number
@@ -110,6 +111,14 @@ export default function VoIPApp() {
   const [roomKindInput, setRoomKindInput] = useState<"voice" | "text">("voice")
   const [creatingChannel, setCreatingChannel] = useState(false)
   const [voiceStats, setVoiceStats] = useState<VoiceRuntimeStats | null>(null)
+  const [audioPipelineDiag, setAudioPipelineDiag] = useState<{
+    captureSampleRate: number
+    playbackSampleRate: number
+    playoutBufferedSamples: number
+    playoutUnderruns: number
+    playoutOverflowDrops: number
+  } | null>(null)
+  const voicePlayoutBufferedRef = useRef(0)
   const [isSpeakingNow, setIsSpeakingNow] = useState(false)
   const [hasDesktopBridge, setHasDesktopBridge] = useState(false)
   const [showVoiceStatsPanel, setShowVoiceStatsPanel] = useState(false)
@@ -643,7 +652,7 @@ export default function VoIPApp() {
     rt.monitorGainNode.gain.value = monitorEnabled ? monitorVolumePct / 100 : 0
     if (monitorEnabled && monitorVolumePct > 0) {
       void rt.playbackCtx.resume()
-    } else if (rt.bufferedSamples === 0) {
+    } else if (voicePlayoutBufferedRef.current === 0) {
       void rt.playbackCtx.suspend()
     }
   }, [monitorEnabled, monitorVolumePct])
@@ -676,7 +685,10 @@ export default function VoIPApp() {
     runtime.captureSinkNode.disconnect()
     runtime.capturePumpGainNode.disconnect()
     runtime.monitorDestNode.disconnect()
-    runtime.playbackNode.disconnect()
+    runtime.playbackWorklet.disconnect()
+    runtime.playoutPrefetch.reset()
+    voicePlayoutBufferedRef.current = 0
+    setAudioPipelineDiag(null)
     runtime.playbackFilterNode.disconnect()
     runtime.outputGainNode.disconnect()
     runtime.monitorSourceNode.disconnect()
@@ -861,54 +873,22 @@ export default function VoIPApp() {
     })
   }, [hasDesktopBridge, isVoiceSplit, uiClient, voiceClient])
 
+  useEffect(() => {
+    const rt = voicePipelineRef.current
+    if (!rt?.playbackWorklet) return
+    if (isDeafened) {
+      rt.playbackWorklet.port.postMessage({ type: "reset" })
+      rt.playoutPrefetch.reset()
+      voicePlayoutBufferedRef.current = 0
+    }
+  }, [isDeafened])
+
   const concatInt16 = (a: Int16Array, b: Int16Array) => {
     if (a.length === 0) return b
     if (b.length === 0) return a
     const out = new Int16Array(a.length + b.length)
     out.set(a, 0)
     out.set(b, a.length)
-    return out
-  }
-
-  const resampleFloat32Chunk = (
-    chunk: Float32Array,
-    inRate: number,
-    outRate: number,
-    runtime: Pick<VoicePipelineRuntime, "txResampleInput" | "txResamplePos">
-  ) => {
-    if (inRate === outRate) return chunk
-    const combined = new Float32Array(runtime.txResampleInput.length + chunk.length)
-    combined.set(runtime.txResampleInput, 0)
-    combined.set(chunk, runtime.txResampleInput.length)
-    const step = inRate / outRate
-    let pos = runtime.txResamplePos
-    const out: number[] = []
-    while (pos + 1 < combined.length) {
-      const i = Math.floor(pos)
-      const frac = pos - i
-      const sample = combined[i] * (1 - frac) + combined[i + 1] * frac
-      out.push(sample)
-      pos += step
-    }
-    const keepFrom = Math.max(0, Math.floor(pos) - 1)
-    runtime.txResampleInput = combined.subarray(keepFrom)
-    runtime.txResamplePos = pos - keepFrom
-    return Float32Array.from(out)
-  }
-
-  const resampleInt16Frame = (frame: Int16Array, inRate: number, outRate: number) => {
-    if (inRate === outRate) return frame
-    const outLen = Math.max(1, Math.round((frame.length * outRate) / inRate))
-    const out = new Int16Array(outLen)
-    const step = inRate / outRate
-    for (let i = 0; i < outLen; i += 1) {
-      const pos = i * step
-      const idx = Math.floor(pos)
-      const frac = pos - idx
-      const a = frame[Math.min(frame.length - 1, idx)]
-      const b = frame[Math.min(frame.length - 1, idx + 1)]
-      out[i] = Math.round(a * (1 - frac) + b * frac)
-    }
     return out
   }
 
@@ -1051,7 +1031,20 @@ export default function VoIPApp() {
         const capturePumpGainNode = captureCtx.createGain()
         capturePumpGainNode.gain.value = 0
         const monitorDestNode = captureCtx.createMediaStreamDestination()
-        const playbackNode = playbackCtx.createScriptProcessor(1024, 1, 1)
+        const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
+        const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, 80)
+        playbackWorklet.port.onmessage = (ev: MessageEvent) => {
+          const d = ev.data as { type?: string; bufferedSamples?: number; underruns?: number; overflowDrops?: number }
+          if (d?.type !== "stats") return
+          voicePlayoutBufferedRef.current = d.bufferedSamples ?? 0
+          setAudioPipelineDiag((prev) => ({
+            captureSampleRate: voicePipelineRef.current?.captureCtx.sampleRate ?? prev?.captureSampleRate ?? 48000,
+            playbackSampleRate: voicePipelineRef.current?.playbackCtx.sampleRate ?? prev?.playbackSampleRate ?? 48000,
+            playoutBufferedSamples: d.bufferedSamples ?? 0,
+            playoutUnderruns: d.underruns ?? 0,
+            playoutOverflowDrops: d.overflowDrops ?? 0
+          }))
+        }
         const playbackFilterNode = playbackCtx.createBiquadFilter()
         playbackFilterNode.type = "highpass"
         playbackFilterNode.frequency.value = playbackHighpassEnabledRef.current ? playbackHighpassHzRef.current : 20
@@ -1071,17 +1064,16 @@ export default function VoIPApp() {
           capturePumpGainNode,
           monitorDestNode,
           playbackCtx,
-          playbackNode,
+          playbackWorklet,
+          playoutPrefetch,
           playbackFilterNode,
           outputGainNode,
           monitorSourceNode,
           monitorGainNode,
-          queue: [],
           txRemainder: new Int16Array(0),
           txResampleInput: new Float32Array(0),
           txResamplePos: 0,
           playbackSampleRate: playbackCtx.sampleRate,
-          bufferedSamples: 0,
           unsubscribeIncoming: null,
           unsubscribeScreenChunk: null,
           lastIncomingAudioAtMs: 0,
@@ -1089,6 +1081,14 @@ export default function VoIPApp() {
           captureGateOpenUntilMs: 0
         }
         voicePipelineRef.current = runtime
+        voicePlayoutBufferedRef.current = 0
+        setAudioPipelineDiag({
+          captureSampleRate: captureCtx.sampleRate,
+          playbackSampleRate: playbackCtx.sampleRate,
+          playoutBufferedSamples: 0,
+          playoutUnderruns: 0,
+          playoutOverflowDrops: 0
+        })
 
         const frameSize = 960
         let opusEncoder: unknown = null
@@ -1147,34 +1147,8 @@ export default function VoIPApp() {
           runtime.txRemainder = merged.subarray(offset)
         }
 
-        playbackNode.onaudioprocess = (event) => {
-          const out = event.outputBuffer.getChannelData(0)
-          out.fill(0)
-          if (deafenedRef.current) {
-            runtime.queue = []
-            runtime.bufferedSamples = 0
-            return
-          }
-          const minBufferedSamples = Math.round(runtime.playbackSampleRate * 0.04)
-          if (runtime.bufferedSamples < minBufferedSamples) return
-          let cursor = 0
-          while (cursor < out.length && runtime.queue.length > 0) {
-            const current = runtime.queue[0]
-            const copyLen = Math.min(out.length - cursor, current.length)
-            for (let i = 0; i < copyLen; i += 1) {
-              out[cursor + i] = current[i] / 32768
-            }
-            cursor += copyLen
-            runtime.bufferedSamples -= copyLen
-            if (copyLen === current.length) {
-              runtime.queue.shift()
-            } else {
-              runtime.queue[0] = current.subarray(copyLen)
-            }
-          }
-        }
-
         runtime.unsubscribeIncoming = window.electronVoice?.onPcm16Frame((pcm16Base64) => {
+          if (deafenedRef.current) return
           const frame48k = decodePcm16Base64(pcm16Base64)
           const resampled = resampleInt16Frame(frame48k, 48000, runtime.playbackSampleRate)
           const gated = applyPlaybackNoiseGate(resampled, playbackGateEnabledRef.current, playbackGateThresholdRef.current)
@@ -1191,12 +1165,11 @@ export default function VoIPApp() {
           if (runtime.playbackCtx.state !== "running") {
             void runtime.playbackCtx.resume()
           }
-          runtime.queue.push(frame)
-          runtime.bufferedSamples += frame.length
-          if (runtime.queue.length > 300) {
-            const dropped = runtime.queue.splice(0, runtime.queue.length - 300)
-            for (const d of dropped) runtime.bufferedSamples -= d.length
+          const floatOut = new Float32Array(frame.length)
+          for (let i = 0; i < frame.length; i += 1) {
+            floatOut[i] = frame[i] / 32768
           }
+          runtime.playoutPrefetch.pushBlock(floatOut)
         }) ?? null
         // Screen video uses WebSocket (reliable); UDP screen path not used.
         runtime.unsubscribeScreenChunk = null
@@ -1211,13 +1184,13 @@ export default function VoIPApp() {
         capturePumpGainNode.connect(captureCtx.destination)
         monitorSourceNode.connect(monitorGainNode)
         monitorGainNode.connect(playbackCtx.destination)
-        playbackNode.connect(playbackFilterNode)
+        playbackWorklet.connect(playbackFilterNode)
         playbackFilterNode.connect(outputGainNode)
         outputGainNode.connect(playbackCtx.destination)
         runtime.playbackIdleTimer = setInterval(() => {
           const idleForMs = Date.now() - runtime.lastIncomingAudioAtMs
           const monitorActive = monitorEnabledRef.current && monitorVolumePctRef.current > 0
-          if (!monitorActive && runtime.bufferedSamples === 0 && idleForMs > 700 && runtime.playbackCtx.state === "running") {
+          if (!monitorActive && voicePlayoutBufferedRef.current === 0 && idleForMs > 700 && runtime.playbackCtx.state === "running") {
             void runtime.playbackCtx.suspend()
           }
         }, 300)
@@ -2270,6 +2243,16 @@ export default function VoIPApp() {
               <Separator />
               <div className={`flex justify-between ${qualityClass}`}><span>Ping</span><span>{voiceStats.pingNowMs ?? 0}ms now / {voiceStats.ping1PctMs ?? 0}ms p1 / {voiceStats.ping01PctMs ?? 0}ms p0.1</span></div>
               <div className={`flex justify-between ${qualityClass}`}><span>Jitter</span><span>{voiceStats.jitterNowMs ?? 0}ms now / {voiceStats.jitter1PctMs ?? 0}ms p1 / {voiceStats.jitter01PctMs ?? 0}ms p0.1</span></div>
+              {audioPipelineDiag && (
+                <>
+                  <Separator />
+                  <div className="flex justify-between"><span>Capture SR</span><span>{Math.round(audioPipelineDiag.captureSampleRate)} Hz</span></div>
+                  <div className="flex justify-between"><span>Playback SR</span><span>{Math.round(audioPipelineDiag.playbackSampleRate)} Hz</span></div>
+                  <div className="flex justify-between"><span>Playout buffer</span><span>{audioPipelineDiag.playoutBufferedSamples} samples</span></div>
+                  <div className="flex justify-between"><span>Underruns</span><span>{audioPipelineDiag.playoutUnderruns}</span></div>
+                  <div className="flex justify-between"><span>Overflow drops</span><span>{audioPipelineDiag.playoutOverflowDrops}</span></div>
+                </>
+              )}
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">No stats yet. Join a voice channel.</p>
