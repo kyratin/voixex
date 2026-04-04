@@ -29,15 +29,63 @@ import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { Monitor, MonitorOff, Users, ExternalLink, EyeOff, ChevronDown, Wifi, WifiOff, Headphones, Server, ScreenShare, BarChart3 } from "lucide-react"
 
+/** Build-time defaults for Electron (NEXT_PUBLIC_* inlined at `next build`). */
+function parseNextPublicApiBase(): { host: string; port: string; useHttps: boolean } | null {
+  const raw = process.env.NEXT_PUBLIC_API_BASE?.trim()
+  if (!raw) return null
+  try {
+    const u = new URL(raw)
+    const port = u.port || (u.protocol === "https:" ? "443" : "80")
+    return { host: u.hostname, port, useHttps: u.protocol === "https:" }
+  } catch {
+    return null
+  }
+}
+
+function getBuildTimeConnectionDefaults() {
+  const parsed = parseNextPublicApiBase()
+  const host = process.env.NEXT_PUBLIC_DEFAULT_API_HOST?.trim() || parsed?.host || "localhost"
+  const port = process.env.NEXT_PUBLIC_DEFAULT_API_PORT?.trim() || parsed?.port || "18080"
+  const httpsEnv = process.env.NEXT_PUBLIC_DEFAULT_USE_HTTPS
+  const useHttps =
+    httpsEnv === "true" ? true : httpsEnv === "false" ? false : Boolean(parsed?.useHttps)
+  const password = process.env.NEXT_PUBLIC_DEFAULT_SERVER_PASSWORD?.trim() ?? "1234"
+  const udpPort = process.env.NEXT_PUBLIC_DEFAULT_UDP_PORT?.trim() ?? ""
+  return { host, port, useHttps, password, udpPort }
+}
+
+function buildApiBaseUrl(host: string, port: string, useHttps: boolean): string {
+  const h = host.trim()
+  const p = port.trim()
+  const scheme = useHttps ? "https" : "http"
+  if (!p) return `${scheme}://${h}`
+  return `${scheme}://${h}:${p}`
+}
+
+/** Override announced UDP port from /v1/join when user maps a different external port. */
+function effectiveVoiceUdpPort(announcedPort: number, overrideStr: string): number {
+  const t = overrideStr.trim()
+  if (!t) return announcedPort
+  const n = Number.parseInt(t, 10)
+  if (!Number.isFinite(n) || n < 1 || n > 65535) return announcedPort
+  return n
+}
+
+const CONNECTION_DEFAULTS = getBuildTimeConnectionDefaults()
+
 export default function VoIPApp() {
   type SavedServerProfile = {
     serverId: string
     serverName: string
     apiHost: string
     apiPort: string
+    /** When true, API + WebSocket use https / wss. */
+    apiUseHttps?: boolean
     serverPassword: string
     displayName: string
     superuserPassword?: string
+    /** If set, voice UDP connects here instead of the port returned by join. */
+    udpPortOverride?: string
   }
   type VoiceRuntimeStats = {
     connected?: boolean
@@ -91,10 +139,13 @@ export default function VoIPApp() {
   const [isInVoice, setIsInVoice] = useState(false)
   const [currentVoiceChannel, setCurrentVoiceChannel] = useState("")
   const [messages, setMessages] = useState<Message[]>([])
-  const [serverPassword, setServerPassword] = useState("1234")
+  const [serverPassword, setServerPassword] = useState(CONNECTION_DEFAULTS.password)
   const [superuserPasswordInput, setSuperuserPasswordInput] = useState("")
-  const [apiHost, setApiHost] = useState("localhost")
-  const [apiPort, setApiPort] = useState("18080")
+  const [apiHost, setApiHost] = useState(CONNECTION_DEFAULTS.host)
+  const [apiPort, setApiPort] = useState(CONNECTION_DEFAULTS.port)
+  const [apiUseHttps, setApiUseHttps] = useState(CONNECTION_DEFAULTS.useHttps)
+  /** Empty = use UDP port from server join response. */
+  const [udpPortOverride, setUdpPortOverride] = useState(CONNECTION_DEFAULTS.udpPort)
   const [displayNameInput, setDisplayNameInput] = useState("User")
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
@@ -492,6 +543,8 @@ export default function VoIPApp() {
       setApiHost(preferred.apiHost)
       setApiPort(preferred.apiPort)
       setServerPassword(preferred.serverPassword)
+      setApiUseHttps(typeof preferred.apiUseHttps === "boolean" ? preferred.apiUseHttps : false)
+      setUdpPortOverride(typeof preferred.udpPortOverride === "string" ? preferred.udpPortOverride : "")
       setDisplayNameInput(preferred.displayName)
       setProfileDisplayName(preferred.displayName)
       setSuperuserPasswordInput(preferred.superuserPassword ?? "")
@@ -1761,9 +1814,10 @@ export default function VoIPApp() {
         voiceClient.leaveRoom()
         voiceClient.disconnect()
         await window.electronVoice.leaveRoom()
+        const splitUdp = effectiveVoiceUdpPort(vopts.port, udpPortOverride)
         await window.electronVoice.connect({
           host: vopts.host,
-          port: vopts.port,
+          port: splitUdp,
           mediaToken: vopts.mediaToken
         })
         setVoiceServerId(activeServerId)
@@ -1901,12 +1955,16 @@ export default function VoIPApp() {
       const password = preset?.serverPassword ?? serverPassword
       const superPassword = preset?.superuserPassword ?? superuserPasswordInput
       const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
+      const resolvedUseHttps = typeof preset?.apiUseHttps === "boolean" ? preset.apiUseHttps : apiUseHttps
+      const resolvedUdpOverride = preset?.udpPortOverride !== undefined ? preset.udpPortOverride : udpPortOverride
       if (preset) {
         setApiHost(host)
         setApiPort(port)
         setServerPassword(password)
         setSuperuserPasswordInput(superPassword)
         setConnectServerListName(preset.serverName)
+        if (typeof preset.apiUseHttps === "boolean") setApiUseHttps(preset.apiUseHttps)
+        if (preset.udpPortOverride !== undefined) setUdpPortOverride(preset.udpPortOverride)
       }
       if (!preset) {
         const earlyLabel = connectServerListName.trim()
@@ -1921,7 +1979,7 @@ export default function VoIPApp() {
       }
       setDisplayNameInput(normalizedDisplayName)
       localStorage.setItem("voip-last-display-name", normalizedDisplayName)
-      uiClient.setApiBase(`http://${host}:${port}`)
+      uiClient.setApiBase(buildApiBaseUrl(host, port, resolvedUseHttps))
       setError("")
       setStatus(`Connecting API: ${host}:${port}`)
       const health = await uiClient.healthcheck()
@@ -1960,9 +2018,10 @@ export default function VoIPApp() {
         setStatus("Connecting voice transport...")
         const vopts = uiClient.getElectronVoiceConnectParams()
         if (vopts) {
+          const udpPort = effectiveVoiceUdpPort(vopts.port, resolvedUdpOverride)
           await window.electronVoice.connect({
             host: vopts.host,
-            port: vopts.port,
+            port: udpPort,
             mediaToken: vopts.mediaToken
           })
         }
@@ -1976,8 +2035,10 @@ export default function VoIPApp() {
         serverName: effectiveListName,
         apiHost: host,
         apiPort: port,
+        apiUseHttps: resolvedUseHttps,
         serverPassword: password,
         displayName: join.profile.displayName,
+        ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
         ...(superPassword ? { superuserPassword: superPassword } : {})
       }
       const nextSaved = [updatedProfile, ...withoutSameHostForName]
@@ -2139,6 +2200,8 @@ export default function VoIPApp() {
         setApiHost(saved.apiHost)
         setApiPort(saved.apiPort)
         setServerPassword(saved.serverPassword)
+        setApiUseHttps(typeof saved.apiUseHttps === "boolean" ? saved.apiUseHttps : false)
+        setUdpPortOverride(typeof saved.udpPortOverride === "string" ? saved.udpPortOverride : "")
         setDisplayNameInput(saved.displayName)
         setSuperuserPasswordInput(saved.superuserPassword ?? "")
 
@@ -2231,6 +2294,34 @@ export default function VoIPApp() {
                   <Label className="mb-1 text-xs text-muted-foreground">Port</Label>
                   <Input className="h-8 text-sm" value={apiPort} onChange={(e) => setApiPort(e.target.value)} placeholder="18080" />
                 </div>
+              </div>
+              <div>
+                <Label className="mb-1 text-xs text-muted-foreground">API &amp; WebSocket (TLS)</Label>
+                <Select value={apiUseHttps ? "https" : "http"} onValueChange={(v) => setApiUseHttps(v === "https")}>
+                  <SelectTrigger className="h-8 text-sm w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="http">HTTP — WebSocket ws://</SelectItem>
+                    <SelectItem value="https">HTTPS — WebSocket wss://</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Use HTTPS if the API is behind TLS (same as in the browser address bar).
+                </p>
+              </div>
+              <div>
+                <Label className="mb-1 text-xs text-muted-foreground">Voice UDP port (optional)</Label>
+                <Input
+                  className="h-8 text-sm"
+                  value={udpPortOverride}
+                  onChange={(e) => setUdpPortOverride(e.target.value)}
+                  placeholder="From server (leave empty)"
+                  inputMode="numeric"
+                />
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Override only if NAT maps a different external UDP port than the server announces after join.
+                </p>
               </div>
               <div className="flex gap-2">
                 <div className="flex-1">
