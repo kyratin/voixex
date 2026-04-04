@@ -86,6 +86,8 @@ export default function VoIPApp() {
     superuserPassword?: string
     /** If set, voice UDP connects here instead of the port returned by join. */
     udpPortOverride?: string
+    /** Voice transport used by desktop media bridge. */
+    voiceTransport?: "udp" | "tcp"
   }
   type VoiceRuntimeStats = {
     connected?: boolean
@@ -146,6 +148,7 @@ export default function VoIPApp() {
   const [apiUseHttps, setApiUseHttps] = useState(CONNECTION_DEFAULTS.useHttps)
   /** Empty = use UDP port from server join response. */
   const [udpPortOverride, setUdpPortOverride] = useState(CONNECTION_DEFAULTS.udpPort)
+  const [voiceTransport, setVoiceTransport] = useState<"udp" | "tcp">("udp")
   const [displayNameInput, setDisplayNameInput] = useState("User")
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
@@ -545,6 +548,7 @@ export default function VoIPApp() {
       setServerPassword(preferred.serverPassword)
       setApiUseHttps(typeof preferred.apiUseHttps === "boolean" ? preferred.apiUseHttps : false)
       setUdpPortOverride(typeof preferred.udpPortOverride === "string" ? preferred.udpPortOverride : "")
+      setVoiceTransport(preferred.voiceTransport === "tcp" ? "tcp" : "udp")
       setDisplayNameInput(preferred.displayName)
       setProfileDisplayName(preferred.displayName)
       setSuperuserPasswordInput(preferred.superuserPassword ?? "")
@@ -1957,6 +1961,7 @@ export default function VoIPApp() {
       const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
       const resolvedUseHttps = typeof preset?.apiUseHttps === "boolean" ? preset.apiUseHttps : apiUseHttps
       const resolvedUdpOverride = preset?.udpPortOverride !== undefined ? preset.udpPortOverride : udpPortOverride
+      const resolvedVoiceTransport: "udp" | "tcp" = preset?.voiceTransport === "tcp" ? "tcp" : voiceTransport
       if (preset) {
         setApiHost(host)
         setApiPort(port)
@@ -1965,6 +1970,7 @@ export default function VoIPApp() {
         setConnectServerListName(preset.serverName)
         if (typeof preset.apiUseHttps === "boolean") setApiUseHttps(preset.apiUseHttps)
         if (preset.udpPortOverride !== undefined) setUdpPortOverride(preset.udpPortOverride)
+        if (preset.voiceTransport) setVoiceTransport(preset.voiceTransport)
       }
       if (!preset) {
         const earlyLabel = connectServerListName.trim()
@@ -2019,11 +2025,21 @@ export default function VoIPApp() {
         const vopts = uiClient.getElectronVoiceConnectParams()
         if (vopts) {
           const udpPort = effectiveVoiceUdpPort(vopts.port, resolvedUdpOverride)
-          await window.electronVoice.connect({
-            host: vopts.host,
-            port: udpPort,
-            mediaToken: vopts.mediaToken
-          })
+          try {
+            await window.electronVoice.connect({
+              host: vopts.host,
+              port: udpPort,
+              mediaToken: vopts.mediaToken,
+              transport: resolvedVoiceTransport
+            })
+          } catch (voiceErr) {
+            const msg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr)
+            if (/hello|timeout|tcp|udp/i.test(msg)) {
+              const suggest = resolvedVoiceTransport === "udp" ? "TCP" : "UDP"
+              toast.error(`Voice handshake failed over ${resolvedVoiceTransport.toUpperCase()}. Try ${suggest} in Voice transport.`)
+            }
+            throw voiceErr
+          }
         }
       }
       uiClient.connectWs()
@@ -2039,6 +2055,7 @@ export default function VoIPApp() {
         serverPassword: password,
         displayName: join.profile.displayName,
         ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
+        voiceTransport: resolvedVoiceTransport,
         ...(superPassword ? { superuserPassword: superPassword } : {})
       }
       const nextSaved = [updatedProfile, ...withoutSameHostForName]
@@ -2202,6 +2219,7 @@ export default function VoIPApp() {
         setServerPassword(saved.serverPassword)
         setApiUseHttps(typeof saved.apiUseHttps === "boolean" ? saved.apiUseHttps : false)
         setUdpPortOverride(typeof saved.udpPortOverride === "string" ? saved.udpPortOverride : "")
+        setVoiceTransport(saved.voiceTransport === "tcp" ? "tcp" : "udp")
         setDisplayNameInput(saved.displayName)
         setSuperuserPasswordInput(saved.superuserPassword ?? "")
 
@@ -2321,6 +2339,21 @@ export default function VoIPApp() {
                 />
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   Override only if NAT maps a different external UDP port than the server announces after join.
+                </p>
+              </div>
+              <div>
+                <Label className="mb-1 text-xs text-muted-foreground">Voice transport</Label>
+                <Select value={voiceTransport} onValueChange={(v) => setVoiceTransport(v === "tcp" ? "tcp" : "udp")}>
+                  <SelectTrigger className="h-8 text-sm w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="udp">UDP (low latency)</SelectItem>
+                    <SelectItem value="tcp">TCP fallback (if UDP blocked)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Client uses only the selected transport. We'll suggest switching only when HELLO/handshake fails.
                 </p>
               </div>
               <div className="flex gap-2">
