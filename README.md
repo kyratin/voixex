@@ -1,7 +1,7 @@
-# Voixex — backend
+# Voixex
 
 <p align="center">
-  <strong>Voixex backend</strong> — REST API, WebSocket signaling/chat, UDP voice mixer, SQLite storage, and attachment uploads.
+  <strong>Voixex</strong> — voice and text channels with a Discord-like layout: <strong>Electron</strong> desktop app, <strong>Next.js</strong> web UI, and a <strong>Fastify + WebSocket + UDP mixer</strong> server.
 </p>
 
 <p align="center">
@@ -9,120 +9,115 @@
 </p>
 
 <p align="center">
-  <em>Client UI preview; this branch contains server code only.</em>
+  <em>Example: desktop client connected to a server.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/kyratin/voixex"><strong>github.com/kyratin/voixex</strong></a> — source code, issues, contributions (MIT)
 </p>
 
 ---
 
-This branch is **`server`** and contains **backend only**.
+This branch is **`windows`** — the client line used for Windows-focused releases. It contains `primer_front`, `desktop-client`, and `voice-client`.
 
 | Path | Description |
 |------|-------------|
-| [`backend/`](backend) | Node.js + Fastify API, WebSocket, UDP media, SQLite |
-| [`docker-compose.yml`](docker-compose.yml) | Runs backend container and persists `/data` |
-| [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) | Build and push backend image |
+| [`primer_front/`](primer_front) | Next.js UI; static export is copied into `desktop-client/ui` for Electron |
+| [`desktop-client/`](desktop-client) | Electron shell, IPC, screen capture, installers |
+| [`voice-client/`](voice-client) | UDP voice engine (`file:` dependency of the desktop app) |
 
-Client code (`desktop-client`, `primer_front`, `voice-client`) lives on `macos` / `windows` / `linux` branches.
+**Desktop app version** — the `version` field in [`desktop-client/package.json`](desktop-client/package.json).
+
+**Backend** (REST, WebSocket, UDP mixer, SQLite) lives on the **`server`** branch. In the app, connect to your API at `http://<host>:<port>` (typically `18080`).
+
+---
 
 ## Latest updates
 
-- Backend image **`kyratinkokko/voixex:0.1.14`** published.
-- Opus decoder uses **VOIP** application; clears stale **`member_state`** on process startup after deploy.
-- Fixed Opus decode path to preserve PCM16 bytes (removes metallic/electronic distortion in relayed voice).
-- Per-listener peer volume remains active for both multi-user rooms and 1-on-1 calls.
+- Client **`0.2.18`** builds published (Opus uplink on by default; backend **`0.1.14`** Docker).
+- Docker build script now generates **macOS arm64**, **Linux (AppImage/deb)**, and **Windows NSIS** installers.
+- Presence lists are now stable and sorted alphabetically (no reordering when someone starts speaking).
+- Voice path updates include IPC optimization and playback DSP tuning options.
 
 ---
 
-## Quick start (Docker)
+## Requirements
+
+- **Node.js** 20+ (22 recommended)
+- **npm**
+- A running **backend** (local or VPS) for full functionality
+
+---
+
+## Quick start (desktop, dev)
+
+```bash
+cd voice-client && npm install && npm run build
+cd ../desktop-client && npm install && npm run build && npm start
+```
+
+Set API URL and server password (if needed) in the app.
+
+---
+
+## Web UI (optional)
+
+Requires a running backend.
 
 ```bash
 cp .env.example .env
-# Set TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST for VPS
-
-docker compose up -d
+# adjust NEXT_PUBLIC_API_BASE if needed
+docker compose up --build
 ```
 
-Default endpoints:
-
-| Service | Default |
-|---------|---------|
-| HTTP + WebSocket | `http://localhost:18080` (`HTTP_PORT` -> container 8080) |
-| UDP voice | host `UDP_PORT` (default `50000`) |
-
-Set **`PUBLIC_UDP_HOST`** to your public IP/DNS in production. Clients must reach this address for voice over UDP.
+Open **http://localhost:3000**. Electron uses bundled files from `desktop-client/ui`.
 
 ---
 
-## Run from source
+## Building installers
+
+From [`desktop-client/`](desktop-client):
+
+| Command | Output |
+|---------|--------|
+| `npm run dist` | Current OS |
+| `npm run dist:win` | Windows NSIS |
+| `npm run dist:linux` | Linux AppImage / deb |
+| `npm run dist:mac:zip` | macOS zip for current architecture |
+| `npm run dist:docker` | **macOS arm64 zip + Linux + Windows NSIS** via Docker (DMG: `dist:mac` on macOS) |
+
+Cross-build from repo root:
 
 ```bash
-cd backend
-npm ci
-npm run build
-npm start
+docker pull electronuserland/builder:wine
+./desktop-client/scripts/docker-electron-build.sh
 ```
 
-For development:
-
-```bash
-cd backend
-npm run dev
-```
+Artifacts are written to `desktop-client/release/`.
 
 ---
 
-## Build and push image
+## Features (client)
 
-Avoid heavy Docker builds on weak VPS hosts; build locally or in CI:
-
-```bash
-TAG=0.1.14 ./scripts/build-push-backend.sh
-```
-
-Then deploy:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-Override image at deploy time:
-
-```bash
-VOIP_BACKEND_IMAGE=kyratinkokko/voixex:0.1.14 docker compose up -d
-```
+- Voice over UDP with stats (loss, ping, jitter)
+- Text channels and attachments
+- Screen sharing over WebSocket (`screen_chunk`; server relay required)
+- Device settings and DSP controls
+- Per-participant voice levels in a voice channel
 
 ---
 
-## Environment variables
+## Troubleshooting
 
-See full list in [`backend/src/config.ts`](backend/src/config.ts). Common ones:
-
-- `PORT` — backend HTTP port inside container
-- `UDP_PORT` — UDP media port
-- `PUBLIC_UDP_HOST` — externally reachable host for client UDP traffic
-- `TOKEN_SECRET` — JWT/session signing secret
-- `SUPERUSER_PASSWORD` — superuser password
-- `DB_PATH` — SQLite path (in Docker: `/data/voip.sqlite`)
-- `UPLOAD_DIR` — attachment storage
-- `SCREEN_LOG` — set `1` for screen relay debug logs
+| Issue | What to check |
+|-------|----------------|
+| Empty mic list | OS microphone permission; restart app |
+| No audio / dropouts | Firewall (TCP API + UDP media); `PUBLIC_UDP_HOST` on server |
+| Metallic/robotic voice through server | Update backend to image `kyratinkokko/voixex:0.1.14` or newer |
+| `npm install` EACCES after Docker build | Re-run `docker-electron-build.sh` (it fixes ownership) |
 
 ---
 
-## Protocol overview
+## Backend
 
-- REST endpoints for servers/channels/messages/profiles
-- WebSocket at `GET /v1/ws?token=...` for chat, presence, and `screen_chunk`
-- UDP binary media frames (PCM16 and Opus when supported)
-
-Event `set_peer_volume` applies per-listener participant volume on the server mixer.
-
----
-
-## Related branches
-
-- `macos` — primary client branch
-- `windows` — Windows client branch
-- `linux` — Linux client branch
-
-Docker image: [`kyratinkokko/voixex`](https://hub.docker.com/r/kyratinkokko/voixex)
+Deploy backend from the **`server`** branch (Docker image `kyratinkokko/voixex`).

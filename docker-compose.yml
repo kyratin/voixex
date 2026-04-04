@@ -1,34 +1,10 @@
-# Voixex backend: REST + WebSocket + UDP voice mixer.
-# Image: Docker Hub kyratinkokko/voixex (override with VOIP_BACKEND_IMAGE).
-#
-# On a VPS: set PUBLIC_UDP_HOST to the server's public IP or DNS name.
-#   docker compose up -d
-
+# Next.js dev/preview only — backend must run separately (see `server` branch or deployed API).
 services:
-  backend:
-    image: ${VOIP_BACKEND_IMAGE:-kyratinkokko/voixex:latest}
-    pull_policy: always
-    restart: unless-stopped
+  primer_front:
+    build:
+      context: ./primer_front
+      dockerfile: Dockerfile
     environment:
-      HOST: 0.0.0.0
-      PORT: 8080
-      UDP_HOST: 0.0.0.0
-      UDP_PORT: ${UDP_PORT:-50000}
-      PUBLIC_UDP_HOST: ${PUBLIC_UDP_HOST:-localhost}
-      TOKEN_SECRET: ${TOKEN_SECRET:-change-me-token-secret}
-      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:-change-me-superuser}
-      DB_PATH: /data/voip.sqlite
-      MEDIA_RATE_LIMIT_PER_SEC: ${MEDIA_RATE_LIMIT_PER_SEC:-6000}
-      UPLOAD_DIR: /data/uploads
-      UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-50}
-      SCREEN_MAX_FPS: ${SCREEN_MAX_FPS:-5}
-      SCREEN_MAX_CHUNK_BYTES: ${SCREEN_MAX_CHUNK_BYTES:-1200}
-      SCREEN_LOG: ${SCREEN_LOG:-0}
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:18080}
     ports:
-      - "${HTTP_PORT:-18080}:8080"
-      - "${UDP_PORT:-50000}:${UDP_PORT:-50000}/udp"
-    volumes:
-      - voip_data:/data
-
-volumes:
-  voip_data:
+      - "3000:3000"

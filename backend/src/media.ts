@@ -246,7 +246,7 @@ type MediaHooks = {
 
 export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks = {}) {
   const socket = dgram.createSocket("udp4")
-  const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.VOIP)
+  const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO)
 
   socket.on("message", (packet: Buffer, rinfo: RemoteInfo) => {
     if (packet.length < 20) return
