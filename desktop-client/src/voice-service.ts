@@ -6,6 +6,7 @@ type VoiceState = {
   muted: boolean
   deafened: boolean
   selfTestTone: boolean
+  transport: "udp" | "tcp"
 }
 
 export class VoiceService {
@@ -17,10 +18,11 @@ export class VoiceService {
     joinedRoomId: null,
     muted: false,
     deafened: false,
-    selfTestTone: false
+    selfTestTone: false,
+    transport: "udp"
   }
 
-  connect(input: { host: string; port: number; mediaToken: string }) {
+  async connect(input: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) {
     const payload = decodeTokenPayload(input.mediaToken)
     const mediaSeed = String(payload.mediaSeed ?? "")
     if (!mediaSeed) {
@@ -31,7 +33,8 @@ export class VoiceService {
       host: input.host,
       port: input.port,
       mediaToken: input.mediaToken,
-      mediaSeed
+      mediaSeed,
+      transport: input.transport ?? "udp"
     })
     this.engine.setOnPcm16Frame((frame) => {
       this.onIncomingPcm16?.(frame.toString("base64"))
@@ -39,12 +42,13 @@ export class VoiceService {
     this.engine.setOnScreenChunk((chunk) => {
       this.onIncomingScreenChunk?.(chunk.toString("base64"))
     })
-    this.engine.connect()
+    await this.engine.connect()
     this.state.connected = true
     this.state.joinedRoomId = null
     this.state.muted = false
     this.state.deafened = false
     this.state.selfTestTone = false
+    this.state.transport = input.transport ?? "udp"
     return this.state
   }
 
@@ -80,7 +84,8 @@ export class VoiceService {
       joinedRoomId: null,
       muted: false,
       deafened: false,
-      selfTestTone: false
+      selfTestTone: false,
+      transport: this.state.transport
     }
     return this.state
   }

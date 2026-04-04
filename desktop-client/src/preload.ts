@@ -2,7 +2,8 @@ import { contextBridge, ipcRenderer } from "electron"
 
 const electronVoice = {
   requestMicrophoneAccess: () => ipcRenderer.invoke("voice:requestMicrophoneAccess"),
-  connect: (payload: { host: string; port: number; mediaToken: string }) => ipcRenderer.invoke("voice:connect", payload),
+  connect: (payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) =>
+    ipcRenderer.invoke("voice:connect", payload),
   joinRoom: (roomId: string) => ipcRenderer.invoke("voice:joinRoom", roomId),
   leaveRoom: () => ipcRenderer.invoke("voice:leaveRoom"),
   setMute: (muted: boolean) => ipcRenderer.invoke("voice:setMute", muted),

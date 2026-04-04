@@ -5,7 +5,7 @@ declare global {
     electronVoice?: {
       /** macOS 10.15+: triggers system mic permission dialog from the main process (required alongside Info.plist). */
       requestMicrophoneAccess?: () => Promise<{ granted: boolean }>
-      connect: (payload: { host: string; port: number; mediaToken: string }) => Promise<unknown>
+      connect: (payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) => Promise<unknown>
       joinRoom: (roomId: string) => Promise<unknown>
       leaveRoom: () => Promise<unknown>
       setMute: (muted: boolean) => Promise<unknown>
