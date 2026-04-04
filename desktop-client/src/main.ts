@@ -57,6 +57,12 @@ if (isLegacyWindows10()) {
 }
 app.commandLine.appendSwitch("disable-renderer-backgrounding")
 
+// Self-hosted API often uses HTTPS with a private/self-signed cert. Without this, fetch/wss fail with "Failed to fetch".
+app.on("certificate-error", (event, _webContents, _url, _error, _certificate, callback) => {
+  event.preventDefault()
+  callback(true)
+})
+
 function loadFallbackErrorPage(win: BrowserWindow, error: string, target: string) {
   const html = `<!doctype html><html><body style="font-family:sans-serif;padding:24px;background:#111;color:#eee">
   <h2>Voixex: UI load failed</h2>

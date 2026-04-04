@@ -499,7 +499,19 @@ export class VoipClient {
   }
 
   async healthcheck() {
-    const res = await fetch(`${this.apiBase}/health`)
+    let res: Response
+    try {
+      res = await fetch(`${this.apiBase}/health`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+        throw new Error(
+          "Cannot reach API. Check host/port (HTTPS often uses 443 or your nginx port, not plain HTTP), firewall, and TLS. " +
+            "Self-signed HTTPS: use the latest desktop build (trusts custom certs) or open the API URL in the browser once and accept the certificate."
+        )
+      }
+      throw e
+    }
     if (!res.ok) throw new Error("server unavailable")
     return res.json() as Promise<{ ok: boolean }>
   }

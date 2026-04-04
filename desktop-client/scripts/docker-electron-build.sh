@@ -75,7 +75,9 @@ if [[ "$SKIP_PREPARE" != true ]]; then
 fi
 
 echo "==> electron-builder (mac arm64 zip + linux + win nsis) в electronuserland/builder:wine"
+# Кэш в tmpfs + exec: на Docker Desktop (macOS) иначе бывают битые zip Electron и EACCES у fpm/mksquashfs (noexec).
 docker run --rm -i --platform linux/amd64 \
+  --tmpfs /root/.cache:rw,exec,size=2G \
   -v "$REPO_ROOT:/repo" \
   -w /repo/desktop-client \
   electronuserland/builder:wine \
