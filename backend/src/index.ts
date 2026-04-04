@@ -13,6 +13,7 @@ import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent } from "./contracts.js"
 import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
+import { createMediaTcpServer } from "./media-tcp.js"
 
 const app = Fastify({
   logger: true,
@@ -28,7 +29,7 @@ const app = Fastify({
 await app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-file-name", "x-file-mime"]
+  allowedHeaders: ["Content-Type", "Authorization", "x-file-name", "x-file-mime", "x-voice-transport"]
 })
 await app.register(websocket, {
   options: {
@@ -366,6 +367,28 @@ function getRoster(serverId: string, roomId: string | null) {
 }
 
 createMediaServer(app.log, {
+  onSpeakingChanged: ({ clientId, speaking }) => {
+    const row = db
+      .prepare("SELECT server_id, room_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")
+      .get(clientId) as { server_id: string; room_id: string | null } | undefined
+    if (!row) return
+    db.prepare("UPDATE member_state SET speaking = ? WHERE server_id = ? AND client_id = ?").run(speaking ? 1 : 0, row.server_id, clientId)
+    const snap = getMemberSnapshot(row.server_id, clientId)
+    if (!snap) return
+    emitToServer(row.server_id, {
+      type: "member_updated",
+      member: {
+        clientId: snap.client_id,
+        displayName: snap.display_name,
+        roomId: snap.room_id,
+        muted: Boolean(snap.muted),
+        deafened: Boolean(snap.deafened),
+        speaking: Boolean(snap.speaking)
+      }
+    })
+  }
+})
+createMediaTcpServer(app.log, {
   onSpeakingChanged: ({ clientId, speaking }) => {
     const row = db
       .prepare("SELECT server_id, room_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")

@@ -17,7 +17,10 @@ const OPUS_CHANNELS = 1
 type MemberSession = {
   clientId: string
   roomId: string | null
+  transport: "udp" | "tcp"
   remote?: { address: string; port: number }
+  tcpSend?: ((packet: Buffer) => void) | null
+  tcpLabel?: string
   key?: Buffer
   lastSeqIn: number
   seqOut: number
@@ -244,9 +247,241 @@ type MediaHooks = {
   onSpeakingChanged?: (input: { clientId: string; speaking: boolean }) => void
 }
 
+type DecodedFrame = NonNullable<ReturnType<typeof decryptFrame>>
+
+type ProcessContext = {
+  logger: FastifyBaseLogger
+  hooks: MediaHooks
+  opusDecoder: OpusScript
+  sendPacket: (session: MemberSession, packet: Buffer) => void
+}
+
+function applyHelloForSession(
+  logger: FastifyBaseLogger,
+  input: {
+    clientId: string
+    key: Buffer
+    transport: "udp" | "tcp"
+    remote?: { address: string; port: number }
+    tcpSend?: ((packet: Buffer) => void) | null
+    tcpLabel?: string
+  }
+) {
+  const existing = sessions.get(input.clientId)
+  const now = Date.now()
+  const next: MemberSession = {
+    clientId: input.clientId,
+    roomId: desiredRoomByClient.get(input.clientId) ?? null,
+    transport: input.transport,
+    remote: input.transport === "udp" ? input.remote : undefined,
+    tcpSend: input.transport === "tcp" ? input.tcpSend ?? null : null,
+    tcpLabel: input.transport === "tcp" ? input.tcpLabel ?? "tcp" : undefined,
+    key: input.key,
+    lastSeqIn: existing?.lastSeqIn ?? 0,
+    seqOut: existing?.seqOut ?? 1,
+    packetCountSecond: 0,
+    currentSecond: Math.floor(now / 1000),
+    muted: desiredFlagsByClient.get(input.clientId)?.muted ?? existing?.muted ?? false,
+    deafened: desiredFlagsByClient.get(input.clientId)?.deafened ?? existing?.deafened ?? false,
+    rxPackets: existing?.rxPackets ?? 0,
+    txPackets: existing?.txPackets ?? 0,
+    rxBytes: existing?.rxBytes ?? 0,
+    txBytes: existing?.txBytes ?? 0,
+    rxLostEstimated: existing?.rxLostEstimated ?? 0,
+    rxReplayDropped: existing?.rxReplayDropped ?? 0,
+    rxRateLimitDropped: existing?.rxRateLimitDropped ?? 0,
+    rxDecryptDropped: existing?.rxDecryptDropped ?? 0,
+    rxRoomMismatchDropped: existing?.rxRoomMismatchDropped ?? 0,
+    lastTransitMs: existing?.lastTransitMs ?? null,
+    jitterMs: existing?.jitterMs ?? 0,
+    delaySamplesMs: existing?.delaySamplesMs ?? [],
+    jitterSamplesMs: existing?.jitterSamplesMs ?? [],
+    lastReportAtMs: now,
+    speaking: desiredSpeakingByClient.get(input.clientId) ?? existing?.speaking ?? false,
+    lastSpeakingSignalAtMs: existing?.lastSpeakingSignalAtMs ?? 0,
+    lastProbeAckAtMs: existing?.lastProbeAckAtMs ?? 0
+  }
+  sessions.set(input.clientId, next)
+  if (input.transport === "udp" && input.remote) {
+    logger.info(
+      { clientId: input.clientId, remoteAddress: input.remote.address, remotePort: input.remote.port },
+      "media session HELLO accepted (udp)"
+    )
+  } else {
+    logger.info(
+      { clientId: input.clientId, remote: input.tcpLabel ?? "tcp" },
+      "media session HELLO accepted (tcp)"
+    )
+  }
+}
+
+function processDecodedPacket(
+  session: MemberSession,
+  decoded: DecodedFrame,
+  packetLength: number,
+  ctx: ProcessContext
+) {
+  const key = session.key
+  if (!key) return
+
+  const sec = Math.floor(Date.now() / 1000)
+  if (sec !== session.currentSecond) {
+    session.currentSecond = sec
+    session.packetCountSecond = 0
+  }
+  session.packetCountSecond += 1
+  if (session.packetCountSecond > config.mediaRateLimitPerSec) {
+    session.rxRateLimitDropped += 1
+    return
+  }
+
+  if (decoded.seq <= session.lastSeqIn) {
+    session.rxReplayDropped += 1
+    return
+  }
+  if (session.lastSeqIn > 0 && decoded.seq > session.lastSeqIn + 1) {
+    session.rxLostEstimated += decoded.seq - session.lastSeqIn - 1
+  }
+  session.lastSeqIn = decoded.seq
+  session.rxPackets += 1
+  session.rxBytes += packetLength
+  const nowTs32 = Date.now() >>> 0
+  const transit = safeTransitDeltaMs(nowTs32, decoded.ts)
+  if (transit !== null) {
+    pushSample(session.delaySamplesMs, transit)
+    if (session.lastTransitMs !== null) {
+      const d = Math.abs(transit - session.lastTransitMs)
+      session.jitterMs += (d - session.jitterMs) / 16
+      pushSample(session.jitterSamplesMs, session.jitterMs)
+    }
+    session.lastTransitMs = transit
+  }
+
+  const nowMs = Date.now()
+  if (session.roomId && decoded.roomId === session.roomId && nowMs - session.lastProbeAckAtMs >= 1000) {
+    const probeAck = encryptFrame(key, session.seqOut++, decoded.ts, decoded.roomId, Buffer.alloc(0), MEDIA_KIND_AUDIO)
+    ctx.sendPacket(session, probeAck)
+    session.txPackets += 1
+    session.txBytes += probeAck.length
+    session.lastProbeAckAtMs = nowMs
+  }
+
+  if (!session.roomId || session.roomId !== decoded.roomId) {
+    session.rxRoomMismatchDropped += 1
+    return
+  }
+
+  if (decoded.kind === MEDIA_KIND_AUDIO || decoded.kind === MEDIA_KIND_OPUS) {
+    if (session.muted) return
+
+    let pcm16: Buffer | null = null
+    if (decoded.kind === MEDIA_KIND_AUDIO) {
+      pcm16 = decoded.payload
+    } else {
+      try {
+        const out = ctx.opusDecoder.decode(decoded.payload)
+        if (Buffer.isBuffer(out)) {
+          pcm16 = out
+        } else if (ArrayBuffer.isView(out)) {
+          const view = out as ArrayBufferView
+          pcm16 = Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+        } else {
+          pcm16 = Buffer.from(out as ArrayLike<number>)
+        }
+      } catch {
+        session.rxDecryptDropped += 1
+        return
+      }
+    }
+
+    pcm16 = normalizePcm20ms(pcm16)
+    const energy = calcRmsEnergyPcm16(pcm16)
+    const nowEnergyTs = Date.now()
+    const speakingThreshold = 0.02
+    if (energy > speakingThreshold) {
+      session.lastSpeakingSignalAtMs = nowEnergyTs
+    }
+    const speaking = nowEnergyTs - session.lastSpeakingSignalAtMs < 250
+    if (speaking !== session.speaking) {
+      session.speaking = speaking
+      ctx.hooks.onSpeakingChanged?.({ clientId: session.clientId, speaking })
+    }
+
+    const list = roomFrames.get(session.roomId) ?? []
+    list.push({ clientId: session.clientId, pcm16 })
+    roomFrames.set(session.roomId, list)
+    return
+  }
+
+  if (decoded.kind === MEDIA_KIND_SCREEN) {
+    const chunks = roomScreenChunks.get(session.roomId) ?? []
+    chunks.push({ clientId: session.clientId, chunk: decoded.payload })
+    roomScreenChunks.set(session.roomId, chunks)
+  }
+}
+
+function sendViaTransport(socket: dgram.Socket, session: MemberSession, packet: Buffer) {
+  if (session.transport === "tcp") {
+    session.tcpSend?.(packet)
+    return
+  }
+  if (!session.remote) return
+  socket.send(packet, session.remote.port, session.remote.address)
+}
+
+export function registerTcpHello(
+  logger: FastifyBaseLogger,
+  input: { mediaToken: string; sendPacket: (packet: Buffer) => void; remoteLabel?: string }
+): { ok: true; clientId: string } | { ok: false } {
+  const payload = verifyToken(input.mediaToken, config.tokenSecret)
+  if (!payload || payload.sub !== "media" || !payload.mediaSeed) return { ok: false }
+  applyHelloForSession(logger, {
+    clientId: payload.clientId,
+    key: deriveKey(payload.mediaSeed),
+    transport: "tcp",
+    tcpSend: input.sendPacket,
+    tcpLabel: input.remoteLabel ?? "tcp"
+  })
+  return { ok: true, clientId: payload.clientId }
+}
+
+export function detachTcpTransport(clientId: string) {
+  const session = sessions.get(clientId)
+  if (!session || session.transport !== "tcp") return
+  session.tcpSend = null
+}
+
+export function handleTcpPacket(
+  packet: Buffer,
+  clientId: string,
+  input: { logger: FastifyBaseLogger; hooks?: MediaHooks; opusDecoder?: OpusScript }
+) {
+  const session = sessions.get(clientId)
+  if (!session || session.transport !== "tcp" || !session.key) return
+  const decoded = decryptFrame(session.key, packet)
+  if (!decoded) {
+    session.rxDecryptDropped += 1
+    return
+  }
+  processDecodedPacket(session, decoded, packet.length, {
+    logger: input.logger,
+    hooks: input.hooks ?? {},
+    opusDecoder: input.opusDecoder ?? new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO),
+    sendPacket: (_s, out) => {
+      session.tcpSend?.(out)
+    }
+  })
+}
+
 export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks = {}) {
   const socket = dgram.createSocket("udp4")
   const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO)
+  const processCtx: ProcessContext = {
+    logger,
+    hooks,
+    opusDecoder,
+    sendPacket: (session, packet) => sendViaTransport(socket, session, packet)
+  }
 
   socket.on("message", (packet: Buffer, rinfo: RemoteInfo) => {
     if (packet.length < 20) return
@@ -255,43 +490,17 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       const token = packet.subarray(6).toString().trim()
       const payload = verifyToken(token, config.tokenSecret)
       if (!payload || payload.sub !== "media" || !payload.mediaSeed) return
-      sessions.set(payload.clientId, {
+      applyHelloForSession(logger, {
         clientId: payload.clientId,
-        roomId: desiredRoomByClient.get(payload.clientId) ?? null,
-        remote: { address: rinfo.address, port: rinfo.port },
         key: deriveKey(payload.mediaSeed),
-        lastSeqIn: 0,
-        seqOut: 1,
-        packetCountSecond: 0,
-        currentSecond: Math.floor(Date.now() / 1000),
-        muted: desiredFlagsByClient.get(payload.clientId)?.muted ?? false,
-        deafened: desiredFlagsByClient.get(payload.clientId)?.deafened ?? false,
-        rxPackets: 0,
-        txPackets: 0,
-        rxBytes: 0,
-        txBytes: 0,
-        rxLostEstimated: 0,
-        rxReplayDropped: 0,
-        rxRateLimitDropped: 0,
-        rxDecryptDropped: 0,
-        rxRoomMismatchDropped: 0,
-        lastTransitMs: null,
-        jitterMs: 0,
-        delaySamplesMs: [],
-        jitterSamplesMs: [],
-        lastReportAtMs: Date.now(),
-        speaking: desiredSpeakingByClient.get(payload.clientId) ?? false,
-        lastSpeakingSignalAtMs: 0,
-        lastProbeAckAtMs: 0
+        transport: "udp",
+        remote: { address: rinfo.address, port: rinfo.port }
       })
-      logger.info(
-        { clientId: payload.clientId, remoteAddress: rinfo.address, remotePort: rinfo.port },
-        "media session HELLO accepted"
-      )
+      socket.send(Buffer.from("HELLO_ACK"), rinfo.port, rinfo.address)
       return
     }
 
-    const sessionsList = [...sessions.values()].filter((s) => Boolean(s.key))
+    const sessionsList = [...sessions.values()].filter((s) => s.transport === "udp" && Boolean(s.key))
     const knownRemote = sessionsList.find(
       (s) => s.remote && s.remote.address === rinfo.address && s.remote.port === rinfo.port
     )
@@ -324,126 +533,27 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
     if (!matchedSession || !decoded || !matchedSession.key) return
 
     const session = matchedSession
-    const key = session.key
-    if (!key) return
     // Accept valid packets from rebinding clients (NAT/source-port changes).
     if (!session.remote || session.remote.address !== rinfo.address || session.remote.port !== rinfo.port) {
       session.remote = { address: rinfo.address, port: rinfo.port }
       logger.debug({ clientId: session.clientId, remoteAddress: rinfo.address, remotePort: rinfo.port }, "media remote endpoint updated")
     }
-
-    const sec = Math.floor(Date.now() / 1000)
-    if (sec !== session.currentSecond) {
-      session.currentSecond = sec
-      session.packetCountSecond = 0
-    }
-    session.packetCountSecond += 1
-    if (session.packetCountSecond > config.mediaRateLimitPerSec) {
-      session.rxRateLimitDropped += 1
-      return
-    }
-
-    if (decoded.seq <= session.lastSeqIn) {
-      session.rxReplayDropped += 1
-      return
-    }
-    if (session.lastSeqIn > 0 && decoded.seq > session.lastSeqIn + 1) {
-      session.rxLostEstimated += decoded.seq - session.lastSeqIn - 1
-    }
-    session.lastSeqIn = decoded.seq
-    session.rxPackets += 1
-    session.rxBytes += packet.length
-    const nowTs32 = Date.now() >>> 0
-    const transit = safeTransitDeltaMs(nowTs32, decoded.ts)
-    if (transit !== null) {
-      pushSample(session.delaySamplesMs, transit)
-      if (session.lastTransitMs !== null) {
-        const d = Math.abs(transit - session.lastTransitMs)
-        session.jitterMs += (d - session.jitterMs) / 16
-        pushSample(session.jitterSamplesMs, session.jitterMs)
-      }
-      session.lastTransitMs = transit
-    }
-
-    // Return lightweight encrypted probe-acks so clients can compute RTT
-    // even when there are no other speakers in the room.
-    const nowMs = Date.now()
-    if (session.roomId && decoded.roomId === session.roomId && nowMs - session.lastProbeAckAtMs >= 1000) {
-      if (!session.remote) return
-      const probeAck = encryptFrame(key, session.seqOut++, decoded.ts, decoded.roomId, Buffer.alloc(0), MEDIA_KIND_AUDIO)
-      socket.send(probeAck, session.remote.port, session.remote.address)
-      session.txPackets += 1
-      session.txBytes += probeAck.length
-      session.lastProbeAckAtMs = nowMs
-    }
-
-    if (!session.roomId || session.roomId !== decoded.roomId) {
-      session.rxRoomMismatchDropped += 1
-      return
-    }
-
-    if (decoded.kind === MEDIA_KIND_AUDIO || decoded.kind === MEDIA_KIND_OPUS) {
-      if (session.muted) return
-
-      let pcm16: Buffer | null = null
-      if (decoded.kind === MEDIA_KIND_AUDIO) {
-        pcm16 = decoded.payload
-      } else {
-        try {
-          const out = opusDecoder.decode(decoded.payload)
-          if (Buffer.isBuffer(out)) {
-            pcm16 = out
-          } else if (ArrayBuffer.isView(out)) {
-            const view = out as ArrayBufferView
-            pcm16 = Buffer.from(view.buffer, view.byteOffset, view.byteLength)
-          } else {
-            // Fallback for unexpected decoder output shape.
-            pcm16 = Buffer.from(out as ArrayLike<number>)
-          }
-        } catch {
-          session.rxDecryptDropped += 1
-          return
-        }
-      }
-
-      pcm16 = normalizePcm20ms(pcm16)
-
-      const energy = calcRmsEnergyPcm16(pcm16)
-      const nowEnergyTs = Date.now()
-      const speakingThreshold = 0.02
-      if (energy > speakingThreshold) {
-        session.lastSpeakingSignalAtMs = nowEnergyTs
-      }
-      const speaking = nowEnergyTs - session.lastSpeakingSignalAtMs < 250
-      if (speaking !== session.speaking) {
-        session.speaking = speaking
-        hooks.onSpeakingChanged?.({ clientId: session.clientId, speaking })
-      }
-
-      const list = roomFrames.get(session.roomId) ?? []
-      list.push({ clientId: session.clientId, pcm16 })
-      roomFrames.set(session.roomId, list)
-      return
-    }
-    if (decoded.kind === MEDIA_KIND_SCREEN) {
-      const chunks = roomScreenChunks.get(session.roomId) ?? []
-      chunks.push({ clientId: session.clientId, chunk: decoded.payload })
-      roomScreenChunks.set(session.roomId, chunks)
-    }
-    return
+    processDecodedPacket(session, decoded, packet.length, processCtx)
   })
 
   setInterval(() => {
     for (const [roomId, frames] of roomFrames.entries()) {
       if (frames.length === 0) continue
       for (const session of sessions.values()) {
-        if (!session.roomId || session.roomId !== roomId || !session.remote || !session.key || session.deafened) continue
+        if (!session.roomId || session.roomId !== roomId || !session.key || session.deafened) continue
+        if (session.transport === "udp" && !session.remote) continue
+        if (session.transport === "tcp" && !session.tcpSend) continue
         // Avoid sidetone: each recipient gets room mix without own frame (per-listener volume weights).
         const otherFrames = frames.filter((f) => f.clientId !== session.clientId)
         if (otherFrames.length === 0) continue
         const mixed = mixPcm16WeightedForListener(otherFrames, session.clientId)
         const packet = encryptFrame(session.key, session.seqOut++, Date.now(), roomId, mixed)
-        socket.send(packet, session.remote.port, session.remote.address)
+        sendViaTransport(socket, session, packet)
         session.txPackets += 1
         session.txBytes += packet.length
       }
@@ -455,7 +565,9 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
     for (const [roomId, chunks] of roomScreenChunks.entries()) {
       if (chunks.length === 0) continue
       for (const session of sessions.values()) {
-        if (!session.roomId || session.roomId !== roomId || !session.remote || !session.key) continue
+        if (!session.roomId || session.roomId !== roomId || !session.key) continue
+        if (session.transport === "udp" && !session.remote) continue
+        if (session.transport === "tcp" && !session.tcpSend) continue
         for (const entry of chunks) {
           if (entry.clientId === session.clientId) continue
           if (entry.chunk.length > config.screenMaxChunkBytes + 64) {
@@ -463,7 +575,7 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
             continue
           }
           const packet = encryptFrame(session.key, session.seqOut++, Date.now(), roomId, entry.chunk, MEDIA_KIND_SCREEN)
-          socket.send(packet, session.remote.port, session.remote.address)
+          sendViaTransport(socket, session, packet)
           session.txPackets += 1
           session.txBytes += packet.length
         }
@@ -490,7 +602,10 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
         {
           clientId: session.clientId,
           roomId: session.roomId,
-          remote: session.remote ? `${session.remote.address}:${session.remote.port}` : null,
+          remote: session.transport === "udp"
+            ? (session.remote ? `${session.remote.address}:${session.remote.port}` : null)
+            : (session.tcpLabel ?? "tcp"),
+          transport: session.transport,
           rxPackets: session.rxPackets,
           txPackets: session.txPackets,
           rxBytes: session.rxBytes,
