@@ -30,6 +30,16 @@ docker compose up --build -d
 
 HTTP is exposed on **`18080`** → container `8080` by default (see `HTTP_PORT` in `.env`).
 
+### HTTPS inside the container (optional)
+
+Set in `.env`:
+
+- `TLS_ENABLED=true` (alias: `HTTPS=true`)
+- `TLS_CERT_PATH` — PEM full chain
+- `TLS_KEY_PATH` — PEM private key
+
+The server then listens with TLS on the same `PORT` (still `8080` in the container). Map the host port you need, e.g. `443:8080` or `18081:8080`. Mount certificate files into the container and point the paths at them — see comments in [`.env.example`](.env.example).
+
 Prebuilt images: **`kyratinkokko/voixex`** on Docker Hub — pin a version tag for production.
 
 ## Requirements

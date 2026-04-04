@@ -1,6 +1,17 @@
+function envBool(name: string): boolean {
+  const v = process.env[name]?.trim().toLowerCase()
+  return v === "1" || v === "true" || v === "yes"
+}
+
 export const config = {
   host: process.env.HOST ?? "0.0.0.0",
   port: Number(process.env.PORT ?? 8080),
+  /** When true, Fastify serves HTTPS (TLS) on `port` using PEM files below. */
+  tlsEnabled: envBool("TLS_ENABLED") || envBool("HTTPS"),
+  /** Path to certificate (full chain PEM) inside the container or host. */
+  tlsCertPath: process.env.TLS_CERT_PATH?.trim() ?? "",
+  /** Path to private key PEM. */
+  tlsKeyPath: process.env.TLS_KEY_PATH?.trim() ?? "",
   udpHost: process.env.UDP_HOST ?? "0.0.0.0",
   udpPort: Number(process.env.UDP_PORT ?? 50000),
   publicUdpHost: process.env.PUBLIC_UDP_HOST ?? "localhost",
@@ -20,4 +31,8 @@ export const config = {
   wsMaxPayloadBytes: Number(process.env.WS_MAX_PAYLOAD_BYTES ?? 12 * 1024 * 1024),
   /** Set `SCREEN_LOG=1` to log screen_chunk drops, relay stats (sampled), and set_screen_share. */
   screenLog: process.env.SCREEN_LOG === "1" || process.env.SCREEN_LOG === "true"
+}
+
+if (config.tlsEnabled && (!config.tlsCertPath || !config.tlsKeyPath)) {
+  throw new Error("TLS_ENABLED/HTTPS requires TLS_CERT_PATH and TLS_KEY_PATH (PEM files)")
 }

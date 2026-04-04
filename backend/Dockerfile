@@ -15,5 +15,6 @@ ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+# Same PORT serves HTTP or HTTPS when TLS_ENABLED + PEM paths are set (see .env.example).
 EXPOSE 8080 50000/udp
 CMD ["node", "dist/index.js"]

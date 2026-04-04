@@ -3,8 +3,8 @@ import cors from "@fastify/cors"
 import websocket from "@fastify/websocket"
 import bcrypt from "bcryptjs"
 import { randomUUID, randomBytes } from "node:crypto"
-import { createReadStream, createWriteStream, mkdirSync, statSync } from "node:fs"
-import { basename, dirname, extname, join, resolve } from "node:path"
+import { createReadStream, createWriteStream, mkdirSync, readFileSync, statSync } from "node:fs"
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path"
 import { pipeline } from "node:stream/promises"
 import { Readable } from "node:stream"
 import { z } from "zod"
@@ -14,7 +14,17 @@ import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent } from "./contracts.js"
 import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 
-const app = Fastify({ logger: true })
+const app = Fastify({
+  logger: true,
+  ...(config.tlsEnabled
+    ? {
+        https: {
+          cert: readFileSync(resolvePath(config.tlsCertPath)),
+          key: readFileSync(resolvePath(config.tlsKeyPath))
+        }
+      }
+    : {})
+})
 await app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "OPTIONS"],
@@ -752,8 +762,8 @@ app.post("/v1/servers/:serverId/channels/:channelId/attachments", async (req, re
   const safeName = sanitizeFilename(originalName)
   const ext = extname(safeName) || ".bin"
   const relPath = join(params.serverId, params.channelId, `${attachmentId}${ext}`)
-  const absPath = resolve(config.uploadDir, relPath)
-  if (!absPath.startsWith(resolve(config.uploadDir))) {
+  const absPath = resolvePath(config.uploadDir, relPath)
+  if (!absPath.startsWith(resolvePath(config.uploadDir))) {
     return rep.code(400).send({ message: "invalid file path" })
   }
   mkdirSync(dirname(absPath), { recursive: true })
@@ -799,8 +809,8 @@ app.get("/v1/servers/:serverId/attachments/:attachmentId", async (req, rep) => {
     )
     .get(params.attachmentId, params.serverId) as AttachmentRow | undefined
   if (!row) return rep.code(404).send({ message: "attachment not found" })
-  const safeRoot = resolve(config.uploadDir)
-  const absPath = resolve(row.storage_path)
+  const safeRoot = resolvePath(config.uploadDir)
+  const absPath = resolvePath(row.storage_path)
   if (!absPath.startsWith(safeRoot)) return rep.code(403).send({ message: "forbidden" })
   rep.header("Content-Type", row.mime)
   rep.header("Content-Length", String(row.size_bytes))
