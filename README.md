@@ -84,7 +84,7 @@ From [`desktop-client/`](desktop-client):
 | `npm run dist:win` | Windows NSIS |
 | `npm run dist:linux` | Linux AppImage / deb |
 | `npm run dist:mac:zip` | macOS zip for current architecture |
-| `npm run dist:docker` | **macOS arm64 zip + Linux + Windows NSIS** via Docker |
+| `npm run dist:docker` | **macOS arm64 zip + Linux + Windows NSIS** via Docker (DMG: `dist:mac` on macOS) |
 
 Cross-build from repo root:
 

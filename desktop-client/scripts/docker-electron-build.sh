@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build Windows (.exe NSIS), macOS arm64 (.zip), and Linux (AppImage/deb)
+# Build Windows (.exe NSIS), macOS arm64 (.zip), and Linux (AppImage/deb).
+# DMG не собирается стабильно в Linux-контейнере (dmgbuilder); на macOS: npm run dist:mac
 # using the official builder image.
 # Prereq: docker pull electronuserland/builder:wine
 #
@@ -46,7 +47,8 @@ fix_repo_ownership() {
   uid="$(id -u)"
   gid="$(id -g)"
   echo "==> Выравниваем владельца repo-каталогов на uid=$uid (после сборок от root в Docker)…"
-  docker run --rm --user 0:0 \
+  # linux/amd64: image is x86_64; on Apple Silicon dmg-builder/Wine need this or binaries hit Exec format error
+  docker run --rm --user 0:0 --platform linux/amd64 \
     -v "$REPO_ROOT:/repo" \
     electronuserland/builder:wine \
     bash -c 'for d in \
@@ -73,7 +75,7 @@ if [[ "$SKIP_PREPARE" != true ]]; then
 fi
 
 echo "==> electron-builder (mac arm64 zip + linux + win nsis) в electronuserland/builder:wine"
-docker run --rm -i \
+docker run --rm -i --platform linux/amd64 \
   -v "$REPO_ROOT:/repo" \
   -w /repo/desktop-client \
   electronuserland/builder:wine \
