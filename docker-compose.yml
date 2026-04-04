@@ -1,10 +1,27 @@
-# Next.js dev/preview only — backend must run separately (see `server` branch or deployed API).
+# Voixex backend: Fastify HTTP + WebSocket + UDP mixer.
+# Prebuilt: kyratinkokko/voixex on Docker Hub. To build locally: docker compose build
+
 services:
-  primer_front:
+  voixex:
     build:
-      context: ./primer_front
+      context: ./backend
       dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:18080}
     ports:
-      - "3000:3000"
+      - "${HTTP_PORT:-18080}:8080"
+      - "${UDP_PORT:-50000}:50000/udp"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      UDP_HOST: "0.0.0.0"
+      UDP_PORT: "50000"
+      PUBLIC_UDP_HOST: ${PUBLIC_UDP_HOST:-localhost}
+      TOKEN_SECRET: ${TOKEN_SECRET:-change-me-dev-secret}
+      SUPERUSER_PASSWORD: ${SUPERUSER_PASSWORD:-change-me-superuser}
+      DB_PATH: /data/voip.sqlite
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - voixex-data:/data
+    restart: unless-stopped
+
+volumes:
+  voixex-data:
