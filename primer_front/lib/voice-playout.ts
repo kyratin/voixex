@@ -1,96 +1,47 @@
 /**
- * Jitter playout: accumulate network PCM blocks, then drain to the AudioWorklet on a
- * fixed cadence (~real-time). Pads with silence when the queue runs dry so the worklet
- * ring stays fed (avoids per-sample underrun storms and reduces audible gaps).
+ * Voice playout: network PCM → AudioWorklet ring-buffer → speakers.
  *
- * Optional: initial hold (`startMs`) trades latency for stability under jitter.
+ * Previous design used a JS-side queue + setInterval drain, which caused
+ * timing jitter (±5 ms on macOS) → underruns / pitch-jumps. Now audio goes
+ * straight to the worklet via postMessage; the worklet handles initial
+ * buffering, overflow trimming, and underrun fade-out on the audio thread.
  */
 export type VoicePlayoutOptions = {
-  /** Samples queued before timed drain begins (higher = more delay, fewer gaps). */
+  /** ms of audio to buffer before the worklet starts reading (trades latency for stability). */
   startMs?: number
-  /** How often we push audio to the worklet. */
-  tickMs?: number
-  /** Drop oldest audio if queue exceeds this (seconds) to cap end-to-end latency. */
+  /** Drop oldest audio when the ring exceeds this many seconds (caps end-to-end latency). */
   maxQueuedSec?: number
 }
 
 export class VoicePlayoutPrefetch {
-  private queue = new Float32Array(0)
-  private timer: ReturnType<typeof setInterval> | null = null
-  private started = false
-  private readonly sampleRate: number
   private readonly port: MessagePort
-  private readonly startSamples: number
-  private readonly samplesPerTick: number
-  private readonly tickMs: number
-  private readonly maxQueuedSamples: number
 
   constructor(sampleRate: number, port: MessagePort, opts: number | VoicePlayoutOptions = {}) {
-    this.sampleRate = sampleRate
     this.port = port
-    let startMs = 240
-    let tickMs = 10
-    let maxQueuedSec = 0.45
+    let startMs = 120
+    let maxQueuedSec = 0.5
     if (typeof opts === "number") {
       startMs = opts
     } else {
       if (opts.startMs != null) startMs = opts.startMs
-      if (opts.tickMs != null) tickMs = opts.tickMs
       if (opts.maxQueuedSec != null) maxQueuedSec = opts.maxQueuedSec
     }
-    this.startSamples = Math.round((sampleRate * startMs) / 1000)
-    this.tickMs = Math.max(4, tickMs)
-    this.samplesPerTick = Math.max(128, Math.round((sampleRate * this.tickMs) / 1000))
-    this.maxQueuedSamples = Math.max(this.startSamples * 2, Math.round(sampleRate * maxQueuedSec))
+    const startThreshold = Math.max(1, Math.round((sampleRate * startMs) / 1000))
+    const maxBuffered = Math.max(startThreshold * 2, Math.round(sampleRate * maxQueuedSec))
+    port.postMessage({ type: "configure", startThreshold, maxBuffered })
   }
 
   reset() {
-    this.queue = new Float32Array(0)
-    this.started = false
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = null
-    }
+    this.port.postMessage({ type: "reset" })
   }
 
   pushBlock(samples: Float32Array) {
     if (samples.length === 0) return
-    const merged = new Float32Array(this.queue.length + samples.length)
-    merged.set(this.queue, 0)
-    merged.set(samples, this.queue.length)
-    this.queue = merged
-    if (this.queue.length > this.maxQueuedSamples) {
-      const drop = this.queue.length - this.maxQueuedSamples
-      this.queue = this.queue.subarray(drop)
-    }
-    if (!this.started && this.queue.length >= this.startSamples) {
-      this.started = true
-      this.tick()
-      this.timer = setInterval(() => this.tick(), this.tickMs)
-    }
-  }
-
-  private tick() {
-    if (!this.started) return
-    const n = this.samplesPerTick
-    const chunk = new Float32Array(n)
-    if (this.queue.length >= n) {
-      chunk.set(this.queue.subarray(0, n))
-      this.queue = this.queue.subarray(n)
-    } else if (this.queue.length > 0) {
-      chunk.set(this.queue)
-      this.queue = new Float32Array(0)
-    }
-    this.postChunks(chunk)
-  }
-
-  private postChunks(data: Float32Array) {
     const maxChunk = 9600
-    for (let i = 0; i < data.length; i += maxChunk) {
-      const end = Math.min(i + maxChunk, data.length)
-      const part = data.subarray(i, end)
-      const copy = new Float32Array(part.length)
-      copy.set(part)
+    for (let i = 0; i < samples.length; i += maxChunk) {
+      const end = Math.min(i + maxChunk, samples.length)
+      const copy = new Float32Array(end - i)
+      copy.set(samples.subarray(i, end))
       this.port.postMessage({ type: "push", data: copy }, [copy.buffer])
     }
   }
@@ -100,10 +51,13 @@ const VOICE_PLAYBACK_WORKLET_SOURCE = `
 class VoicePlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super()
-    const cap = 48000 * 4
+    const cap = 48000 * 2
     this.buf = new Float32Array(cap)
     this.w = 0
     this.r = 0
+    this.started = false
+    this.startThreshold = Math.round(48000 * 0.12)
+    this.maxBuffered = Math.round(48000 * 0.5)
     this.underruns = 0
     this.overflowDrops = 0
     this._tick = 0
@@ -114,29 +68,29 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
         const d = m.data
         if (!d || !d.length) return
         const L = this.buf.length
-        let free = L - 1 - this._used()
-        let i = 0
-        while (i < d.length) {
-          if (free <= 0) {
-            const drop = Math.min(64, this._used())
-            this.r = (this.r + drop) % L
-            this.overflowDrops += drop
-            free = L - 1 - this._used()
-          }
-          const n = Math.min(d.length - i, free)
-          for (let k = 0; k < n; k += 1) {
-            this.buf[this.w] = d[i + k]
-            this.w = (this.w + 1) % L
-          }
-          i += n
-          free = L - 1 - this._used()
+        for (let i = 0; i < d.length; i++) {
+          this.buf[this.w] = d[i]
+          this.w = (this.w + 1) % L
+        }
+        const used = this._used()
+        if (used > this.maxBuffered) {
+          const drop = used - this.maxBuffered
+          this.r = (this.r + drop) % L
+          this.overflowDrops += drop
+        }
+        if (!this.started && this._used() >= this.startThreshold) {
+          this.started = true
         }
       } else if (m.type === "reset") {
         this.w = 0
         this.r = 0
+        this.started = false
         this.underruns = 0
         this.overflowDrops = 0
         this.lastOut = 0
+      } else if (m.type === "configure") {
+        if (typeof m.startThreshold === "number") this.startThreshold = m.startThreshold
+        if (typeof m.maxBuffered === "number") this.maxBuffered = m.maxBuffered
       }
     }
   }
@@ -148,12 +102,16 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
   process(inputs, outputs) {
     const out = outputs[0][0]
     const n = out.length
+    if (!this.started) {
+      for (let i = 0; i < n; i++) out[i] = 0
+      return true
+    }
     const L = this.buf.length
     let hadUnderrun = false
-    for (let i = 0; i < n; i += 1) {
+    for (let i = 0; i < n; i++) {
       if (this.r === this.w) {
         hadUnderrun = true
-        this.lastOut *= 0.985
+        this.lastOut *= 0.97
         out[i] = this.lastOut
       } else {
         const s = this.buf[this.r]

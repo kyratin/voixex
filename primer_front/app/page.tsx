@@ -11,6 +11,8 @@ import { VoipClient, type RealtimeState } from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Frame } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
+import { createSpeexNoiseWorklet } from "@/lib/speex-capture"
+import type { SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -59,6 +61,7 @@ export default function VoIPApp() {
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
     captureHighpass: BiquadFilterNode
+    speexWorklet: SpeexWorkletNode | null
     captureSinkNode: MediaStreamAudioDestinationNode
     capturePumpGainNode: GainNode
     monitorDestNode: MediaStreamAudioDestinationNode
@@ -144,9 +147,12 @@ export default function VoIPApp() {
   const [autoGainControlEnabled, setAutoGainControlEnabled] = useState(false)
   /** Opus masks noise/hiss far better than raw PCM; PCM uplink sends full ADC noise floor (~768 kb/s). */
   const [useOpusUplink, setUseOpusUplink] = useState(true)
+  /** SpeexDSP preprocess in AudioWorklet; causes hollow "tube" sound — off by default, browser NS is better. */
+  const [speexNoiseSuppressionEnabled, setSpeexNoiseSuppressionEnabled] = useState(false)
   const [monitorEnabled, setMonitorEnabled] = useState(false)
   const [monitorVolumePct, setMonitorVolumePct] = useState(15)
-  const [gateEnabled, setGateEnabled] = useState(true)
+  /** Off by default: condenser mics pump with aggressive gating; browser NS + mic level is enough. */
+  const [gateEnabled, setGateEnabled] = useState(false)
   const [gateThreshold, setGateThreshold] = useState(150)
   const [gateReleaseMs, setGateReleaseMs] = useState(180)
   const [playbackGateEnabled, setPlaybackGateEnabled] = useState(false)
@@ -219,6 +225,9 @@ export default function VoIPApp() {
   const gateEnabledRef = useRef(gateEnabled)
   const gateThresholdRef = useRef(gateThreshold)
   const gateReleaseMsRef = useRef(gateReleaseMs)
+  const speexNoiseSuppressionEnabledRef = useRef(speexNoiseSuppressionEnabled)
+  /** Persists noise-gate envelope across 20ms frames; resetting each frame caused pumping on dynamic mics. */
+  const uplinkGateEnvRef = useRef(0)
   const playbackGateEnabledRef = useRef(playbackGateEnabled)
   const playbackGateThresholdRef = useRef(playbackGateThreshold)
   const playbackHighpassEnabledRef = useRef(playbackHighpassEnabled)
@@ -527,6 +536,7 @@ export default function VoIPApp() {
         playbackHighpassHz?: number
         playbackLimiterEnabled?: boolean
         useOpusUplink?: boolean
+        speexNoiseSuppressionEnabled?: boolean
       }
       if (typeof parsed.micVolumePct === "number") setMicVolumePct(Math.max(0, Math.min(200, Math.round(parsed.micVolumePct))))
       if (typeof parsed.outputVolumePct === "number") setOutputVolumePct(Math.max(0, Math.min(200, Math.round(parsed.outputVolumePct))))
@@ -550,6 +560,7 @@ export default function VoIPApp() {
       }
       if (typeof parsed.playbackLimiterEnabled === "boolean") setPlaybackLimiterEnabled(parsed.playbackLimiterEnabled)
       if (typeof parsed.useOpusUplink === "boolean") setUseOpusUplink(parsed.useOpusUplink)
+      if (typeof parsed.speexNoiseSuppressionEnabled === "boolean") setSpeexNoiseSuppressionEnabled(parsed.speexNoiseSuppressionEnabled)
     } catch {
       // ignore broken localStorage payload
     }
@@ -574,7 +585,8 @@ export default function VoIPApp() {
         playbackHighpassEnabled,
         playbackHighpassHz,
         playbackLimiterEnabled,
-        useOpusUplink
+        useOpusUplink,
+        speexNoiseSuppressionEnabled
       })
     )
   }, [
@@ -593,7 +605,8 @@ export default function VoIPApp() {
     playbackHighpassEnabled,
     playbackHighpassHz,
     playbackLimiterEnabled,
-    useOpusUplink
+    useOpusUplink,
+    speexNoiseSuppressionEnabled
   ])
 
   useEffect(() => {
@@ -667,6 +680,10 @@ export default function VoIPApp() {
   }, [gateEnabled, gateThreshold, gateReleaseMs])
 
   useEffect(() => {
+    speexNoiseSuppressionEnabledRef.current = speexNoiseSuppressionEnabled
+  }, [speexNoiseSuppressionEnabled])
+
+  useEffect(() => {
     playbackGateEnabledRef.current = playbackGateEnabled
     playbackGateThresholdRef.current = playbackGateThreshold
     playbackHighpassEnabledRef.current = playbackHighpassEnabled
@@ -682,6 +699,14 @@ export default function VoIPApp() {
     if (!runtime) return
     runtime.unsubscribeIncoming?.()
     runtime.unsubscribeScreenChunk?.()
+    if (runtime.speexWorklet) {
+      try {
+        runtime.speexWorklet.disconnect()
+        runtime.speexWorklet.destroy()
+      } catch {
+        /* ignore */
+      }
+    }
     runtime.captureNode.disconnect()
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
@@ -701,6 +726,7 @@ export default function VoIPApp() {
       clearInterval(runtime.playbackIdleTimer)
       runtime.playbackIdleTimer = null
     }
+    uplinkGateEnvRef.current = 0
     void runtime.captureCtx.close()
     void runtime.playbackCtx.close()
     runtime.stream.getTracks().forEach((t) => t.stop())
@@ -908,20 +934,27 @@ export default function VoIPApp() {
     return out
   }
 
-  /** Envelope follower + soft attenuation for steady wind/bed noise (less grainy than per-sample gate). */
-  const applyUplinkNoiseAttenuate = (frame: Int16Array, threshold: number, floorRatio = 0.14) => {
+  /**
+   * Soft noise gate with peak envelope **held across frames** (critical for condenser / studio mics).
+   * Per-frame reset caused audible pumping (quiet/loud jumps). Release follows `gateReleaseMs`.
+   */
+  const applyUplinkNoiseAttenuate = (frame: Int16Array, threshold: number, floorRatio = 0.1) => {
     if (frame.length === 0) return frame
-    const t = Math.max(24, threshold)
-    const floor = Math.max(0.05, Math.min(0.45, floorRatio))
+    const t = Math.max(32, threshold)
+    const floor = Math.max(0.04, Math.min(0.45, floorRatio))
+    const sr = 48000
+    const releaseMs = Math.max(80, gateReleaseMsRef.current)
+    const coeffR = Math.exp(-1 / (sr * (releaseMs / 1000)))
+    let env = uplinkGateEnvRef.current
     const out = new Int16Array(frame.length)
-    let env = 0
     for (let i = 0; i < frame.length; i += 1) {
-      const a = Math.abs(frame[i])
-      env = a > env ? a : env * 0.992 + a * 0.008
-      const g = env < t ? floor + (1 - floor) * (env / t) * (env / t) : 1
       const s = frame[i]
+      const p = Math.abs(s)
+      env = Math.max(p, env * coeffR)
+      const g = env < t ? floor + (1 - floor) * (env / t) * (env / t) : 1
       out[i] = Math.round(s * g)
     }
+    uplinkGateEnvRef.current = env
     return out
   }
 
@@ -1004,13 +1037,14 @@ export default function VoIPApp() {
       try {
         stopVoicePipeline()
         const selected = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
+        const useSpeexNs = hasDesktopBridge && speexNoiseSuppressionEnabledRef.current
         const preferredConstraints: MediaTrackConstraints = {
           ...(selected?.inputId ? { deviceId: { exact: selected.inputId } } : {}),
           channelCount: 1,
           sampleRate: 48000,
           sampleSize: 16,
           echoCancellation: echoCancellationEnabled,
-          noiseSuppression: noiseSuppressionEnabled,
+          noiseSuppression: useSpeexNs ? false : noiseSuppressionEnabled,
           autoGainControl: autoGainControlEnabled
         }
         if (window.electronVoice?.requestMicrophoneAccess) {
@@ -1050,7 +1084,7 @@ export default function VoIPApp() {
         micGainNode.gain.value = micVolumePctRef.current / 100
         const captureHighpass = captureCtx.createBiquadFilter()
         captureHighpass.type = "highpass"
-        captureHighpass.frequency.value = 110
+        captureHighpass.frequency.value = 75
         captureHighpass.Q.value = 0.707
         const captureSinkNode = captureCtx.createMediaStreamDestination()
         const capturePumpGainNode = captureCtx.createGain()
@@ -1058,8 +1092,7 @@ export default function VoIPApp() {
         const monitorDestNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
         const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
-          startMs: 260,
-          tickMs: 10,
+          startMs: 120,
           maxQueuedSec: 0.5
         })
         playbackWorklet.port.onmessage = (ev: MessageEvent) => {
@@ -1083,6 +1116,17 @@ export default function VoIPApp() {
         const monitorSourceNode = playbackCtx.createMediaStreamSource(monitorDestNode.stream)
         const monitorGainNode = playbackCtx.createGain()
         monitorGainNode.gain.value = monitorEnabledRef.current ? monitorVolumePctRef.current / 100 : 0
+        let speexWorklet: SpeexWorkletNode | null = null
+        if (hasDesktopBridge && speexNoiseSuppressionEnabledRef.current) {
+          try {
+            speexWorklet = await createSpeexNoiseWorklet(captureCtx)
+          } catch (e) {
+            console.warn("[voixex] Speex DSP failed:", e)
+            setDeviceError(
+              e instanceof Error ? `Speex noise suppression failed: ${e.message}` : "Speex noise suppression failed to load."
+            )
+          }
+        }
         const runtime: VoicePipelineRuntime = {
           stream,
           captureCtx,
@@ -1090,6 +1134,7 @@ export default function VoIPApp() {
           captureSource,
           micGainNode,
           captureHighpass,
+          speexWorklet,
           captureSinkNode,
           capturePumpGainNode,
           monitorDestNode,
@@ -1127,17 +1172,12 @@ export default function VoIPApp() {
             const mod = await import("opusscript")
             const OpusScript = (mod as unknown as { default: typeof import("opusscript") }).default
             const enc = new OpusScript(48_000, 1, OpusScript.Application.VOIP)
-            enc.setBitrate(48_000)
-            try {
-              enc.encoderCTL(4024, 3001)
-            } catch {
-              /* OPUS_SET_SIGNAL(4024) + OPUS_SIGNAL_VOICE(3001) — optional */
-            }
-            try {
-              enc.encoderCTL(4016, 1)
-            } catch {
-              /* OPUS_SET_DTX — optional silence packets */
-            }
+            enc.setBitrate(64_000)
+            try { enc.encoderCTL(4024, 3001) } catch { /* OPUS_SET_SIGNAL → VOICE */ }
+            try { enc.encoderCTL(4010, 10) } catch { /* OPUS_SET_COMPLEXITY → max quality */ }
+            try { enc.encoderCTL(4012, 1) } catch { /* OPUS_SET_INBAND_FEC → on */ }
+            try { enc.encoderCTL(4014, 10) } catch { /* OPUS_SET_PACKET_LOSS_PERC → 10% hint for FEC */ }
+            try { enc.encoderCTL(4016, 1) } catch { /* OPUS_SET_DTX → silence packets */ }
             opusEncoder = enc
           } catch {
             setDeviceError("Opus encoder failed to load in renderer; falling back to PCM uplink.")
@@ -1168,7 +1208,7 @@ export default function VoIPApp() {
 
               if (gateEnabledRef.current) {
                 const thresholdAmp = Math.max(0, Math.round(gateThresholdRef.current))
-                frame = applyUplinkNoiseAttenuate(frame, thresholdAmp, 0.14)
+                frame = applyUplinkNoiseAttenuate(frame, thresholdAmp, 0.1)
               }
 
               if (opusEncoder && window.electronVoice?.sendOpusFrame) {
@@ -1217,8 +1257,14 @@ export default function VoIPApp() {
 
         captureSource.connect(micGainNode)
         micGainNode.connect(captureHighpass)
-        captureHighpass.connect(captureNode)
-        captureHighpass.connect(monitorDestNode)
+        if (speexWorklet) {
+          captureHighpass.connect(speexWorklet)
+          speexWorklet.connect(captureNode)
+          speexWorklet.connect(monitorDestNode)
+        } else {
+          captureHighpass.connect(captureNode)
+          captureHighpass.connect(monitorDestNode)
+        }
         // Keep ScriptProcessor actively pulled on all platforms (especially macOS)
         // while keeping output silent to avoid sidetone.
         captureNode.connect(captureSinkNode)
@@ -1256,7 +1302,16 @@ export default function VoIPApp() {
       cancelled = true
       stopVoicePipeline()
     }
-  }, [hasDesktopBridge, isInVoice, currentVoiceChannel, audioDevicesRevision, noiseSuppressionEnabled, echoCancellationEnabled, autoGainControlEnabled])
+  }, [
+    hasDesktopBridge,
+    isInVoice,
+    currentVoiceChannel,
+    audioDevicesRevision,
+    noiseSuppressionEnabled,
+    echoCancellationEnabled,
+    autoGainControlEnabled,
+    speexNoiseSuppressionEnabled
+  ])
 
   useEffect(() => {
     if (isInVoice) {
@@ -2409,6 +2464,21 @@ export default function VoIPApp() {
                 </p>
               </div>
 
+              {hasDesktopBridge ? (
+                <div className="rounded-lg border border-border p-3 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label>Speex noise suppression (SpeexDSP)</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Off by default — can cause hollow &quot;tube&quot; sound. Browser Noise Suppression (above) is
+                        usually better quality. Enable only if browser NS is unavailable. Rejoin voice after toggling.
+                      </p>
+                    </div>
+                    <Switch checked={speexNoiseSuppressionEnabled} onCheckedChange={setSpeexNoiseSuppressionEnabled} />
+                  </div>
+                </div>
+              ) : null}
+
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
@@ -2445,7 +2515,10 @@ export default function VoIPApp() {
                 <div className="flex items-center justify-between">
                   <div>
                     <Label>Noise Gate</Label>
-                    <p className="text-xs text-muted-foreground">Simple RMS gate before sending audio.</p>
+                    <p className="text-xs text-muted-foreground">
+                      Off by default. Studio condenser mics often sound choppy with gating — browser NS + mic level
+                      are usually enough. Envelope is smoothed across frames; Release controls decay.
+                    </p>
                   </div>
                   <Switch checked={gateEnabled} onCheckedChange={setGateEnabled} />
                 </div>
