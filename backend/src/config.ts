@@ -30,7 +30,9 @@ export const config = {
   /** WebSocket max frame size for large screen blobs (bytes). */
   wsMaxPayloadBytes: Number(process.env.WS_MAX_PAYLOAD_BYTES ?? 12 * 1024 * 1024),
   /** Set `SCREEN_LOG=1` to log screen_chunk drops, relay stats (sampled), and set_screen_share. */
-  screenLog: process.env.SCREEN_LOG === "1" || process.env.SCREEN_LOG === "true"
+  screenLog: process.env.SCREEN_LOG === "1" || process.env.SCREEN_LOG === "true",
+  /** Verbose voice pipeline tracing (capture/send/mix/playout correlation aid). */
+  voiceTrace: process.env.VOICE_TRACE === "1" || process.env.VOICE_TRACE === "true"
 }
 
 if (config.tlsEnabled && (!config.tlsCertPath || !config.tlsKeyPath)) {

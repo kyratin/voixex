@@ -1,6 +1,5 @@
 import net, { type Socket } from "node:net"
 import type { FastifyBaseLogger } from "fastify"
-import OpusScript from "opusscript"
 import { config } from "./config.js"
 import { detachTcpTransport, handleTcpPacket, registerTcpHello } from "./media.js"
 
@@ -31,7 +30,6 @@ export function createMediaTcpServer(logger: FastifyBaseLogger, hooks: MediaHook
       closed: false
     }
     const remoteLabel = `${socket.remoteAddress ?? "unknown"}:${socket.remotePort ?? "?"}`
-    const opusDecoder = new OpusScript(48_000, 1, OpusScript.Application.AUDIO)
 
     const sendPacket = (packet: Buffer) => {
       if (state.closed || socket.destroyed) return
@@ -71,7 +69,7 @@ export function createMediaTcpServer(logger: FastifyBaseLogger, hooks: MediaHook
           continue
         }
 
-        handleTcpPacket(payload, state.clientId, { logger, hooks, opusDecoder })
+        handleTcpPacket(payload, state.clientId, { logger, hooks })
       }
     })
 

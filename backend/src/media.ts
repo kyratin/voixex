@@ -45,11 +45,25 @@ type MemberSession = {
   speaking: boolean
   lastSpeakingSignalAtMs: number
   lastProbeAckAtMs: number
+  rxAudioFrames: number
+  txAudioFrames: number
+  rxOpusDecodeDropped: number
+  /** Opus decoder state must be per-stream/client. */
+  opusDecoder: OpusScript
 }
 
 type FrameEntry = {
   clientId: string
   pcm16: Buffer
+  seq: number
+  ts: number
+  receivedAtMs: number
+}
+
+type SpeakerFrameBuffer = {
+  queue: FrameEntry[]
+  lastPcm16: Buffer
+  lastAtMs: number
 }
 
 type ScreenChunkEntry = {
@@ -58,13 +72,14 @@ type ScreenChunkEntry = {
 }
 
 const sessions = new Map<string, MemberSession>()
-const roomFrames = new Map<string, FrameEntry[]>()
+const roomSpeakerBuffers = new Map<string, Map<string, SpeakerFrameBuffer>>()
 const roomScreenChunks = new Map<string, ScreenChunkEntry[]>()
 const desiredRoomByClient = new Map<string, string | null>()
 const desiredFlagsByClient = new Map<string, { muted: boolean; deafened: boolean }>()
 const desiredSpeakingByClient = new Map<string, boolean>()
 /** listenerClientId -> (targetClientId -> gain 0..2, from volumePct 0..200) */
 const peerVolumeByListener = new Map<string, Map<string, number>>()
+const roomMixTickSeq = new Map<string, number>()
 
 export function setMemberRoom(clientId: string, roomId: string | null) {
   desiredRoomByClient.set(clientId, roomId)
@@ -92,6 +107,10 @@ export function removeMember(clientId: string) {
   peerVolumeByListener.delete(clientId)
   for (const m of peerVolumeByListener.values()) {
     m.delete(clientId)
+  }
+  for (const [roomId, speakers] of roomSpeakerBuffers.entries()) {
+    speakers.delete(clientId)
+    if (speakers.size === 0) roomSpeakerBuffers.delete(roomId)
   }
   sessions.delete(clientId)
   desiredRoomByClient.delete(clientId)
@@ -178,8 +197,9 @@ function decryptFrame(key: Buffer, packet: Buffer) {
 const PCM20MS_BYTES = 960 * 2
 
 function normalizePcm20ms(pcm: Buffer): Buffer {
-  if (pcm.length === PCM20MS_BYTES) return pcm
-  if (pcm.length > PCM20MS_BYTES) return pcm.subarray(0, PCM20MS_BYTES)
+  // Always return an owned copy. Decoder outputs can reuse internal buffers.
+  if (pcm.length === PCM20MS_BYTES) return Buffer.from(pcm)
+  if (pcm.length > PCM20MS_BYTES) return Buffer.from(pcm.subarray(0, PCM20MS_BYTES))
   const out = Buffer.alloc(PCM20MS_BYTES)
   pcm.copy(out, 0, 0, pcm.length)
   return out
@@ -192,21 +212,65 @@ function mixPcm16WeightedForListener(frames: FrameEntry[], listenerClientId: str
   const out = Buffer.alloc(minLen)
   for (let i = 0; i < minLen; i += 2) {
     let sum = 0
-    let contributors = 0
+    let gainSum = 0
     for (const f of frames) {
       const g = gains?.get(f.clientId) ?? 1
       if (g <= 0) continue
       sum += f.pcm16.readInt16LE(i) * g
-      contributors += 1
+      gainSum += g
     }
-    if (contributors <= 0) {
+    if (gainSum <= 0) {
       out.writeInt16LE(0, i)
     } else {
-      // Average by active participants (not by gain sum), so per-user gain
-      // also affects 1-on-1 sessions where only one remote frame exists.
-      const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / contributors)))
+      const mixed = Math.max(-32768, Math.min(32767, Math.round(sum / gainSum)))
       out.writeInt16LE(mixed, i)
     }
+  }
+  return out
+}
+
+function mixPcm16FloatForListener(frames: FrameEntry[], listenerClientId: string): Buffer {
+  const gains = peerVolumeByListener.get(listenerClientId)
+  if (frames.length === 0) return Buffer.alloc(0)
+  const minLen = Math.min(...frames.map((f) => f.pcm16.length))
+  const out = Buffer.alloc(minLen)
+  for (let i = 0; i < minLen; i += 2) {
+    let sum = 0
+    let gainSum = 0
+    for (const f of frames) {
+      const g = gains?.get(f.clientId) ?? 1
+      if (g <= 0) continue
+      sum += (f.pcm16.readInt16LE(i) / 32768) * g
+      gainSum += g
+    }
+    if (gainSum <= 0) {
+      out.writeInt16LE(0, i)
+      continue
+    }
+    // Keep primary path linear to preserve timbre; only hard-clamp at int16 bounds.
+    const avg = sum / gainSum
+    const s16 = Math.max(-32768, Math.min(32767, Math.round(avg * 32767)))
+    out.writeInt16LE(s16, i)
+  }
+  return out
+}
+
+function decayPcm16(input: Buffer, gain = 0.985): Buffer {
+  const out = Buffer.alloc(input.length)
+  for (let i = 0; i < input.length; i += 2) {
+    const s = input.readInt16LE(i)
+    const d = Math.max(-32768, Math.min(32767, Math.round(s * gain)))
+    out.writeInt16LE(d, i)
+  }
+  return out
+}
+
+function scalePcm16(input: Buffer, gain: number): Buffer {
+  const out = Buffer.alloc(input.length)
+  for (let i = 0; i < input.length; i += 2) {
+    const s = input.readInt16LE(i)
+    const d = Math.max(-32768, Math.min(32767, Math.round(s * gain)))
+    out.writeInt16LE(d, i)
   }
   return out
 }
@@ -252,7 +316,6 @@ type DecodedFrame = NonNullable<ReturnType<typeof decryptFrame>>
 type ProcessContext = {
   logger: FastifyBaseLogger
   hooks: MediaHooks
-  opusDecoder: OpusScript
   sendPacket: (session: MemberSession, packet: Buffer) => void
 }
 
@@ -299,7 +362,11 @@ function applyHelloForSession(
     lastReportAtMs: now,
     speaking: desiredSpeakingByClient.get(input.clientId) ?? existing?.speaking ?? false,
     lastSpeakingSignalAtMs: existing?.lastSpeakingSignalAtMs ?? 0,
-    lastProbeAckAtMs: existing?.lastProbeAckAtMs ?? 0
+    lastProbeAckAtMs: existing?.lastProbeAckAtMs ?? 0,
+    rxAudioFrames: existing?.rxAudioFrames ?? 0,
+    txAudioFrames: existing?.txAudioFrames ?? 0,
+    rxOpusDecodeDropped: existing?.rxOpusDecodeDropped ?? 0,
+    opusDecoder: existing?.opusDecoder ?? new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO)
   }
   sessions.set(input.clientId, next)
   if (input.transport === "udp" && input.remote) {
@@ -379,7 +446,7 @@ function processDecodedPacket(
       pcm16 = decoded.payload
     } else {
       try {
-        const out = ctx.opusDecoder.decode(decoded.payload)
+        const out = session.opusDecoder.decode(decoded.payload)
         if (Buffer.isBuffer(out)) {
           pcm16 = out
         } else if (ArrayBuffer.isView(out)) {
@@ -389,7 +456,7 @@ function processDecodedPacket(
           pcm16 = Buffer.from(out as ArrayLike<number>)
         }
       } catch {
-        session.rxDecryptDropped += 1
+        session.rxOpusDecodeDropped += 1
         return
       }
     }
@@ -407,9 +474,24 @@ function processDecodedPacket(
       ctx.hooks.onSpeakingChanged?.({ clientId: session.clientId, speaking })
     }
 
-    const list = roomFrames.get(session.roomId) ?? []
-    list.push({ clientId: session.clientId, pcm16 })
-    roomFrames.set(session.roomId, list)
+    const roomId = session.roomId
+    const bySpeaker = roomSpeakerBuffers.get(roomId) ?? new Map<string, SpeakerFrameBuffer>()
+    const speaker = bySpeaker.get(session.clientId) ?? {
+      queue: [],
+      lastPcm16: Buffer.alloc(PCM20MS_BYTES),
+      lastAtMs: 0
+    }
+    const frame: FrameEntry = { clientId: session.clientId, pcm16, seq: decoded.seq, ts: decoded.ts, receivedAtMs: Date.now() }
+    speaker.queue.push(frame)
+    if (speaker.queue.length > 4) {
+      // Keep only a small jitter queue to cap one-way buffering latency.
+      speaker.queue.splice(0, speaker.queue.length - 4)
+    }
+    speaker.lastPcm16 = frame.pcm16
+    speaker.lastAtMs = frame.receivedAtMs
+    bySpeaker.set(session.clientId, speaker)
+    roomSpeakerBuffers.set(roomId, bySpeaker)
+    session.rxAudioFrames += 1
     return
   }
 
@@ -454,7 +536,7 @@ export function detachTcpTransport(clientId: string) {
 export function handleTcpPacket(
   packet: Buffer,
   clientId: string,
-  input: { logger: FastifyBaseLogger; hooks?: MediaHooks; opusDecoder?: OpusScript }
+  input: { logger: FastifyBaseLogger; hooks?: MediaHooks }
 ) {
   const session = sessions.get(clientId)
   if (!session || session.transport !== "tcp" || !session.key) return
@@ -466,7 +548,6 @@ export function handleTcpPacket(
   processDecodedPacket(session, decoded, packet.length, {
     logger: input.logger,
     hooks: input.hooks ?? {},
-    opusDecoder: input.opusDecoder ?? new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO),
     sendPacket: (_s, out) => {
       session.tcpSend?.(out)
     }
@@ -475,11 +556,9 @@ export function handleTcpPacket(
 
 export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks = {}) {
   const socket = dgram.createSocket("udp4")
-  const opusDecoder = new OpusScript(OPUS_SAMPLE_RATE, OPUS_CHANNELS, OpusScript.Application.AUDIO)
   const processCtx: ProcessContext = {
     logger,
     hooks,
-    opusDecoder,
     sendPacket: (session, packet) => sendViaTransport(socket, session, packet)
   }
 
@@ -542,22 +621,85 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
   })
 
   setInterval(() => {
-    for (const [roomId, frames] of roomFrames.entries()) {
-      if (frames.length === 0) continue
+    for (const [roomId, speakers] of roomSpeakerBuffers.entries()) {
+      if (speakers.size === 0) continue
+      const tickSeq = (roomMixTickSeq.get(roomId) ?? 0) + 1
+      roomMixTickSeq.set(roomId, tickSeq)
+      const tickAt = Date.now()
+      const tickFrames: FrameEntry[] = []
+      let queuedFramesBefore = 0
+      let syntheticPlcFrames = 0
+      let queueDropFrames = 0
+      for (const [speakerId, sb] of speakers.entries()) {
+        queuedFramesBefore += sb.queue.length
+        const frame = sb.queue.shift()
+        if (frame) {
+          tickFrames.push(frame)
+        } else if (tickAt - sb.lastAtMs <= 25 && sb.lastPcm16.length === PCM20MS_BYTES) {
+          // Very short-loss concealment only for one tick to avoid "word glue".
+          const plcFrame: FrameEntry = {
+            clientId: speakerId,
+            pcm16: decayPcm16(sb.lastPcm16),
+            seq: 0,
+            ts: 0,
+            receivedAtMs: tickAt
+          }
+          sb.lastPcm16 = plcFrame.pcm16
+          tickFrames.push(plcFrame)
+          syntheticPlcFrames += 1
+        }
+        if (sb.queue.length > 3) {
+          const drop = sb.queue.length - 3
+          sb.queue.splice(0, drop)
+          queueDropFrames += drop
+        }
+        if (sb.queue.length === 0 && tickAt - sb.lastAtMs > 2_000) {
+          speakers.delete(speakerId)
+        }
+      }
+      if (speakers.size === 0) {
+        roomSpeakerBuffers.delete(roomId)
+      }
+      if (tickFrames.length === 0) continue
       for (const session of sessions.values()) {
         if (!session.roomId || session.roomId !== roomId || !session.key || session.deafened) continue
         if (session.transport === "udp" && !session.remote) continue
         if (session.transport === "tcp" && !session.tcpSend) continue
         // Avoid sidetone: each recipient gets room mix without own frame (per-listener volume weights).
-        const otherFrames = frames.filter((f) => f.clientId !== session.clientId)
+        const otherFrames = tickFrames.filter((f) => f.clientId !== session.clientId)
         if (otherFrames.length === 0) continue
-        const mixed = mixPcm16WeightedForListener(otherFrames, session.clientId)
+        let mixed: Buffer
+        if (otherFrames.length === 1) {
+          // 1:1 path: bypass mixer coloration for maximum voice fidelity.
+          const only = otherFrames[0]
+          const g = peerVolumeByListener.get(session.clientId)?.get(only.clientId) ?? 1
+          mixed = g === 1 ? Buffer.from(only.pcm16) : scalePcm16(only.pcm16, g)
+        } else {
+          mixed = mixPcm16FloatForListener(otherFrames, session.clientId)
+        }
         const packet = encryptFrame(session.key, session.seqOut++, Date.now(), roomId, mixed)
         sendViaTransport(socket, session, packet)
         session.txPackets += 1
         session.txBytes += packet.length
+        session.txAudioFrames += 1
       }
-      roomFrames.set(roomId, [])
+      if (config.voiceTrace) {
+        const oldest = Math.min(...tickFrames.map((f) => f.receivedAtMs))
+        const newest = Math.max(...tickFrames.map((f) => f.receivedAtMs))
+        logger.info(
+          {
+            roomId,
+            tickSeq,
+            speakers: new Set(tickFrames.map((f) => f.clientId)).size,
+            tickFrames: tickFrames.length,
+            queuedFramesBefore,
+            queueDropFrames,
+            syntheticPlcFrames,
+            queueSpanMs: newest - oldest
+          },
+          "voice trace mixer tick"
+        )
+      }
     }
   }, 20)
 
@@ -625,7 +767,10 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
           rxReplayDropped: session.rxReplayDropped,
           rxRateLimitDropped: session.rxRateLimitDropped,
           rxDecryptDropped: session.rxDecryptDropped,
-          rxRoomMismatchDropped: session.rxRoomMismatchDropped
+          rxRoomMismatchDropped: session.rxRoomMismatchDropped,
+          rxAudioFrames: session.rxAudioFrames,
+          txAudioFrames: session.txAudioFrames,
+          rxOpusDecodeDropped: session.rxOpusDecodeDropped
         },
         "media network stats snapshot"
       )
@@ -638,6 +783,9 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       session.rxRateLimitDropped = 0
       session.rxDecryptDropped = 0
       session.rxRoomMismatchDropped = 0
+      session.rxAudioFrames = 0
+      session.txAudioFrames = 0
+      session.rxOpusDecodeDropped = 0
     }
   }, 5000)
 
