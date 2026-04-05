@@ -41,8 +41,6 @@ export class VoiceEngine {
   private readonly host: string
   private readonly port: number
   private readonly mediaToken: string
-  private readonly clientId: string | null
-  private readonly traceSessionId: string
   private txTimer: NodeJS.Timeout | null = null
   private rxPackets = 0
   private txPackets = 0
@@ -67,14 +65,11 @@ export class VoiceEngine {
   private readonly transport: "udp" | "tcp"
 
   constructor(opts: VoiceClientOptions) {
-    const payload = decodeTokenPayload(opts.mediaToken)
     this.key = Buffer.from(hkdfSync("sha256", Buffer.from(opts.mediaSeed, "base64"), Buffer.from("voip-salt"), Buffer.from("media-key"), 32))
     this.host = opts.host
     this.port = opts.port
     this.mediaToken = opts.mediaToken
     this.transport = opts.transport ?? "udp"
-    this.clientId = typeof payload.clientId === "string" && payload.clientId.length > 0 ? payload.clientId : null
-    this.traceSessionId = `${this.clientId ?? "unknown"}-${Math.random().toString(36).slice(2, 10)}`
   }
 
   async connect() {
@@ -184,9 +179,6 @@ export class VoiceEngine {
       : 0
     return {
       connected: this.connected,
-      clientId: this.clientId,
-      traceSessionId: this.traceSessionId,
-      transport: this.transport,
       muted: this.muted,
       deafened: this.deafened,
       roomId: this.roomId,
@@ -452,19 +444,6 @@ export class VoiceEngine {
         reject(e)
       })
     })
-  }
-}
-
-function decodeTokenPayload(token: string): Record<string, unknown> {
-  const parts = token.split(".")
-  if (parts.length !== 3) return {}
-  const payloadB64 = parts[1].replace(/-/g, "+").replace(/_/g, "/")
-  const pad = payloadB64.length % 4
-  const withPad = pad ? payloadB64 + "=".repeat(4 - pad) : payloadB64
-  try {
-    return JSON.parse(Buffer.from(withPad, "base64").toString("utf8")) as Record<string, unknown>
-  } catch {
-    return {}
   }
 }
 
