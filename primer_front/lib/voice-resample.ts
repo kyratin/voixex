@@ -4,6 +4,12 @@ export type FloatResampleState = {
   txResamplePos: number
 }
 
+/** Stateful downlink resample state (keeps continuity across 20ms frames). */
+export type Int16ResampleState = {
+  rxResampleInput: Float32Array
+  rxResamplePos: number
+}
+
 /**
  * If rates match within epsilon, returns chunk unchanged (same buffer reference).
  */
@@ -75,4 +81,44 @@ export function resampleInt16Frame(frame: Int16Array, inRate: number, outRate: n
     out[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767)
   }
   return out
+}
+
+/**
+ * Stateful Int16 PCM resample for streaming downlink.
+ * Unlike frame-local resampling, this preserves phase continuity between frames
+ * and avoids boundary clicks ("glue"/crackle artifacts).
+ */
+export function resampleInt16Chunk(
+  frame: Int16Array,
+  inRate: number,
+  outRate: number,
+  state: Int16ResampleState
+): Int16Array {
+  if (Math.abs(inRate - outRate) < 0.5) return frame
+  const inFloat = new Float32Array(frame.length)
+  for (let i = 0; i < frame.length; i += 1) {
+    inFloat[i] = frame[i] / 32768
+  }
+  const combined = new Float32Array(state.rxResampleInput.length + inFloat.length)
+  combined.set(state.rxResampleInput, 0)
+  combined.set(inFloat, state.rxResampleInput.length)
+  const step = inRate / outRate
+  let pos = state.rxResamplePos
+  const out: number[] = []
+  while (pos + 1 < combined.length) {
+    const i = Math.floor(pos)
+    const frac = pos - i
+    const sample = combined[i] * (1 - frac) + combined[i + 1] * frac
+    out.push(sample)
+    pos += step
+  }
+  const keepFrom = Math.max(0, Math.floor(pos) - 1)
+  state.rxResampleInput = combined.subarray(keepFrom)
+  state.rxResamplePos = pos - keepFrom
+  const outI16 = new Int16Array(out.length)
+  for (let i = 0; i < out.length; i += 1) {
+    const s = Math.max(-1, Math.min(1, out[i]))
+    outI16[i] = s < 0 ? Math.round(s * 32768) : Math.round(s * 32767)
+  }
+  return outI16
 }

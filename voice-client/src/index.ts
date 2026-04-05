@@ -41,6 +41,8 @@ export class VoiceEngine {
   private readonly host: string
   private readonly port: number
   private readonly mediaToken: string
+  private readonly clientId: string | null
+  private readonly traceSessionId: string
   private txTimer: NodeJS.Timeout | null = null
   private rxPackets = 0
   private txPackets = 0
@@ -65,11 +67,14 @@ export class VoiceEngine {
   private readonly transport: "udp" | "tcp"
 
   constructor(opts: VoiceClientOptions) {
+    const payload = decodeTokenPayload(opts.mediaToken)
     this.key = Buffer.from(hkdfSync("sha256", Buffer.from(opts.mediaSeed, "base64"), Buffer.from("voip-salt"), Buffer.from("media-key"), 32))
     this.host = opts.host
     this.port = opts.port
     this.mediaToken = opts.mediaToken
     this.transport = opts.transport ?? "udp"
+    this.clientId = typeof payload.clientId === "string" && payload.clientId.length > 0 ? payload.clientId : null
+    this.traceSessionId = `${this.clientId ?? "unknown"}-${Math.random().toString(36).slice(2, 10)}`
   }
 
   async connect() {
@@ -78,7 +83,13 @@ export class VoiceEngine {
     if (this.transport === "udp") {
       await new Promise<void>((resolve) => this.socket.bind(0, "0.0.0.0", () => resolve()))
       this.socket.removeAllListeners("message")
+      this.socket.removeAllListeners("error")
       this.socket.on("message", (buf) => this.processIncomingPacket(buf))
+      this.socket.on("error", (e) => {
+        if (!this.connected) {
+          this.failHello(new Error(`Voice UDP socket error: ${e.message}`))
+        }
+      })
     } else {
       await this.connectTcpSocket()
     }
@@ -173,6 +184,9 @@ export class VoiceEngine {
       : 0
     return {
       connected: this.connected,
+      clientId: this.clientId,
+      traceSessionId: this.traceSessionId,
+      transport: this.transport,
       muted: this.muted,
       deafened: this.deafened,
       roomId: this.roomId,
@@ -234,7 +248,11 @@ export class VoiceEngine {
   private sendHello() {
     const hello = Buffer.from(`HELLO ${this.mediaToken}`)
     if (this.transport === "udp") {
-      this.socket.send(hello, this.port, this.host)
+      this.socket.send(hello, this.port, this.host, (err) => {
+        if (err && !this.connected) {
+          this.failHello(new Error(`Voice UDP send error: ${err.message}`))
+        }
+      })
     } else if (this.tcpSocket && !this.tcpSocket.destroyed) {
       this.tcpSocket.write(this.frameTcp(hello))
     }
@@ -346,7 +364,12 @@ export class VoiceEngine {
   private waitForHello(timeoutMs: number) {
     if (this.helloConfirmed) return Promise.resolve()
     return new Promise<void>((resolve, reject) => {
+      const retryTimer = setInterval(() => {
+        if (this.helloConfirmed) return
+        this.sendHello()
+      }, 600)
       const timer = setTimeout(() => {
+        clearInterval(retryTimer)
         this.helloResolve = null
         this.helloReject = null
         reject(
@@ -359,10 +382,12 @@ export class VoiceEngine {
       }, timeoutMs)
       this.helloResolve = () => {
         clearTimeout(timer)
+        clearInterval(retryTimer)
         resolve()
       }
       this.helloReject = (e) => {
         clearTimeout(timer)
+        clearInterval(retryTimer)
         reject(e)
       }
     })
@@ -427,6 +452,19 @@ export class VoiceEngine {
         reject(e)
       })
     })
+  }
+}
+
+function decodeTokenPayload(token: string): Record<string, unknown> {
+  const parts = token.split(".")
+  if (parts.length !== 3) return {}
+  const payloadB64 = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+  const pad = payloadB64.length % 4
+  const withPad = pad ? payloadB64 + "=".repeat(4 - pad) : payloadB64
+  try {
+    return JSON.parse(Buffer.from(withPad, "base64").toString("utf8")) as Record<string, unknown>
+  } catch {
+    return {}
   }
 }
 

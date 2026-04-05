@@ -9,7 +9,7 @@ import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
 import { VoipClient, type RealtimeState } from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
-import { resampleFloat32Chunk, resampleInt16Frame } from "@/lib/voice-resample"
+import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
 import { createSpeexNoiseWorklet } from "@/lib/speex-capture"
 import type { SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
@@ -72,6 +72,7 @@ function effectiveVoiceUdpPort(announcedPort: number, overrideStr: string): numb
 }
 
 const CONNECTION_DEFAULTS = getBuildTimeConnectionDefaults()
+const VOICE_TRACE = process.env.NEXT_PUBLIC_VOICE_TRACE === "1"
 
 export default function VoIPApp() {
   type SavedServerProfile = {
@@ -91,6 +92,9 @@ export default function VoIPApp() {
   }
   type VoiceRuntimeStats = {
     connected?: boolean
+    clientId?: string | null
+    traceSessionId?: string
+    transport?: "udp" | "tcp"
     roomId?: string | null
     txPackets?: number
     rxPackets?: number
@@ -102,6 +106,11 @@ export default function VoIPApp() {
     jitterNowMs?: number
     jitter1PctMs?: number
     jitter01PctMs?: number
+  }
+  type VoiceTraceStamp = {
+    clientId: string | null
+    traceSessionId: string | null
+    transport: "udp" | "tcp"
   }
   type AudioDevice = { id: string; label: string; kind: "input" | "output"; isDefault?: boolean }
   type VoicePipelineRuntime = {
@@ -125,6 +134,8 @@ export default function VoIPApp() {
     txRemainder: Int16Array
     txResampleInput: Float32Array
     txResamplePos: number
+    rxResampleInput: Float32Array
+    rxResamplePos: number
     playbackSampleRate: number
     unsubscribeIncoming: (() => void) | null
     unsubscribeScreenChunk: (() => void) | null
@@ -176,6 +187,11 @@ export default function VoIPApp() {
     playoutUnderruns: number
     playoutOverflowDrops: number
   } | null>(null)
+  const traceRef = useRef<{
+    lastLogMs: number
+    txFrames: number
+    rxFrames: number
+  }>({ lastLogMs: 0, txFrames: 0, rxFrames: 0 })
   const voicePlayoutBufferedRef = useRef(0)
   const [isSpeakingNow, setIsSpeakingNow] = useState(false)
   const [hasDesktopBridge, setHasDesktopBridge] = useState(false)
@@ -195,8 +211,8 @@ export default function VoIPApp() {
   const [audioDevicesRevision, setAudioDevicesRevision] = useState(0)
   const [micVolumePct, setMicVolumePct] = useState(100)
   const [outputVolumePct, setOutputVolumePct] = useState(100)
-  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true)
-  const [echoCancellationEnabled, setEchoCancellationEnabled] = useState(true)
+  const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(false)
+  const [echoCancellationEnabled, setEchoCancellationEnabled] = useState(false)
   /** AGC often boosts constant hiss between words; prefer manual mic level + Opus. */
   const [autoGainControlEnabled, setAutoGainControlEnabled] = useState(false)
   /** Opus masks noise/hiss far better than raw PCM; PCM uplink sends full ADC noise floor (~768 kb/s). */
@@ -213,7 +229,7 @@ export default function VoIPApp() {
   const [playbackGateThreshold, setPlaybackGateThreshold] = useState(96)
   const [playbackHighpassEnabled, setPlaybackHighpassEnabled] = useState(false)
   const [playbackHighpassHz, setPlaybackHighpassHz] = useState(85)
-  const [playbackLimiterEnabled, setPlaybackLimiterEnabled] = useState(true)
+  const [playbackLimiterEnabled, setPlaybackLimiterEnabled] = useState(false)
   const [micMeter, setMicMeter] = useState<{ rms: number; peak: number } | null>(null)
   const [keybinds, setKeybinds] = useState<{ toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }>({
     toggleMute: null,
@@ -607,15 +623,8 @@ export default function VoIPApp() {
       if (typeof parsed.gateEnabled === "boolean") setGateEnabled(parsed.gateEnabled)
       if (typeof parsed.gateThreshold === "number") setGateThreshold(Math.max(0, Math.min(4000, Math.round(parsed.gateThreshold))))
       if (typeof parsed.gateReleaseMs === "number") setGateReleaseMs(Math.max(0, Math.min(2000, Math.round(parsed.gateReleaseMs))))
-      if (typeof parsed.playbackGateEnabled === "boolean") setPlaybackGateEnabled(parsed.playbackGateEnabled)
-      if (typeof parsed.playbackGateThreshold === "number") {
-        setPlaybackGateThreshold(Math.max(0, Math.min(2000, Math.round(parsed.playbackGateThreshold))))
-      }
-      if (typeof parsed.playbackHighpassEnabled === "boolean") setPlaybackHighpassEnabled(parsed.playbackHighpassEnabled)
-      if (typeof parsed.playbackHighpassHz === "number") {
-        setPlaybackHighpassHz(Math.max(20, Math.min(240, Math.round(parsed.playbackHighpassHz))))
-      }
-      if (typeof parsed.playbackLimiterEnabled === "boolean") setPlaybackLimiterEnabled(parsed.playbackLimiterEnabled)
+      // Playback DSP stays manual-only from Settings.
+      // Do not auto-restore these toggles from old profiles/localStorage.
       if (typeof parsed.useOpusUplink === "boolean") setUseOpusUplink(parsed.useOpusUplink)
       if (typeof parsed.speexNoiseSuppressionEnabled === "boolean") setSpeexNoiseSuppressionEnabled(parsed.speexNoiseSuppressionEnabled)
     } catch {
@@ -765,6 +774,7 @@ export default function VoIPApp() {
       }
     }
     runtime.captureNode.disconnect()
+    runtime.captureNode.onaudioprocess = null
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
     runtime.captureHighpass.disconnect()
@@ -1061,6 +1071,8 @@ export default function VoIPApp() {
     return value
   }
 
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v))
+
   useEffect(() => {
     if (!hasDesktopBridge) return
     let prevTx = 0
@@ -1083,6 +1095,16 @@ export default function VoIPApp() {
   }, [hasDesktopBridge, isMuted])
 
   useEffect(() => {
+    const rt = voicePipelineRef.current
+    if (!rt || !voiceStats) return
+    const jitter = Math.max(0, voiceStats.jitter1PctMs ?? 0)
+    // Quality-first adaptive policy: larger startup buffer on unstable links.
+    const startMs = clamp(Math.round(140 + jitter * 2.5), 140, 320)
+    const maxQueuedSec = clamp(startMs / 1000 + 0.75, 0.9, 1.6)
+    rt.playoutPrefetch.reconfigure(startMs, maxQueuedSec)
+  }, [voiceStats])
+
+  useEffect(() => {
     if (!hasDesktopBridge || !isInVoice || !currentVoiceChannel) {
       stopVoicePipeline()
       return
@@ -1095,8 +1117,9 @@ export default function VoIPApp() {
         stopVoicePipeline()
         const selected = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
         const useSpeexNs = hasDesktopBridge && speexNoiseSuppressionEnabledRef.current
+        const preferredInputId = selected?.inputId ?? null
         const preferredConstraints: MediaTrackConstraints = {
-          ...(selected?.inputId ? { deviceId: { exact: selected.inputId } } : {}),
+          ...(preferredInputId ? { deviceId: { exact: preferredInputId } } : {}),
           channelCount: 1,
           sampleRate: 48000,
           sampleSize: 16,
@@ -1118,10 +1141,21 @@ export default function VoIPApp() {
         try {
           stream = await navigator.mediaDevices.getUserMedia({ audio: preferredConstraints })
         } catch {
-          // Fallback if strict constraints are unsupported by the current audio stack.
-          stream = await navigator.mediaDevices.getUserMedia({ audio: selected?.inputId ? { deviceId: { exact: selected.inputId } } : true })
-          if (noiseSuppressionEnabled) {
-            setDeviceError("Noise suppression constraints are not supported on this device. Running without DSP constraints.")
+          // Fallback ladder:
+          // 1) drop strict DSP constraints but keep preferred inputId
+          // 2) drop preferred inputId too (default system input)
+          // Some drivers reject stale deviceId/sinkId and would otherwise kill the whole pipeline.
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: preferredInputId ? { deviceId: { exact: preferredInputId } } : true })
+          } catch {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+            if (preferredInputId) {
+              void window.electronVoice?.setAudioDevices({ inputId: null, outputId: selected?.outputId ?? null })
+              setSelectedDevices((prev) => ({ ...prev, inputId: null }))
+              setDeviceError("Selected input device is unavailable. Switched to default input.")
+            } else if (noiseSuppressionEnabled) {
+              setDeviceError("Noise suppression constraints are not supported on this device. Running without DSP constraints.")
+            }
           }
         }
         if (cancelled) {
@@ -1132,10 +1166,19 @@ export default function VoIPApp() {
         const captureCtx = new AudioContext({ sampleRate: 48000 })
         const playbackCtx = new AudioContext({ sampleRate: 48000 })
         if (selected?.outputId && typeof (playbackCtx as unknown as { setSinkId?: (id: string) => Promise<void> }).setSinkId === "function") {
-          await (playbackCtx as unknown as { setSinkId: (id: string) => Promise<void> }).setSinkId(selected.outputId)
+          try {
+            await (playbackCtx as unknown as { setSinkId: (id: string) => Promise<void> }).setSinkId(selected.outputId)
+          } catch {
+            // Keep pipeline alive on stale output device IDs.
+            void window.electronVoice?.setAudioDevices({ inputId: selected?.inputId ?? null, outputId: null })
+            setSelectedDevices((prev) => ({ ...prev, outputId: null }))
+            setDeviceError("Selected output device is unavailable. Switched to system default output.")
+          }
         }
 
         const captureSource = captureCtx.createMediaStreamSource(stream)
+        // Keep 0.2.28 behavior: ScriptProcessor on some Electron stacks is
+        // stable only with power-of-two buffer sizes.
         const captureNode = captureCtx.createScriptProcessor(1024, 1, 1)
         const micGainNode = captureCtx.createGain()
         micGainNode.gain.value = micVolumePctRef.current / 100
@@ -1149,8 +1192,8 @@ export default function VoIPApp() {
         const monitorDestNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
         const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
-          startMs: 120,
-          maxQueuedSec: 0.5
+          startMs: 220,
+          maxQueuedSec: 1.2
         })
         playbackWorklet.port.onmessage = (ev: MessageEvent) => {
           const d = ev.data as { type?: string; bufferedSamples?: number; underruns?: number; overflowDrops?: number }
@@ -1205,6 +1248,8 @@ export default function VoIPApp() {
           txRemainder: new Int16Array(0),
           txResampleInput: new Float32Array(0),
           txResamplePos: 0,
+          rxResampleInput: new Float32Array(0),
+          rxResamplePos: 0,
           playbackSampleRate: playbackCtx.sampleRate,
           unsubscribeIncoming: null,
           unsubscribeScreenChunk: null,
@@ -1223,27 +1268,37 @@ export default function VoIPApp() {
         })
 
         const frameSize = 960
+        runtime.txResampleInput = new Float32Array(0)
+        runtime.txResamplePos = 0
+        // In TCP mode we prefer raw PCM uplink to avoid additional codec artifacts:
+        // transport is already reliable and bandwidth is acceptable for desktop.
+        const shouldUseOpusUplink = useOpusUplink && voiceTransport !== "tcp"
         let opusEncoder: unknown = null
-        if (useOpusUplink && window.electronVoice?.sendOpusFrame) {
+        if (shouldUseOpusUplink && window.electronVoice?.sendOpusFrame) {
           try {
             const mod = await import("opusscript")
             const OpusScript = (mod as unknown as { default: typeof import("opusscript") }).default
             const enc = new OpusScript(48_000, 1, OpusScript.Application.VOIP)
-            enc.setBitrate(64_000)
+            enc.setBitrate(128_000)
             try { enc.encoderCTL(4024, 3001) } catch { /* OPUS_SET_SIGNAL → VOICE */ }
+            try { enc.encoderCTL(4006, 1) } catch { /* OPUS_SET_VBR_REQUEST → enabled */ }
+            try { enc.encoderCTL(4020, 0) } catch { /* OPUS_SET_VBR_CONSTRAINT_REQUEST → unconstrained */ }
             try { enc.encoderCTL(4010, 10) } catch { /* OPUS_SET_COMPLEXITY → max quality */ }
             try { enc.encoderCTL(4012, 1) } catch { /* OPUS_SET_INBAND_FEC → on */ }
-            try { enc.encoderCTL(4014, 10) } catch { /* OPUS_SET_PACKET_LOSS_PERC → 10% hint for FEC */ }
-            try { enc.encoderCTL(4016, 1) } catch { /* OPUS_SET_DTX → silence packets */ }
+            try { enc.encoderCTL(4014, 5) } catch { /* OPUS_SET_PACKET_LOSS_PERC → realistic mild loss hint */ }
+            try { enc.encoderCTL(4016, 0) } catch { /* OPUS_SET_DTX → off for stable speech continuity */ }
             opusEncoder = enc
           } catch {
             setDeviceError("Opus encoder failed to load in renderer; falling back to PCM uplink.")
             opusEncoder = null
           }
+        } else if (voiceTransport === "tcp") {
+          setDeviceError("TCP mode: using PCM uplink for cleaner voice (Opus disabled).")
         }
         let lastMeterEmitAt = 0
-        captureNode.onaudioprocess = (event) => {
-          const input = event.inputBuffer.getChannelData(0)
+        captureNode.onaudioprocess = (ev) => {
+          if (!voicePipelineRef.current || voicePipelineRef.current !== runtime) return
+          const input = ev.inputBuffer.getChannelData(0)
           const resampled = resampleFloat32Chunk(input, runtime.captureCtx.sampleRate, 48000, runtime)
           const pcm = new Int16Array(resampled.length)
           for (let i = 0; i < resampled.length; i += 1) {
@@ -1255,19 +1310,15 @@ export default function VoIPApp() {
           while (offset + frameSize <= merged.length) {
             if (!mutedRef.current) {
               let frame = merged.subarray(offset, offset + frameSize)
-
               const now = Date.now()
               if (now - lastMeterEmitAt >= 120) {
                 lastMeterEmitAt = now
-                const energy = calcFrameEnergy(frame)
-                setMicMeter(energy)
+                setMicMeter(calcFrameEnergy(frame))
               }
-
               if (gateEnabledRef.current) {
                 const thresholdAmp = Math.max(0, Math.round(gateThresholdRef.current))
                 frame = applyUplinkNoiseAttenuate(frame, thresholdAmp, 0.1)
               }
-
               if (opusEncoder && window.electronVoice?.sendOpusFrame) {
                 try {
                   const pcmBytes = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength)
@@ -1279,26 +1330,41 @@ export default function VoIPApp() {
               } else {
                 void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
               }
+              if (VOICE_TRACE) traceRef.current.txFrames += 1
             }
             offset += frameSize
           }
-          runtime.txRemainder = merged.subarray(offset)
+          const remainder = merged.subarray(offset)
+          runtime.txRemainder = new Int16Array(remainder.length)
+          runtime.txRemainder.set(remainder)
+          if (VOICE_TRACE) {
+            const now = Date.now()
+            if (now - traceRef.current.lastLogMs >= 1000) {
+              traceRef.current.lastLogMs = now
+              const traceStamp: VoiceTraceStamp = {
+                clientId: voiceStats?.clientId ?? null,
+                traceSessionId: voiceStats?.traceSessionId ?? null,
+                transport: voiceStats?.transport === "tcp" ? "tcp" : "udp"
+              }
+              console.info("[voice-trace][tx]", {
+                ...traceStamp,
+                txFramesPerSec: traceRef.current.txFrames,
+                captureSampleRate: runtime.captureCtx.sampleRate,
+                remainderSamples: runtime.txRemainder.length
+              })
+              traceRef.current.txFrames = 0
+            }
+          }
         }
 
         runtime.unsubscribeIncoming = window.electronVoice?.onPcm16Frame((pcm16Base64) => {
           if (deafenedRef.current) return
           const frame48k = decodePcm16Base64(pcm16Base64)
-          const resampled = resampleInt16Frame(frame48k, 48000, runtime.playbackSampleRate)
+          const resampled = resampleInt16Chunk(frame48k, 48000, runtime.playbackSampleRate, runtime)
           const gated = applyPlaybackNoiseGate(resampled, playbackGateEnabledRef.current, playbackGateThresholdRef.current)
           const frame = applySoftLimiter(gated, playbackLimiterEnabledRef.current)
-          let hasSignal = false
-          for (let i = 0; i < frame.length; i += 1) {
-            if (frame[i] !== 0) {
-              hasSignal = true
-              break
-            }
-          }
-          if (!hasSignal) return
+          // Keep timeline continuous even on near-silence.
+          // Dropping silent frames causes playout underruns and audible "word glue"/clicks.
           runtime.lastIncomingAudioAtMs = Date.now()
           if (runtime.playbackCtx.state !== "running") {
             void runtime.playbackCtx.resume()
@@ -1308,6 +1374,26 @@ export default function VoIPApp() {
             floatOut[i] = frame[i] / 32768
           }
           runtime.playoutPrefetch.pushBlock(floatOut)
+          if (VOICE_TRACE) {
+            traceRef.current.rxFrames += 1
+            const now = Date.now()
+            if (now - traceRef.current.lastLogMs >= 1000) {
+              traceRef.current.lastLogMs = now
+              const traceStamp: VoiceTraceStamp = {
+                clientId: voiceStats?.clientId ?? null,
+                traceSessionId: voiceStats?.traceSessionId ?? null,
+                transport: voiceStats?.transport === "tcp" ? "tcp" : "udp"
+              }
+              console.info("[voice-trace][rx]", {
+                ...traceStamp,
+                rxFramesPerSec: traceRef.current.rxFrames,
+                frameSamples: frame.length,
+                playbackSampleRate: runtime.playbackSampleRate,
+                playoutBuffered: voicePlayoutBufferedRef.current
+              })
+              traceRef.current.rxFrames = 0
+            }
+          }
         }) ?? null
         // Screen video uses WebSocket (reliable); UDP screen path not used.
         runtime.unsubscribeScreenChunk = null
@@ -1322,8 +1408,7 @@ export default function VoIPApp() {
           captureHighpass.connect(captureNode)
           captureHighpass.connect(monitorDestNode)
         }
-        // Keep ScriptProcessor actively pulled on all platforms (especially macOS)
-        // while keeping output silent to avoid sidetone.
+        // Keep capture worklet actively pulled while avoiding sidetone.
         captureNode.connect(captureSinkNode)
         captureNode.connect(capturePumpGainNode)
         capturePumpGainNode.connect(captureCtx.destination)
@@ -1953,7 +2038,11 @@ export default function VoIPApp() {
   const connectAndJoin = async (preset?: SavedServerProfile) => {
     try {
       setJoining(true)
+      uiClient.disconnect()
       voiceClient.disconnect()
+      if (window.electronVoice?.disconnect) {
+        await window.electronVoice.disconnect()
+      }
       const host = (preset?.apiHost ?? apiHost).trim()
       const port = (preset?.apiPort ?? apiPort).trim()
       const password = preset?.serverPassword ?? serverPassword
@@ -1961,7 +2050,9 @@ export default function VoIPApp() {
       const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
       const resolvedUseHttps = typeof preset?.apiUseHttps === "boolean" ? preset.apiUseHttps : apiUseHttps
       const resolvedUdpOverride = preset?.udpPortOverride !== undefined ? preset.udpPortOverride : udpPortOverride
-      const resolvedVoiceTransport: "udp" | "tcp" = preset?.voiceTransport === "tcp" ? "tcp" : voiceTransport
+      const resolvedVoiceTransport: "udp" | "tcp" =
+        preset?.voiceTransport === "tcp" || preset?.voiceTransport === "udp" ? preset.voiceTransport : voiceTransport
+      let effectiveVoiceTransport: "udp" | "tcp" = resolvedVoiceTransport
       if (preset) {
         setApiHost(host)
         setApiPort(port)
@@ -2030,15 +2121,39 @@ export default function VoIPApp() {
               host: vopts.host,
               port: udpPort,
               mediaToken: vopts.mediaToken,
-              transport: resolvedVoiceTransport
+              transport: effectiveVoiceTransport
             })
           } catch (voiceErr) {
-            const msg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr)
-            if (/hello|timeout|tcp|udp/i.test(msg)) {
-              const suggest = resolvedVoiceTransport === "udp" ? "TCP" : "UDP"
-              toast.error(`Voice handshake failed over ${resolvedVoiceTransport.toUpperCase()}. Try ${suggest} in Voice transport.`)
+            const firstMsg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr)
+            const fallbackTransport: "udp" | "tcp" = effectiveVoiceTransport === "udp" ? "tcp" : "udp"
+            let fallbackOk = false
+            if (/hello|timeout|tcp|udp|connect/i.test(firstMsg)) {
+              try {
+                await window.electronVoice.connect({
+                  host: vopts.host,
+                  port: udpPort,
+                  mediaToken: vopts.mediaToken,
+                  transport: fallbackTransport
+                })
+                fallbackOk = true
+                effectiveVoiceTransport = fallbackTransport
+                setVoiceTransport(fallbackTransport)
+                toast.success(
+                  `Voice switched to ${fallbackTransport.toUpperCase()} (fallback after ${resolvedVoiceTransport.toUpperCase()} failed).`
+                )
+              } catch (fallbackErr) {
+                const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+                toast.error(
+                  `Voice failed on ${resolvedVoiceTransport.toUpperCase()} and ${fallbackTransport.toUpperCase()}: ${fallbackMsg}. Connected without voice.`
+                )
+              }
             }
-            throw voiceErr
+            if (!fallbackOk) {
+              if (window.electronVoice?.disconnect) await window.electronVoice.disconnect()
+              if (!/hello|timeout|tcp|udp|connect/i.test(firstMsg)) {
+                toast.error(`Voice error: ${firstMsg}. Connected without voice.`)
+              }
+            }
           }
         }
       }
@@ -2055,7 +2170,7 @@ export default function VoIPApp() {
         serverPassword: password,
         displayName: join.profile.displayName,
         ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
-        voiceTransport: resolvedVoiceTransport,
+        voiceTransport: effectiveVoiceTransport,
         ...(superPassword ? { superuserPassword: superPassword } : {})
       }
       const nextSaved = [updatedProfile, ...withoutSameHostForName]
@@ -2094,7 +2209,8 @@ export default function VoIPApp() {
     let list = (await window.electronVoice.listAudioDevices()) as AudioDevice[]
     if (navigator.mediaDevices?.enumerateDevices) {
       try {
-        await navigator.mediaDevices.getUserMedia({ audio: true })
+        const probe = await navigator.mediaDevices.getUserMedia({ audio: true })
+        probe.getTracks().forEach((t) => t.stop())
       } catch {
         setDeviceError("No permission to access microphone/headphones. Allow audio permissions in desktop client.")
       }
@@ -2664,7 +2780,7 @@ export default function VoIPApp() {
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div>
                   <Label>Playback DSP (incoming voice)</Label>
-                  <p className="text-xs text-muted-foreground">Tune this if remote voice sounds robotic, metallic, or too bright.</p>
+                  <p className="text-xs text-muted-foreground">Tune this if remote voice sounds robotic, metallic, or too bright. Defaults are OFF for the most natural speech.</p>
                 </div>
                 <div className="flex items-center justify-between">
                   <Label className="text-sm">Playback Gate</Label>

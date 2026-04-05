@@ -21,6 +21,8 @@ export class VoiceService {
     selfTestTone: false,
     transport: "udp"
   }
+  /** Persisted selection even before engine is connected. */
+  private selectedDevices: AudioDeviceSelection = { inputId: null, outputId: null }
 
   async connect(input: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) {
     const payload = decodeTokenPayload(input.mediaToken)
@@ -36,6 +38,7 @@ export class VoiceService {
       mediaSeed,
       transport: input.transport ?? "udp"
     })
+    this.engine.setAudioDevices(this.selectedDevices)
     this.engine.setOnPcm16Frame((frame) => {
       this.onIncomingPcm16?.(frame.toString("base64"))
     })
@@ -123,17 +126,20 @@ export class VoiceService {
   }
 
   getAudioDevices() {
-    if (!this.engine) {
-      return { inputId: null, outputId: null }
-    }
-    return this.engine.getAudioDevices()
+    if (!this.engine) return { ...this.selectedDevices }
+    this.selectedDevices = this.engine.getAudioDevices()
+    return { ...this.selectedDevices }
   }
 
   setAudioDevices(selection: AudioDeviceSelection) {
-    if (!this.engine) {
-      return { inputId: selection.inputId, outputId: selection.outputId }
+    this.selectedDevices = {
+      inputId: selection.inputId,
+      outputId: selection.outputId
     }
-    return this.engine.setAudioDevices(selection)
+    if (this.engine) {
+      this.selectedDevices = this.engine.setAudioDevices(this.selectedDevices)
+    }
+    return { ...this.selectedDevices }
   }
 
   sendPcm16Frame(pcm16Base64: string) {

@@ -87,6 +87,16 @@ function compareRosterMembersByName(a: RosterMember, b: RosterMember) {
   return a.clientId.localeCompare(b.clientId)
 }
 
+function ensureValidClientId(clientId: string): string {
+  const normalized = clientId.trim()
+  if (normalized.length >= 3) return normalized
+  try {
+    return crypto.randomUUID()
+  } catch {
+    return `client-${Math.random().toString(36).slice(2, 10)}`
+  }
+}
+
 export class VoipClient {
   private apiBase: string = DEFAULT_API_BASE
   private ws: WebSocket | null = null
@@ -125,12 +135,28 @@ export class VoipClient {
   }
 
   async joinServer(password: string, clientId: string, displayName: string, superuserPassword?: string): Promise<JoinResult> {
+    const safeClientId = ensureValidClientId(clientId)
     const res = await fetch(`${this.apiBase}/v1/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password, clientId, displayName, superuserPassword })
+      body: JSON.stringify({ password, clientId: safeClientId, displayName, superuserPassword })
     })
-    if (!res.ok) throw new Error("join server failed")
+    if (!res.ok) {
+      let details = `join server failed (${res.status})`
+      try {
+        const payload = (await res.json()) as { message?: unknown; error?: unknown }
+        const message =
+          typeof payload.message === "string"
+            ? payload.message
+            : typeof payload.error === "string"
+              ? payload.error
+              : ""
+        if (message) details = `${details}: ${message}`
+      } catch {
+        /* ignore non-JSON payload */
+      }
+      throw new Error(details)
+    }
     const out = (await res.json()) as JoinResult
     this.authToken = out.authToken
     this.mediaToken = out.mediaToken
@@ -273,7 +299,18 @@ export class VoipClient {
 
   connectWs() {
     if (!this.authToken) throw new Error("not authorized")
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
+    // Always replace the socket when (re)connecting: after a new /v1/join the token changes; keeping an
+    // OPEN socket would skip opening WSS with the new token and leave the old session (broken UI / "can't connect").
+    const existing = this.ws
+    if (existing) {
+      existing.onclose = null
+      try {
+        existing.close()
+      } catch {
+        /* ignore */
+      }
+      this.ws = null
+    }
     const url = new URL(`${this.apiBase}/v1/ws`)
     url.searchParams.set("token", this.authToken)
     const wsUrl = url.toString().replace("http://", "ws://").replace("https://", "wss://")

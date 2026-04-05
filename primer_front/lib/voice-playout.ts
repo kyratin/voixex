@@ -13,26 +13,42 @@ export type VoicePlayoutOptions = {
   maxQueuedSec?: number
 }
 
+export class VoiceCaptureFramer {
+  private readonly port: MessagePort
+  constructor(port: MessagePort) {
+    this.port = port
+  }
+  reset() {
+    this.port.postMessage({ type: "reset" })
+  }
+}
+
 export class VoicePlayoutPrefetch {
   private readonly port: MessagePort
+  private readonly sampleRate: number
 
   constructor(sampleRate: number, port: MessagePort, opts: number | VoicePlayoutOptions = {}) {
     this.port = port
-    let startMs = 120
-    let maxQueuedSec = 0.5
+    this.sampleRate = sampleRate
+    let startMs = 180
+    let maxQueuedSec = 0.9
     if (typeof opts === "number") {
       startMs = opts
     } else {
       if (opts.startMs != null) startMs = opts.startMs
       if (opts.maxQueuedSec != null) maxQueuedSec = opts.maxQueuedSec
     }
-    const startThreshold = Math.max(1, Math.round((sampleRate * startMs) / 1000))
-    const maxBuffered = Math.max(startThreshold * 2, Math.round(sampleRate * maxQueuedSec))
-    port.postMessage({ type: "configure", startThreshold, maxBuffered })
+    this.reconfigure(startMs, maxQueuedSec)
   }
 
   reset() {
     this.port.postMessage({ type: "reset" })
+  }
+
+  reconfigure(startMs: number, maxQueuedSec: number) {
+    const startThreshold = Math.max(1, Math.round((this.sampleRate * startMs) / 1000))
+    const maxBuffered = Math.max(startThreshold * 2, Math.round(this.sampleRate * maxQueuedSec))
+    this.port.postMessage({ type: "configure", startThreshold, maxBuffered })
   }
 
   pushBlock(samples: Float32Array) {
@@ -137,6 +153,55 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
 registerProcessor("voice-playback", VoicePlaybackProcessor)
 `
 
+const VOICE_CAPTURE_WORKLET_SOURCE = `
+class VoiceCaptureFramerProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super()
+    this.buf = new Float32Array(8192)
+    this.w = 0
+    this.r = 0
+    this.frameSize = 960
+    this.port.onmessage = (e) => {
+      const m = e.data
+      if (m.type === "reset") {
+        this.w = 0
+        this.r = 0
+      }
+    }
+  }
+  _used() {
+    const L = this.buf.length
+    if (this.w >= this.r) return this.w - this.r
+    return L - this.r + this.w
+  }
+  _push(v) {
+    const L = this.buf.length
+    this.buf[this.w] = v
+    this.w = (this.w + 1) % L
+    if (this.w === this.r) {
+      this.r = (this.r + 1) % L
+    }
+  }
+  process(inputs) {
+    const input = inputs[0] && inputs[0][0]
+    if (!input || input.length === 0) return true
+    for (let i = 0; i < input.length; i++) {
+      this._push(input[i])
+    }
+    while (this._used() >= this.frameSize) {
+      const out = new Float32Array(this.frameSize)
+      for (let i = 0; i < this.frameSize; i++) {
+        out[i] = this.buf[this.r]
+        this.r = (this.r + 1) % this.buf.length
+      }
+      this.port.postMessage({ type: "frame", data: out }, [out.buffer])
+    }
+    return true
+  }
+}
+registerProcessor("voice-capture-framer", VoiceCaptureFramerProcessor)
+`
+
 export async function loadVoicePlaybackWorklet(ctx: AudioContext): Promise<AudioWorkletNode> {
   const blob = new Blob([VOICE_PLAYBACK_WORKLET_SOURCE], { type: "application/javascript" })
   const blobUrl = URL.createObjectURL(blob)
@@ -149,5 +214,23 @@ export async function loadVoicePlaybackWorklet(ctx: AudioContext): Promise<Audio
     numberOfInputs: 0,
     numberOfOutputs: 1,
     outputChannelCount: [1]
+  })
+}
+
+export async function loadVoiceCaptureWorklet(ctx: AudioContext): Promise<AudioWorkletNode> {
+  const blob = new Blob([VOICE_CAPTURE_WORKLET_SOURCE], { type: "application/javascript" })
+  const blobUrl = URL.createObjectURL(blob)
+  try {
+    await ctx.audioWorklet.addModule(blobUrl)
+  } finally {
+    URL.revokeObjectURL(blobUrl)
+  }
+  return new AudioWorkletNode(ctx, "voice-capture-framer", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+    channelCount: 1,
+    channelCountMode: "explicit",
+    channelInterpretation: "speakers"
   })
 }
