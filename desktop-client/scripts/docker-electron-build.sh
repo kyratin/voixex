@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
-# Build Windows (.exe NSIS), macOS arm64 (.zip), and Linux (AppImage/deb).
-# DMG не собирается стабильно в Linux-контейнере (dmgbuilder); на macOS: npm run dist:mac
-# using the official builder image.
+# Build Voixex desktop artifacts:
+#   - macOS arm64 .zip + Linux AppImage/deb via electronuserland/builder:wine (Docker)
+#   - Windows NSIS .exe: on macOS host (native rcedit); in Docker only on native linux/amd64
+#
+# DMG: npm run dist:mac on macOS (dmgbuilder unstable in Linux container).
 # Prereq: docker pull electronuserland/builder:wine
 #
-# From repo root:
-#   ./desktop-client/scripts/docker-electron-build.sh
 #   npm run dist:docker --prefix desktop-client
-#
-# Если после сборки в Docker папки принадлежат root и npm падает с EACCES — скрипт
-# сам выставит владельца node_modules/release на вашего пользователя (через контейнер).
-#
-# В документации иногда пишут docker run … bash -c '…' — троеточие не команда; используйте
-# этот скрипт или полные команды из README пакета.
 #
 # Опции:
 #   --skip-prepare   Пропустить voice + desktop build + prepare:ui на хосте.
@@ -41,13 +35,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Восстановить права после docker run от root (иначе npm на хосте: EACCES).
 fix_repo_ownership() {
   local uid gid
   uid="$(id -u)"
   gid="$(id -g)"
   echo "==> Выравниваем владельца repo-каталогов на uid=$uid (после сборок от root в Docker)…"
-  # linux/amd64: image is x86_64; on Apple Silicon dmg-builder/Wine need this or binaries hit Exec format error
   docker run --rm --user 0:0 --platform linux/amd64 \
     -v "$REPO_ROOT:/repo" \
     electronuserland/builder:wine \
@@ -63,6 +55,46 @@ fix_repo_ownership() {
     done'
 }
 
+verify_win_installer() {
+  local exe
+  exe="$(ls -1 "$DESKTOP_ROOT"/release/Voixex-*-win-x64.exe 2>/dev/null | sort -V | tail -1 || true)"
+  if [[ -z "$exe" ]]; then
+    echo "ERROR: Windows installer not found in $DESKTOP_ROOT/release/" >&2
+    return 1
+  fi
+  local size
+  size="$(wc -c <"$exe" | tr -d ' ')"
+  # Broken Docker/Wine builds leave a stub ~300–400 KB; a real NSIS is tens of MB.
+  if [[ "$size" -lt 50000000 ]]; then
+    echo "ERROR: $exe is only ${size} bytes (corrupt stub). Remove it and rebuild." >&2
+    return 1
+  fi
+  echo "==> Windows OK: $(basename "$exe") ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size} B"))"
+}
+
+build_win_on_host() {
+  echo "==> Windows NSIS на хосте (macOS: native rcedit, без Wine/QEMU)…"
+  (cd "$DESKTOP_ROOT" && npm run dist:win:only)
+  verify_win_installer
+}
+
+build_win_in_docker() {
+  echo "==> Windows NSIS в Docker (linux/amd64 + Wine)…"
+  docker run --rm -i --platform linux/amd64 \
+    --tmpfs /root/.cache:rw,exec,size=2G \
+    -v "$REPO_ROOT:/repo" \
+    -w /repo/desktop-client \
+    electronuserland/builder:wine \
+    bash -c 'set -euo pipefail
+npx electron-builder --win nsis --x64 --publish never'
+  if ! verify_win_installer; then
+    echo "WARN: Docker+Wine Windows build failed or produced a stub installer." >&2
+    echo "      On Apple Silicon Mac use host build (this script does that automatically)." >&2
+    echo "      On CI use a native windows-2022 runner or linux/amd64 without QEMU." >&2
+    return 1
+  fi
+}
+
 if [[ "$DO_CHOWN" == true ]]; then
   fix_repo_ownership
 fi
@@ -71,11 +103,10 @@ if [[ "$SKIP_PREPARE" != true ]]; then
   echo "==> voice-client: npm ci && npm run build"
   (cd "$REPO_ROOT/voice-client" && npm ci && npm run build)
   echo "==> desktop-client: npm install && npm run build && npm run prepare:ui"
-  (cd "$REPO_ROOT/desktop-client" && npm install && npm run build && npm run prepare:ui)
+  (cd "$DESKTOP_ROOT" && npm install && npm run build && npm run prepare:ui)
 fi
 
-echo "==> electron-builder (mac arm64 zip + linux + win nsis) в electronuserland/builder:wine"
-# Кэш в tmpfs + exec: на Docker Desktop (macOS) иначе бывают битые zip Electron и EACCES у fpm/mksquashfs (noexec).
+echo "==> electron-builder (mac arm64 zip + linux) в electronuserland/builder:wine"
 docker run --rm -i --platform linux/amd64 \
   --tmpfs /root/.cache:rw,exec,size=2G \
   -v "$REPO_ROOT:/repo" \
@@ -89,11 +120,18 @@ if [[ -f "$DMG_JS" ]]; then
 fi
 npx electron-builder --mac zip --arm64 --publish never
 npx electron-builder --linux AppImage deb --x64 --publish never
-npx electron-builder --win nsis --publish never
 EOF
 
 if [[ "$DO_CHOWN" == true ]]; then
   fix_repo_ownership
 fi
 
-echo "==> Готово. Артефакты: $REPO_ROOT/desktop-client/release/"
+# Wine+rcedit under QEMU (Docker Desktop on Apple Silicon) crashes with anon_mmap_fixed.
+# electron-builder uses native app-builder rcedit on darwin — build Windows on the host.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  build_win_on_host
+else
+  build_win_in_docker
+fi
+
+echo "==> Готово. Артефакты: $DESKTOP_ROOT/release/"

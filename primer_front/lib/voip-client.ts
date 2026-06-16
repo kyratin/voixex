@@ -13,12 +13,22 @@ export type JoinResult = {
   udp: { host: string; port: number }
 }
 
+export type SfuTokenResult = {
+  enabled: true
+  url: string
+  token: string
+  roomName: string
+  expiresInSec: number
+}
+
 export type RosterMember = {
   clientId: string
   displayName: string
   muted: boolean
   deafened: boolean
   speaking: boolean
+  screenSharing?: boolean
+  watchingScreen?: boolean
 }
 
 export type RealtimeState = {
@@ -117,6 +127,8 @@ export class VoipClient {
   private electronVoiceParams: { host: string; port: number; mediaToken: string } | null = null
   private pendingWsMessages: string[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private pingTimer: ReturnType<typeof setInterval> | null = null
+  private lastServerGeneration: number | null = null
   private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
   private screenResyncListeners = new Set<(roomId: string) => void>()
   
@@ -199,6 +211,25 @@ export class VoipClient {
     return body.rooms
   }
 
+  async getSfuToken(serverId: string, roomId: string): Promise<SfuTokenResult> {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/rooms/${roomId}/sfu-token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!res.ok) {
+      let details = `SFU token failed (${res.status})`
+      try {
+        const payload = (await res.json()) as { message?: unknown }
+        if (typeof payload.message === "string") details = `${details}: ${payload.message}`
+      } catch {
+        /* ignore non-JSON payload */
+      }
+      throw new Error(details)
+    }
+    return res.json() as Promise<SfuTokenResult>
+  }
+
   async getMe(serverId: string) {
     if (!this.authToken) throw new Error("not authorized")
     const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/me`, { headers: { Authorization: `Bearer ${this.authToken}` } })
@@ -270,6 +301,7 @@ export class VoipClient {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
+    this.stopPing()
     const socket = this.ws
     if (socket) {
       socket.onclose = null
@@ -285,6 +317,7 @@ export class VoipClient {
     this.currentServerId = null
     this.electronVoiceParams = null
     this.pendingWsMessages = []
+    this.lastServerGeneration = null
     this.state = {
       rooms: [],
       rosterByRoom: {},
@@ -323,6 +356,7 @@ export class VoipClient {
         this.ws?.send(message)
       }
       this.pendingWsMessages = []
+      this.startPing()
     }
     this.ws.onmessage = (event) => {
       const raw = String(event.data)
@@ -358,16 +392,27 @@ export class VoipClient {
         return
       }
       const typed = data as
+        | { type: "hello"; clientId: string; serverId: string; serverGeneration?: number }
         | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
         | {
+            type: "presence_snapshot"
+            rosters: Record<string, RosterMember[]>
+            lobby: RosterMember[]
+            screenByRoom: Record<string, string | null>
+          }
+        | {
             type: "member_updated"
-            member: { clientId: string; displayName: string; roomId: string | null; muted: boolean; deafened: boolean; speaking: boolean }
+            member: RosterMember & { roomId: string | null }
           }
         | { type: "chat_message"; message: ChatMessage }
         | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
-      if (typed.type === "rooms_snapshot") {
+      if (typed.type === "hello") {
+        if (typeof typed.serverGeneration === "number") {
+          this.lastServerGeneration = typed.serverGeneration
+        }
+      } else if (typed.type === "rooms_snapshot") {
         this.state.rooms = typed.rooms
       } else if (typed.type === "rooms_updated") {
         this.state.rooms = typed.rooms
@@ -377,6 +422,14 @@ export class VoipClient {
         } else {
           this.state.lobby = [...typed.members].sort(compareRosterMembersByName)
         }
+      } else if (typed.type === "presence_snapshot") {
+        const rosters: Record<string, RosterMember[]> = {}
+        for (const [roomId, members] of Object.entries(typed.rosters)) {
+          rosters[roomId] = [...members].sort(compareRosterMembersByName)
+        }
+        this.state.rosterByRoom = rosters
+        this.state.lobby = [...typed.lobby].sort(compareRosterMembersByName)
+        this.state.activeScreenShareByRoom = { ...typed.screenByRoom }
       } else if (typed.type === "member_updated") {
         for (const roomId of Object.keys(this.state.rosterByRoom)) {
           this.state.rosterByRoom[roomId] = this.state.rosterByRoom[roomId].filter((m) => m.clientId !== typed.member.clientId)
@@ -387,7 +440,9 @@ export class VoipClient {
           displayName: typed.member.displayName,
           muted: typed.member.muted,
           deafened: typed.member.deafened,
-          speaking: typed.member.speaking
+          speaking: typed.member.speaking,
+          screenSharing: typed.member.screenSharing,
+          watchingScreen: typed.member.watchingScreen
         }
         if (typed.member.roomId) {
           const next = this.state.rosterByRoom[typed.member.roomId] ?? []
@@ -422,6 +477,7 @@ export class VoipClient {
     }
     this.ws.onclose = () => {
       this.ws = null
+      this.stopPing()
       this.state.connection = { wsConnected: false, reconnecting: true }
       this.emit()
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
@@ -445,6 +501,20 @@ export class VoipClient {
 
   leaveRoom() {
     this.sendWsEvent({ type: "leave_room" })
+  }
+
+  syncPresence(input: {
+    roomId: string | null
+    muted: boolean
+    deafened: boolean
+    screenSharing: boolean
+    watchingScreen: boolean
+  }) {
+    this.sendWsEvent({ type: "sync_presence", ...input })
+  }
+
+  setWatchingScreen(watching: boolean, roomId?: string) {
+    this.sendWsEvent({ type: "set_watching_screen", watching, roomId })
   }
 
   setMute(muted: boolean) {
@@ -509,7 +579,9 @@ export class VoipClient {
         avatar: u.displayName.slice(0, 1).toUpperCase(),
         isMuted: u.muted,
         isDeafened: u.deafened,
-        isSpeaking: u.speaking
+        isSpeaking: u.speaking,
+        isScreenSharing: u.screenSharing,
+        isWatchingScreen: u.watchingScreen
       }))
     }
     return out
@@ -560,6 +632,19 @@ export class VoipClient {
       return
     }
     this.pendingWsMessages.push(message)
+  }
+
+  private startPing() {
+    this.stopPing()
+    this.pingTimer = setInterval(() => {
+      this.sendWsEvent({ type: "ping", ts: Date.now() })
+    }, 15_000)
+  }
+
+  private stopPing() {
+    if (!this.pingTimer) return
+    clearInterval(this.pingTimer)
+    this.pingTimer = null
   }
 
   private normalizeMessage(message: ChatMessage): ChatMessage {

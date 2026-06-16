@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones } from "lucide-react"
+import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Monitor, Eye } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -31,6 +31,8 @@ export interface VoiceUser {
   isMuted?: boolean
   isDeafened?: boolean
   isSpeaking?: boolean
+  isScreenSharing?: boolean
+  isWatchingScreen?: boolean
 }
 
 interface ChannelSidebarProps {
@@ -184,6 +186,8 @@ function VoiceChannelUserRow({
         {user.name}
       </span>
       <div className="flex shrink-0 items-center gap-0.5">
+        {user.isScreenSharing && <Monitor className="h-3 w-3 text-primary/80" aria-label="Screen sharing" />}
+        {user.isWatchingScreen && <Eye className="h-3 w-3 text-muted-foreground" aria-label="Watching stream" />}
         {user.isMuted && <MicOff className="h-3 w-3 text-destructive/70" />}
         {user.isDeafened && <Headphones className="h-3 w-3 text-destructive/70" />}
         {showVol && (

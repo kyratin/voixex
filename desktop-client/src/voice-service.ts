@@ -25,6 +25,8 @@ export class VoiceService {
   private selectedDevices: AudioDeviceSelection = { inputId: null, outputId: null }
 
   async connect(input: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) {
+    const prevMuted = this.state.muted
+    const prevDeafened = this.state.deafened
     const payload = decodeTokenPayload(input.mediaToken)
     const mediaSeed = String(payload.mediaSeed ?? "")
     if (!mediaSeed) {
@@ -48,8 +50,10 @@ export class VoiceService {
     await this.engine.connect()
     this.state.connected = true
     this.state.joinedRoomId = null
-    this.state.muted = false
-    this.state.deafened = false
+    this.state.muted = prevMuted
+    this.state.deafened = prevDeafened
+    this.engine.setMute(prevMuted)
+    this.engine.setDeafen(prevDeafened)
     this.state.selfTestTone = false
     this.state.transport = input.transport ?? "udp"
     return this.state

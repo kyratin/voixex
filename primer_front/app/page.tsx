@@ -11,6 +11,7 @@ import { VoipClient, type RealtimeState } from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
+import { WebRtcMediaSession } from "@/lib/webrtc-media"
 import { createSpeexNoiseWorklet } from "@/lib/speex-capture"
 import type { SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
 import { toast } from "sonner"
@@ -160,11 +161,12 @@ export default function VoIPApp() {
   /** Empty = use UDP port from server join response. */
   const [udpPortOverride, setUdpPortOverride] = useState(CONNECTION_DEFAULTS.udpPort)
   const [voiceTransport, setVoiceTransport] = useState<"udp" | "tcp">("udp")
+  const [mediaEngine, setMediaEngine] = useState<"legacy" | "webrtc">("legacy")
   const [displayNameInput, setDisplayNameInput] = useState("User")
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
   const [categories, setCategories] = useState<ChannelCategory[]>([])
-  const [voiceUsers, setVoiceUsers] = useState<Record<string, Array<{ id: string; name: string; avatar: string; isMuted?: boolean; isDeafened?: boolean; isSpeaking?: boolean }>>>({})
+  const [voiceUsers, setVoiceUsers] = useState<Record<string, Array<{ id: string; name: string; avatar: string; isMuted?: boolean; isDeafened?: boolean; isSpeaking?: boolean; isScreenSharing?: boolean; isWatchingScreen?: boolean }>>>({})
   /** Bumps when peer volume localStorage changes so sidebar sliders re-read stored values. */
   const [peerVolumeRevision, setPeerVolumeRevision] = useState(0)
   const [myVoiceClientId, setMyVoiceClientId] = useState<string | null>(null)
@@ -257,6 +259,8 @@ export default function VoIPApp() {
   const screenShareTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const screenCaptureStreamRef = useRef<MediaStream | null>(null)
   const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const webRtcAudioSinkRef = useRef<HTMLDivElement | null>(null)
+  const webRtcSessionRef = useRef<WebRtcMediaSession | null>(null)
   const localPreviewVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteStreamVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteMediaSourceRef = useRef<MediaSource | null>(null)
@@ -275,6 +279,8 @@ export default function VoIPApp() {
   const screenRecorderRestartingRef = useRef(false)
   const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
   const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
+  const localPresenceToggleRef = useRef(false)
+  const isWatchingScreenRef = useRef(false)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
   const lastLocalPreviewUpdateAtRef = useRef(0)
   const uiClient = useMemo(() => new VoipClient(), [])
@@ -418,6 +424,26 @@ export default function VoIPApp() {
       const voiceWs = split ? voiceClient : uiClient
       setMyVoiceClientId(voiceWs.getMeState()?.clientId ?? null)
 
+      const meId = voiceWs.getMeState()?.clientId
+      if (meId && !localPresenceToggleRef.current) {
+        const rt = split && v ? v : u
+        const room = currentVoiceChannelRef.current
+        const selfMember =
+          (room ? rt.rosterByRoom[room]?.find((m) => m.clientId === meId) : undefined) ??
+          rt.lobby.find((m) => m.clientId === meId)
+        if (selfMember) {
+          if (selfMember.muted !== mutedRef.current) {
+            setIsMuted(selfMember.muted)
+            void window.electronVoice?.setMute(selfMember.muted)
+            void webRtcSessionRef.current?.setMuted(selfMember.muted)
+          }
+          if (selfMember.deafened !== deafenedRef.current) {
+            setIsDeafened(selfMember.deafened)
+            void window.electronVoice?.setDeafen(selfMember.deafened)
+          }
+        }
+      }
+
       setWsConnected(u.connection.wsConnected)
       setWsReconnecting(u.connection.reconnecting)
       if (split && v) {
@@ -528,15 +554,44 @@ export default function VoIPApp() {
   }, [hasDesktopBridge, wsForVoiceJoin, isInVoice, peerVolServerId, peerVolRosterSig])
 
   useEffect(() => {
-    // WS may reconnect while desktop voice transport keeps running;
-    // re-send join_room so server routes screen chunks to this viewer.
-    if (!wsForVoiceJoin || !isInVoice || !currentVoiceChannel) return
+    // WS may reconnect while voice transport keeps running; push full presence snapshot to server.
+    if (!wsForVoiceJoin) return
     const now = Date.now()
+    const roomKey = isInVoice && currentVoiceChannel ? currentVoiceChannel : "__lobby__"
     const prev = lastWsVoiceJoinSyncRef.current
-    if (prev && prev.room === currentVoiceChannel && now - prev.at < 3000) return
-    lastWsVoiceJoinSyncRef.current = { room: currentVoiceChannel, at: now }
-    getVoiceWsClient().joinRoom(currentVoiceChannel)
+    if (prev && prev.room === roomKey && now - prev.at < 3000) return
+    lastWsVoiceJoinSyncRef.current = { room: roomKey, at: now }
+    getVoiceWsClient().syncPresence({
+      roomId: isInVoice && currentVoiceChannel ? currentVoiceChannel : null,
+      muted: mutedRef.current,
+      deafened: deafenedRef.current,
+      screenSharing: isScreenSharingRef.current,
+      watchingScreen: isWatchingScreenRef.current
+    })
   }, [wsForVoiceJoin, isVoiceSplit, wsConnected, isInVoice, currentVoiceChannel, uiClient, voiceClient])
+
+  useEffect(() => {
+    const watching = Boolean(
+      isInVoice &&
+        currentVoiceChannel &&
+        !isScreenSharing &&
+        (screenVideoUrl || screenImageUrl || (showingStreamWindow && activeScreenSharerName))
+    )
+    isWatchingScreenRef.current = watching
+    if (!wsForVoiceJoin || !currentVoiceChannel) return
+    getVoiceWsClient().setWatchingScreen(watching, currentVoiceChannel)
+  }, [
+    wsForVoiceJoin,
+    isInVoice,
+    currentVoiceChannel,
+    isScreenSharing,
+    screenVideoUrl,
+    screenImageUrl,
+    showingStreamWindow,
+    activeScreenSharerName,
+    uiClient,
+    voiceClient
+  ])
 
   useEffect(() => {
     const raw = localStorage.getItem("voixex-saved-servers")
@@ -798,6 +853,71 @@ export default function VoIPApp() {
     void runtime.playbackCtx.close()
     runtime.stream.getTracks().forEach((t) => t.stop())
     voicePipelineRef.current = null
+  }
+
+  const stopWebRtcSession = async () => {
+    const session = webRtcSessionRef.current
+    webRtcSessionRef.current = null
+    if (session) {
+      await session.disconnect()
+      getVoiceWsClientRef.current().syncPresence({
+        roomId: null,
+        muted: mutedRef.current,
+        deafened: deafenedRef.current,
+        screenSharing: false,
+        watchingScreen: false
+      })
+    }
+  }
+
+  const applyVoiceEnginePresenceFlags = () => {
+    void window.electronVoice?.setMute(mutedRef.current)
+    void window.electronVoice?.setDeafen(deafenedRef.current)
+  }
+
+  const startWebRtcSession = async (serverId: string, roomId: string) => {
+    const sink = webRtcAudioSinkRef.current
+    if (!sink) throw new Error("WebRTC audio sink is not ready")
+    const token = await getVoiceWsClientRef.current().getSfuToken(serverId, roomId)
+    const session = new WebRtcMediaSession({
+      audioSink: sink,
+      onStatus: setStatus,
+      onMutedChange: (muted) => {
+        getVoiceWsClientRef.current().setMute(muted)
+      },
+      onScreenShareChange: (active) => {
+        getVoiceWsClientRef.current().setScreenShare(active)
+      },
+      onWatchingScreenChange: (watching) => {
+        getVoiceWsClientRef.current().setWatchingScreen(watching, roomId)
+      },
+      onRemoteVideo: (stream, participantIdentity) => {
+        getVoiceWsClientRef.current().setWatchingScreen(Boolean(stream), roomId)
+        if (stream) {
+          if (screenVideoUrl) URL.revokeObjectURL(screenVideoUrl)
+          setScreenVideoUrl(null)
+          setActiveScreenSharerName(participantIdentity ?? "WebRTC user")
+          if (remoteStreamVideoRef.current) {
+            remoteStreamVideoRef.current.srcObject = stream
+            void remoteStreamVideoRef.current.play().catch(() => {})
+          }
+        } else {
+          setActiveScreenSharerName("")
+          if (remoteStreamVideoRef.current) remoteStreamVideoRef.current.srcObject = null
+        }
+      }
+    })
+    await session.connect(token)
+    await session.publishMicrophone(!mutedRef.current)
+    await session.setMuted(mutedRef.current)
+    getVoiceWsClientRef.current().syncPresence({
+      roomId,
+      muted: mutedRef.current,
+      deafened: deafenedRef.current,
+      screenSharing: false,
+      watchingScreen: false
+    })
+    webRtcSessionRef.current = session
   }
 
   const encodePcm16Base64 = (frame: Int16Array) => {
@@ -1105,7 +1225,7 @@ export default function VoIPApp() {
   }, [voiceStats])
 
   useEffect(() => {
-    if (!hasDesktopBridge || !isInVoice || !currentVoiceChannel) {
+    if (mediaEngine === "webrtc" || !hasDesktopBridge || !isInVoice || !currentVoiceChannel) {
       stopVoicePipeline()
       return
     }
@@ -1448,6 +1568,7 @@ export default function VoIPApp() {
     hasDesktopBridge,
     isInVoice,
     currentVoiceChannel,
+    mediaEngine,
     audioDevicesRevision,
     noiseSuppressionEnabled,
     echoCancellationEnabled,
@@ -1573,18 +1694,52 @@ export default function VoIPApp() {
     void v.play().catch(() => {})
   }, [screenVideoUrl, isScreenSharing])
 
+  const applyPresenceState = (input: { muted?: boolean; deafened?: boolean; screenSharing?: boolean }) => {
+    const muted = input.muted ?? mutedRef.current
+    const deafened = input.deafened ?? deafenedRef.current
+    const screenSharing = input.screenSharing ?? isScreenSharingRef.current
+    if (input.muted !== undefined) {
+      setIsMuted(input.muted)
+      void window.electronVoice?.setMute(input.muted)
+      void webRtcSessionRef.current?.setMuted(input.muted)
+    }
+    if (input.deafened !== undefined) {
+      setIsDeafened(input.deafened)
+      void window.electronVoice?.setDeafen(input.deafened)
+    }
+    if (input.screenSharing !== undefined) {
+      setIsScreenSharing(input.screenSharing)
+    }
+    getVoiceWsClientRef.current().syncPresence({
+      roomId: isInVoiceRef.current && currentVoiceChannelRef.current ? currentVoiceChannelRef.current : null,
+      muted,
+      deafened,
+      screenSharing,
+      watchingScreen: isWatchingScreenRef.current
+    })
+  }
+
   const applyMute = (next: boolean) => {
+    localPresenceToggleRef.current = true
     setIsMuted(next)
     getVoiceWsClient().setMute(next)
     void window.electronVoice?.setMute(next)
+    void webRtcSessionRef.current?.setMuted(next)
     setStatus(next ? "Microphone muted" : "Microphone unmuted")
+    window.setTimeout(() => {
+      localPresenceToggleRef.current = false
+    }, 600)
   }
 
   const applyDeafen = (next: boolean) => {
+    localPresenceToggleRef.current = true
     setIsDeafened(next)
     getVoiceWsClient().setDeafen(next)
     void window.electronVoice?.setDeafen(next)
     setStatus(next ? "Headphones deafened" : "Headphones undeafened")
+    window.setTimeout(() => {
+      localPresenceToggleRef.current = false
+    }, 600)
   }
 
   const handleSendMessage = (content: string) => {
@@ -1608,6 +1763,9 @@ export default function VoIPApp() {
   }
 
   const stopScreenShare = async () => {
+    if (mediaEngine === "webrtc") {
+      await webRtcSessionRef.current?.stopScreenShare()
+    }
     if (screenShareTimerRef.current) {
       clearInterval(screenShareTimerRef.current)
       screenShareTimerRef.current = null
@@ -1753,7 +1911,8 @@ export default function VoIPApp() {
         if (needNewMirror) {
           stopPopupMirrorTracks()
           try {
-            const cap = srcVideo.captureStream(mirrorFps)
+            const cap = (srcVideo as HTMLVideoElement & { captureStream?: (frameRate?: number) => MediaStream }).captureStream?.(mirrorFps)
+            if (!cap) throw new Error("captureStream unavailable")
             popupMirrorStreamRef.current = cap
             lastPopupMirrorVideoUrlRef.current = screenVideoUrl
             imageEl.srcObject = cap
@@ -1827,6 +1986,15 @@ export default function VoIPApp() {
       throw new Error("Screen capture API is not available in this runtime.")
     }
     if (isScreenSharing) return
+    if (mediaEngine === "webrtc") {
+      const session = webRtcSessionRef.current
+      if (!session) throw new Error("Join a WebRTC voice room before sharing screen.")
+      await session.startScreenShare()
+      setIsScreenSharing(true)
+      getVoiceWsClientRef.current().setScreenShare(true)
+      setStatus("WebRTC screen share started")
+      return
+    }
     const fps = Math.max(8, Math.min(60, screenFps))
     const [targetWidthRaw, targetHeightRaw] = screenResolution.split("x").map((v) => Number(v))
     const targetWidth = Number.isFinite(targetWidthRaw) ? targetWidthRaw : 1280
@@ -1894,6 +2062,29 @@ export default function VoIPApp() {
       if (isScreenSharing) {
         await stopScreenShare()
       }
+      if (mediaEngine === "webrtc") {
+        if (!activeServerId) {
+          toast.error("Connect to a server before joining WebRTC voice.")
+          return
+        }
+        await stopWebRtcSession()
+        stopVoicePipeline()
+        void window.electronVoice?.leaveRoom()
+        getVoiceWsClient().joinRoom(channelId)
+        setIsInVoice(true)
+        isInVoiceRef.current = true
+        setCurrentVoiceChannel(channelId)
+        setVoiceServerId(activeServerId)
+        voiceServerIdRef.current = activeServerId
+        try {
+          await startWebRtcSession(activeServerId, channelId)
+          setStatus(`In WebRTC room: ${channel.name}`)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : "Failed to start WebRTC media")
+          toast.error(e instanceof Error ? e.message : "Failed to start WebRTC media")
+        }
+        return
+      }
       if (isInVoice && voiceServerId && activeServerId && voiceServerId !== activeServerId) {
         const vopts = uiClient.getElectronVoiceConnectParams()
         if (!window.electronVoice || !vopts) {
@@ -1909,6 +2100,7 @@ export default function VoIPApp() {
           port: splitUdp,
           mediaToken: vopts.mediaToken
         })
+        applyVoiceEnginePresenceFlags()
         setVoiceServerId(activeServerId)
         voiceServerIdRef.current = activeServerId
         setCurrentVoiceChannel(channelId)
@@ -1935,6 +2127,7 @@ export default function VoIPApp() {
 
   const handleDisconnect = () => {
     void stopScreenShare()
+    void stopWebRtcSession()
     getVoiceWsClientRef.current().leaveRoom()
     voiceClient.disconnect()
     setIsInVoice(false)
@@ -1949,6 +2142,7 @@ export default function VoIPApp() {
 
   const fullyDisconnectFromApi = async () => {
     await stopScreenShare()
+    await stopWebRtcSession()
     setIsInVoice(false)
     isInVoiceRef.current = false
     setCurrentVoiceChannel("")
@@ -2123,6 +2317,7 @@ export default function VoIPApp() {
               mediaToken: vopts.mediaToken,
               transport: effectiveVoiceTransport
             })
+            applyVoiceEnginePresenceFlags()
           } catch (voiceErr) {
             const firstMsg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr)
             const fallbackTransport: "udp" | "tcp" = effectiveVoiceTransport === "udp" ? "tcp" : "udp"
@@ -2135,6 +2330,7 @@ export default function VoIPApp() {
                   mediaToken: vopts.mediaToken,
                   transport: fallbackTransport
                 })
+                applyVoiceEnginePresenceFlags()
                 fallbackOk = true
                 effectiveVoiceTransport = fallbackTransport
                 setVoiceTransport(fallbackTransport)
@@ -2382,6 +2578,7 @@ export default function VoIPApp() {
 
   return (
     <main className="flex h-screen overflow-hidden bg-background">
+      <div ref={webRtcAudioSinkRef} className="hidden" aria-hidden="true" />
       <ServerSidebar
         servers={servers}
         activeServerId={activeServerId}
@@ -2455,6 +2652,21 @@ export default function VoIPApp() {
                 />
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   Override only if NAT maps a different external UDP port than the server announces after join.
+                </p>
+              </div>
+              <div>
+                <Label className="mb-1 text-xs text-muted-foreground">Media engine</Label>
+                <Select value={mediaEngine} onValueChange={(v) => setMediaEngine(v === "webrtc" ? "webrtc" : "legacy")}>
+                  <SelectTrigger className="h-8 text-sm w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="legacy">Legacy UDP/TCP (stable baseline)</SelectItem>
+                    <SelectItem value="webrtc">WebRTC SFU (test)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  WebRTC requires LIVEKIT_URL/API_KEY/API_SECRET on the server and a reachable SFU/TURN setup.
                 </p>
               </div>
               <div>

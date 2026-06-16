@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.2.28",
+  "version": "0.2.37",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -17,6 +17,7 @@
     "pack": "electron-builder --dir",
     "dist": "npm run prepare:ui && electron-builder --publish never",
     "dist:win": "npm run prepare:ui && electron-builder --win nsis --x64 --publish never",
+    "dist:win:only": "electron-builder --win nsis --x64 --publish never",
     "dist:linux": "npm run prepare:ui && electron-builder --linux AppImage deb --publish never",
     "dist:mac": "npm run prepare:ui && electron-builder --mac dmg --publish never",
     "dist:mac:zip": "npm run prepare:ui && electron-builder --mac zip --publish never",
@@ -59,6 +60,7 @@
     },
     "win": {
       "icon": "build/icons/icon.ico",
+      "signAndEditExecutable": false,
       "target": [
         "nsis"
       ]
