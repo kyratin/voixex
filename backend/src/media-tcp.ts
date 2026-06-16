@@ -5,6 +5,7 @@ import { detachTcpTransport, handleTcpPacket, registerTcpHello } from "./media.j
 
 type MediaHooks = {
   onSpeakingChanged?: (input: { clientId: string; speaking: boolean }) => void
+  onSessionStale?: (input: { clientId: string }) => void
 }
 
 const MAX_PACKET_BYTES = 64 * 1024

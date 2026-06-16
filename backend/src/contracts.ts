@@ -1,3 +1,13 @@
+export type RosterMember = {
+  clientId: string
+  displayName: string
+  muted: boolean
+  deafened: boolean
+  speaking: boolean
+  screenSharing?: boolean
+  watchingScreen?: boolean
+}
+
 export type WsClientEvent =
   | { type: "join_room"; roomId: string }
   | { type: "leave_room" }
@@ -7,6 +17,15 @@ export type WsClientEvent =
   | { type: "set_deafen"; deafened: boolean }
   | { type: "set_profile"; displayName: string }
   | { type: "set_screen_share"; active: boolean }
+  | {
+      type: "sync_presence"
+      roomId: string | null
+      muted: boolean
+      deafened: boolean
+      screenSharing: boolean
+      watchingScreen: boolean
+    }
+  | { type: "set_watching_screen"; watching: boolean; roomId?: string }
   /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
   | { type: "screen_chunk"; chunkBase64: string }
   /** Viewer asks server to nudge the active sharer (fresh WebM header for MSE). */
@@ -14,23 +33,19 @@ export type WsClientEvent =
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
-  | { type: "hello"; clientId: string; serverId: string }
+  | { type: "hello"; clientId: string; serverId: string; serverGeneration: number }
   | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
+  | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
   | {
-      type: "roster_snapshot"
-      roomId: string | null
-      members: Array<{
-        clientId: string
-        displayName: string
-        muted: boolean
-        deafened: boolean
-        speaking: boolean
-      }>
+      type: "presence_snapshot"
+      rosters: Record<string, RosterMember[]>
+      lobby: RosterMember[]
+      screenByRoom: Record<string, string | null>
     }
   | {
       type: "member_updated"
-      member: { clientId: string; displayName: string; roomId: string | null; muted: boolean; deafened: boolean; speaking: boolean }
+      member: RosterMember & { roomId: string | null }
     }
   | {
       type: "chat_history_snapshot"

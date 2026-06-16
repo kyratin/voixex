@@ -7,11 +7,12 @@ import { createReadStream, createWriteStream, mkdirSync, readFileSync, statSync 
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path"
 import { pipeline } from "node:stream/promises"
 import { Readable } from "node:stream"
+import { AccessToken } from "livekit-server-sdk"
 import { z } from "zod"
 import { config } from "./config.js"
 import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
-import type { WsClientEvent, WsServerEvent } from "./contracts.js"
+import type { WsClientEvent, WsServerEvent, RosterMember } from "./contracts.js"
 import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 import { createMediaTcpServer } from "./media-tcp.js"
 
@@ -59,6 +60,149 @@ const screenShareStateByClient = new Map<string, { serverId: string; roomId: str
 const forceScreenRelayByRoom = new Map<string, Map<string, number>>()
 const screenWsRateByClient = new Map<string, { sec: number; count: number }>()
 let screenRelayLogCounter = 0
+/** Bumped on process start so clients can detect redeploy and resync presence. */
+const serverGeneration = Date.now()
+/** Live WebSocket connections per (serverId, clientId) — presence evicted only when last socket closes. */
+const clientSockets = new Map<string, Set<WebSocket>>()
+
+function clientSocketsKey(serverId: string, clientId: string) {
+  return `${serverId}:${clientId}`
+}
+
+function touchLastSeen(serverId: string, clientId: string) {
+  db.prepare("UPDATE member_state SET last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(serverId, clientId)
+}
+
+function memberFromRow(r: {
+  client_id: string
+  display_name: string
+  muted: number
+  deafened: number
+  speaking: number
+  screen_sharing?: number
+  watching_screen?: number
+}): RosterMember {
+  return {
+    clientId: r.client_id,
+    displayName: r.display_name,
+    muted: Boolean(r.muted),
+    deafened: Boolean(r.deafened),
+    speaking: Boolean(r.speaking),
+    screenSharing: Boolean(r.screen_sharing),
+    watchingScreen: Boolean(r.watching_screen)
+  }
+}
+
+function memberFromSnap(snap: {
+  client_id: string
+  display_name: string
+  room_id: string | null
+  muted: number
+  deafened: number
+  speaking: number
+  screen_sharing?: number
+  watching_screen?: number
+}): RosterMember & { roomId: string | null } {
+  return {
+    ...memberFromRow(snap),
+    roomId: snap.room_id
+  }
+}
+
+function emitRosterSnapshots(serverId: string, roomIds: Array<string | null>) {
+  const seen = new Set<string>()
+  for (const roomId of roomIds) {
+    const key = roomId ?? "__lobby__"
+    if (seen.has(key)) continue
+    seen.add(key)
+    emitToServer(serverId, {
+      type: "roster_snapshot",
+      roomId,
+      members: getRoster(serverId, roomId)
+    })
+  }
+}
+
+function buildScreenByRoom(serverId: string): Record<string, string | null> {
+  const out: Record<string, string | null> = {}
+  for (const [clientId, state] of screenShareStateByClient.entries()) {
+    if (state.serverId !== serverId || !state.active || !state.roomId) continue
+    out[state.roomId] = clientId
+  }
+  return out
+}
+
+function buildPresenceSnapshot(serverId: string): Extract<WsServerEvent, { type: "presence_snapshot" }> {
+  const rosters: Record<string, RosterMember[]> = {}
+  const roomRows = db
+    .prepare(
+      `SELECT DISTINCT room_id FROM member_state WHERE server_id = ? AND room_id IS NOT NULL`
+    )
+    .all(serverId) as Array<{ room_id: string }>
+  for (const row of roomRows) {
+    rosters[row.room_id] = getRoster(serverId, row.room_id)
+  }
+  return {
+    type: "presence_snapshot",
+    rosters,
+    lobby: getRoster(serverId, null),
+    screenByRoom: buildScreenByRoom(serverId)
+  }
+}
+
+function sendPresenceSnapshotToSocket(socket: WebSocket, serverId: string) {
+  if (socket.readyState !== socket.OPEN) return
+  socket.send(JSON.stringify(buildPresenceSnapshot(serverId)))
+}
+
+function evictMemberPresence(serverId: string, clientId: string) {
+  const snap = getMemberSnapshot(serverId, clientId)
+  const prevRoomId = snap?.room_id ?? null
+  db.prepare("DELETE FROM member_state WHERE server_id = ? AND client_id = ?").run(serverId, clientId)
+  removeMember(clientId)
+  const shareSnap = screenShareStateByClient.get(clientId)
+  screenShareStateByClient.delete(clientId)
+  for (const forced of forceScreenRelayByRoom.values()) {
+    forced.delete(clientId)
+  }
+  screenWsRateByClient.delete(clientId)
+  if (shareSnap?.active) {
+    const shareRoomEmit = shareSnap.roomId ?? null
+    emitScreenShareState(serverId, clientId, shareRoomEmit, false)
+  }
+  if (snap) {
+    emitToServer(serverId, {
+      type: "member_updated",
+      member: {
+        ...memberFromSnap(snap),
+        roomId: null,
+        speaking: false,
+        screenSharing: false,
+        watchingScreen: false
+      }
+    })
+    emitRosterSnapshots(serverId, [prevRoomId, null])
+  }
+}
+
+function sweepStalePresence() {
+  const rows = db
+    .prepare(
+      `SELECT server_id, client_id FROM member_state
+       WHERE last_seen < datetime('now', ?)`
+    )
+    .all(`-${config.presenceTtlSec} seconds`) as Array<{ server_id: string; client_id: string }>
+  for (const row of rows) {
+    const key = clientSocketsKey(row.server_id, row.client_id)
+    if ((clientSockets.get(key)?.size ?? 0) > 0) {
+      touchLastSeen(row.server_id, row.client_id)
+      continue
+    }
+    evictMemberPresence(row.server_id, row.client_id)
+  }
+}
+
+setInterval(sweepStalePresence, config.presenceSweepSec * 1000).unref?.()
 
 type PermissionKey = "manage_server" | "manage_channels" | "manage_roles" | "manage_chat"
 type PermissionMap = Record<PermissionKey, boolean>
@@ -337,33 +481,53 @@ function getAttachmentsByMessageIds(serverId: string, messageIds: string[], toke
 function getMemberSnapshot(serverId: string, clientId: string) {
   return db
     .prepare(
-      `SELECT ms.server_id, ms.room_id, ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking
+      `SELECT ms.server_id, ms.room_id, ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking,
+              ms.screen_sharing, ms.watching_screen
        FROM member_state ms
        JOIN server_members sm ON sm.server_id = ms.server_id AND sm.client_id = ms.client_id
        WHERE ms.server_id = ? AND ms.client_id = ?`
     )
     .get(serverId, clientId) as
-    | { server_id: string; room_id: string | null; client_id: string; display_name: string; muted: number; deafened: number; speaking: number }
+    | {
+        server_id: string
+        room_id: string | null
+        client_id: string
+        display_name: string
+        muted: number
+        deafened: number
+        speaking: number
+        screen_sharing: number
+        watching_screen: number
+      }
     | undefined
 }
 
-function getRoster(serverId: string, roomId: string | null) {
+function getRoster(serverId: string, roomId: string | null): RosterMember[] {
   const rows = db
     .prepare(
-      `SELECT ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking
+      `SELECT ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking, ms.screen_sharing, ms.watching_screen
        FROM member_state ms
        JOIN server_members sm ON sm.server_id = ms.server_id AND sm.client_id = ms.client_id
        WHERE ms.server_id = ? AND ms.room_id IS ?
        ORDER BY ms.last_seen DESC`
     )
-    .all(serverId, roomId) as Array<{ client_id: string; display_name: string; muted: number; deafened: number; speaking: number }>
-  return rows.map((r) => ({
-    clientId: r.client_id,
-    displayName: r.display_name,
-    muted: Boolean(r.muted),
-    deafened: Boolean(r.deafened),
-    speaking: Boolean(r.speaking)
-  }))
+    .all(serverId, roomId) as Array<{
+    client_id: string
+    display_name: string
+    muted: number
+    deafened: number
+    speaking: number
+    screen_sharing: number
+    watching_screen: number
+  }>
+  return rows.map((r) => memberFromRow(r))
+}
+
+function emitMemberUpdated(serverId: string, snap: NonNullable<ReturnType<typeof getMemberSnapshot>>) {
+  emitToServer(serverId, {
+    type: "member_updated",
+    member: memberFromSnap(snap)
+  })
 }
 
 createMediaServer(app.log, {
@@ -375,17 +539,17 @@ createMediaServer(app.log, {
     db.prepare("UPDATE member_state SET speaking = ? WHERE server_id = ? AND client_id = ?").run(speaking ? 1 : 0, row.server_id, clientId)
     const snap = getMemberSnapshot(row.server_id, clientId)
     if (!snap) return
-    emitToServer(row.server_id, {
-      type: "member_updated",
-      member: {
-        clientId: snap.client_id,
-        displayName: snap.display_name,
-        roomId: snap.room_id,
-        muted: Boolean(snap.muted),
-        deafened: Boolean(snap.deafened),
-        speaking: Boolean(snap.speaking)
-      }
-    })
+    emitMemberUpdated(row.server_id, snap)
+  },
+  onSessionStale: ({ clientId }) => {
+    const row = db
+      .prepare("SELECT server_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")
+      .get(clientId) as { server_id: string } | undefined
+    if (!row) return
+    db.prepare("UPDATE member_state SET speaking = 0 WHERE server_id = ? AND client_id = ?").run(row.server_id, clientId)
+    setMemberSpeaking(clientId, false)
+    const snap = getMemberSnapshot(row.server_id, clientId)
+    if (snap) emitMemberUpdated(row.server_id, snap)
   }
 })
 createMediaTcpServer(app.log, {
@@ -397,17 +561,17 @@ createMediaTcpServer(app.log, {
     db.prepare("UPDATE member_state SET speaking = ? WHERE server_id = ? AND client_id = ?").run(speaking ? 1 : 0, row.server_id, clientId)
     const snap = getMemberSnapshot(row.server_id, clientId)
     if (!snap) return
-    emitToServer(row.server_id, {
-      type: "member_updated",
-      member: {
-        clientId: snap.client_id,
-        displayName: snap.display_name,
-        roomId: snap.room_id,
-        muted: Boolean(snap.muted),
-        deafened: Boolean(snap.deafened),
-        speaking: Boolean(snap.speaking)
-      }
-    })
+    emitMemberUpdated(row.server_id, snap)
+  },
+  onSessionStale: ({ clientId }) => {
+    const row = db
+      .prepare("SELECT server_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")
+      .get(clientId) as { server_id: string } | undefined
+    if (!row) return
+    db.prepare("UPDATE member_state SET speaking = 0 WHERE server_id = ? AND client_id = ?").run(row.server_id, clientId)
+    setMemberSpeaking(clientId, false)
+    const snap = getMemberSnapshot(row.server_id, clientId)
+    if (snap) emitMemberUpdated(row.server_id, snap)
   }
 })
 
@@ -744,6 +908,42 @@ app.get("/v1/servers/:serverId/rooms", async (req, rep) => {
   return rep.send({ rooms: getRooms(params.serverId) })
 })
 
+app.post("/v1/servers/:serverId/rooms/:roomId/sfu-token", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), roomId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string; displayName?: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!config.livekitUrl || !config.livekitApiKey || !config.livekitApiSecret) {
+    return rep.code(503).send({ message: "SFU is not configured" })
+  }
+  const room = db
+    .prepare("SELECT id, kind FROM rooms WHERE server_id = ? AND id = ? LIMIT 1")
+    .get(params.serverId, params.roomId) as { id: string; kind: "voice" | "text" } | undefined
+  if (!room || room.kind !== "voice") return rep.code(404).send({ message: "voice room not found" })
+  const member = db
+    .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ? LIMIT 1")
+    .get(params.serverId, auth.clientId) as { display_name: string } | undefined
+  const roomName = `${params.serverId}:${params.roomId}`
+  const token = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
+    identity: auth.clientId,
+    name: member?.display_name ?? auth.displayName ?? auth.clientId,
+    ttl: config.livekitTokenTtlSec
+  })
+  token.addGrant({
+    room: roomName,
+    roomJoin: true,
+    canPublish: true,
+    canSubscribe: true,
+    canPublishData: true
+  })
+  return rep.send({
+    enabled: true,
+    url: config.livekitUrl,
+    token: await token.toJwt(),
+    roomName,
+    expiresInSec: config.livekitTokenTtlSec
+  })
+})
+
 app.post("/v1/servers/:serverId/channels/:channelId/attachments", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), channelId: z.string().min(1) }).parse(req.params)
   const auth = (req as any).auth as { serverId: string; clientId: string }
@@ -979,10 +1179,17 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   set.add(socket)
   clients.set(key, set)
   wsClientMeta.set(socket, { serverId: auth.serverId, clientId: auth.clientId })
+  const sockKey = clientSocketsKey(auth.serverId, auth.clientId)
+  const sockSet = clientSockets.get(sockKey) ?? new Set<WebSocket>()
+  sockSet.add(socket)
+  clientSockets.set(sockKey, sockSet)
+  touchLastSeen(auth.serverId, auth.clientId)
 
-  socket.send(JSON.stringify({ type: "hello", clientId: auth.clientId, serverId: auth.serverId } satisfies WsServerEvent))
+  socket.send(
+    JSON.stringify({ type: "hello", clientId: auth.clientId, serverId: auth.serverId, serverGeneration } satisfies WsServerEvent)
+  )
   socket.send(JSON.stringify({ type: "rooms_snapshot", rooms: getRooms(auth.serverId) } satisfies WsServerEvent))
-  socket.send(JSON.stringify({ type: "roster_snapshot", roomId: null, members: getRoster(auth.serverId, null) } satisfies WsServerEvent))
+  sendPresenceSnapshotToSocket(socket, auth.serverId)
   for (const [clientId, state] of screenShareStateByClient.entries()) {
     if (state.serverId !== auth.serverId || !state.active) continue
     socket.send(JSON.stringify({ type: "screen_share_state", clientId, roomId: state.roomId, active: true } satisfies WsServerEvent))
@@ -992,6 +1199,10 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     try {
       const event = JSON.parse(String(msg.data)) as WsClientEvent
       if (event.type === "join_room") {
+        const prevRow = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        const prevRoomId = prevRow?.room_id ?? null
         const forceMutedInLobby = isLobbyVoiceRoom(auth.serverId, event.roomId)
         db.prepare(
           "UPDATE member_state SET room_id = ?, speaking = 0, muted = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?"
@@ -1011,26 +1222,19 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           roomId: event.roomId,
           active: keepScreenShareActive
         })
+        db.prepare("UPDATE member_state SET screen_sharing = ? WHERE server_id = ? AND client_id = ?").run(
+          keepScreenShareActive ? 1 : 0,
+          auth.serverId,
+          auth.clientId
+        )
         if (keepScreenShareActive) {
           emitScreenShareState(auth.serverId, auth.clientId, event.roomId, true)
         } else {
           emitScreenShareState(auth.serverId, auth.clientId, event.roomId, false)
         }
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
-        if (snap) {
-          emitToServer(auth.serverId, {
-            type: "member_updated",
-            member: {
-              clientId: snap.client_id,
-              displayName: snap.display_name,
-              roomId: snap.room_id,
-              muted: Boolean(snap.muted),
-              deafened: Boolean(snap.deafened),
-              speaking: Boolean(snap.speaking)
-            }
-          })
-        }
-        emitToServer(auth.serverId, { type: "roster_snapshot", roomId: event.roomId, members: getRoster(auth.serverId, event.roomId) })
+        if (snap) emitMemberUpdated(auth.serverId, snap)
+        emitRosterSnapshots(auth.serverId, [prevRoomId, event.roomId, null])
         if (isVoiceRoomId(auth.serverId, event.roomId)) {
           markForceScreenRelay(event.roomId, auth.clientId)
           notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
@@ -1044,66 +1248,91 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         markForceScreenRelay(event.roomId, auth.clientId)
         notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
       } else if (event.type === "leave_room") {
-        db.prepare("UPDATE member_state SET room_id = NULL, speaking = 0 WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
+        const prevRow = db
+          .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
+          .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+        const prevRoomId = prevRow?.room_id ?? null
+        db.prepare(
+          "UPDATE member_state SET room_id = NULL, speaking = 0, screen_sharing = 0, watching_screen = 0 WHERE server_id = ? AND client_id = ?"
+        ).run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)
         setMemberSpeaking(auth.clientId, false)
         for (const forced of forceScreenRelayByRoom.values()) {
           forced.delete(auth.clientId)
         }
         screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId: null, active: false })
-        emitScreenShareState(auth.serverId, auth.clientId, null, false)
+        emitScreenShareState(auth.serverId, auth.clientId, prevRoomId, false)
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
-        if (snap) {
-          emitToServer(auth.serverId, {
-            type: "member_updated",
-            member: {
-              clientId: snap.client_id,
-              displayName: snap.display_name,
-              roomId: snap.room_id,
-              muted: Boolean(snap.muted),
-              deafened: Boolean(snap.deafened),
-              speaking: Boolean(snap.speaking)
-            }
-          })
+        if (snap) emitMemberUpdated(auth.serverId, snap)
+        emitRosterSnapshots(auth.serverId, [prevRoomId, null])
+      } else if (event.type === "sync_presence") {
+        const prevSnap = getMemberSnapshot(auth.serverId, auth.clientId)
+        const prevRoomId = prevSnap?.room_id ?? null
+        const roomId = event.roomId
+        const forceMutedInLobby = roomId ? isLobbyVoiceRoom(auth.serverId, roomId) : false
+        const effectiveMuted = forceMutedInLobby ? true : event.muted
+        const roomChanged = prevRoomId !== roomId
+        db.prepare(
+          `UPDATE member_state SET room_id = ?, muted = ?, deafened = ?, screen_sharing = ?, watching_screen = ?,
+           speaking = CASE WHEN ? THEN 0 ELSE speaking END, last_seen = datetime('now')
+           WHERE server_id = ? AND client_id = ?`
+        ).run(
+          roomId,
+          effectiveMuted ? 1 : 0,
+          event.deafened ? 1 : 0,
+          event.screenSharing ? 1 : 0,
+          event.watchingScreen ? 1 : 0,
+          roomChanged ? 1 : 0,
+          auth.serverId,
+          auth.clientId
+        )
+        setMemberRoom(auth.clientId, roomId)
+        setMemberFlags(auth.clientId, effectiveMuted, event.deafened)
+        if (roomChanged) setMemberSpeaking(auth.clientId, false)
+        const active = Boolean(event.screenSharing && roomId)
+        screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId, active })
+        emitScreenShareState(auth.serverId, auth.clientId, roomId, active)
+        const snap = getMemberSnapshot(auth.serverId, auth.clientId)
+        if (snap) emitMemberUpdated(auth.serverId, snap)
+        emitRosterSnapshots(auth.serverId, [prevRoomId, roomId, null])
+        if (roomId && isVoiceRoomId(auth.serverId, roomId)) {
+          markForceScreenRelay(roomId, auth.clientId)
+          notifyActiveScreenSharerToResync(auth.serverId, roomId, auth.clientId)
         }
+      } else if (event.type === "set_watching_screen") {
+        db.prepare("UPDATE member_state SET watching_screen = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
+          event.watching ? 1 : 0,
+          auth.serverId,
+          auth.clientId
+        )
+        const snap = getMemberSnapshot(auth.serverId, auth.clientId)
+        if (snap) emitMemberUpdated(auth.serverId, snap)
       } else if (event.type === "set_mute") {
         const room = db
           .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
           .get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
         const forceMutedInLobby = Boolean(room?.room_id && isLobbyVoiceRoom(auth.serverId, room.room_id))
         const effectiveMuted = forceMutedInLobby ? true : event.muted
-        db.prepare("UPDATE member_state SET muted = ? WHERE server_id = ? AND client_id = ?").run(effectiveMuted ? 1 : 0, auth.serverId, auth.clientId)
+        db.prepare("UPDATE member_state SET muted = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
+          effectiveMuted ? 1 : 0,
+          auth.serverId,
+          auth.clientId
+        )
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           setMemberFlags(auth.clientId, Boolean(snap.muted), Boolean(snap.deafened))
-          emitToServer(auth.serverId, {
-            type: "member_updated",
-            member: {
-              clientId: snap.client_id,
-              displayName: snap.display_name,
-              roomId: snap.room_id,
-              muted: Boolean(snap.muted),
-              deafened: Boolean(snap.deafened),
-              speaking: Boolean(snap.speaking)
-            }
-          })
+          emitMemberUpdated(auth.serverId, snap)
         }
       } else if (event.type === "set_deafen") {
-        db.prepare("UPDATE member_state SET deafened = ? WHERE server_id = ? AND client_id = ?").run(event.deafened ? 1 : 0, auth.serverId, auth.clientId)
+        db.prepare("UPDATE member_state SET deafened = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
+          event.deafened ? 1 : 0,
+          auth.serverId,
+          auth.clientId
+        )
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
         if (snap) {
           setMemberFlags(auth.clientId, Boolean(snap.muted), Boolean(snap.deafened))
-          emitToServer(auth.serverId, {
-            type: "member_updated",
-            member: {
-              clientId: snap.client_id,
-              displayName: snap.display_name,
-              roomId: snap.room_id,
-              muted: Boolean(snap.muted),
-              deafened: Boolean(snap.deafened),
-              speaking: Boolean(snap.speaking)
-            }
-          })
+          emitMemberUpdated(auth.serverId, snap)
         }
       } else if (event.type === "set_peer_volume") {
         if (
@@ -1129,20 +1358,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           auth.clientId
         )
         const snap = getMemberSnapshot(auth.serverId, auth.clientId)
-        if (snap) {
-          emitToServer(auth.serverId, {
-            type: "member_updated",
-            member: {
-              clientId: snap.client_id,
-              displayName: snap.display_name,
-              roomId: snap.room_id,
-              muted: Boolean(snap.muted),
-              deafened: Boolean(snap.deafened),
-              speaking: Boolean(snap.speaking)
-            }
-          })
-        }
+        if (snap) emitMemberUpdated(auth.serverId, snap)
       } else if (event.type === "ping") {
+        touchLastSeen(auth.serverId, auth.clientId)
         socket.send(JSON.stringify({ type: "pong", ts: event.ts } satisfies WsServerEvent))
       } else if (event.type === "screen_chunk") {
         if (typeof event.chunkBase64 !== "string" || event.chunkBase64.length === 0) {
@@ -1203,10 +1421,17 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         const roomId = room?.room_id ?? null
         const active = Boolean(event.active && roomId)
         screenShareStateByClient.set(auth.clientId, { serverId: auth.serverId, roomId, active })
+        db.prepare("UPDATE member_state SET screen_sharing = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
+          active ? 1 : 0,
+          auth.serverId,
+          auth.clientId
+        )
         if (config.screenLog) {
           app.log.info({ msg: "set_screen_share", clientId: auth.clientId, roomId, active })
         }
         emitScreenShareState(auth.serverId, auth.clientId, roomId, active)
+        const snap = getMemberSnapshot(auth.serverId, auth.clientId)
+        if (snap) emitMemberUpdated(auth.serverId, snap)
       }
     } catch {
       socket.send(JSON.stringify({ type: "error", message: "bad ws message" } satisfies WsServerEvent))
@@ -1214,34 +1439,16 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   }
 
   socket.onclose = () => {
-    const snap = getMemberSnapshot(auth.serverId, auth.clientId)
-    db.prepare("DELETE FROM member_state WHERE server_id = ? AND client_id = ?").run(auth.serverId, auth.clientId)
-    removeMember(auth.clientId)
-    const shareSnap = screenShareStateByClient.get(auth.clientId)
-    screenShareStateByClient.delete(auth.clientId)
-    for (const forced of forceScreenRelayByRoom.values()) {
-      forced.delete(auth.clientId)
-    }
-    const shareRoomEmit =
-      shareSnap?.active && shareSnap.roomId ? shareSnap.roomId : null
-    emitScreenShareState(auth.serverId, auth.clientId, shareRoomEmit, false)
-    if (snap) {
-      emitToServer(auth.serverId, {
-        type: "member_updated",
-        member: {
-          clientId: snap.client_id,
-          displayName: snap.display_name,
-          roomId: null,
-          muted: Boolean(snap.muted),
-          deafened: Boolean(snap.deafened),
-          speaking: false
-        }
-      })
-    }
+    const sockKey = clientSocketsKey(auth.serverId, auth.clientId)
+    const sockSet = clientSockets.get(sockKey)
+    sockSet?.delete(socket)
+    if (sockSet && sockSet.size === 0) clientSockets.delete(sockKey)
+    wsClientMeta.delete(socket)
     const bucket = clients.get(key)
     bucket?.delete(socket)
-    wsClientMeta.delete(socket)
     if (bucket && bucket.size === 0) clients.delete(key)
+    if (sockSet && sockSet.size > 0) return
+    evictMemberPresence(auth.serverId, auth.clientId)
   }
 })
 

@@ -32,7 +32,18 @@ export const config = {
   /** Set `SCREEN_LOG=1` to log screen_chunk drops, relay stats (sampled), and set_screen_share. */
   screenLog: process.env.SCREEN_LOG === "1" || process.env.SCREEN_LOG === "true",
   /** Verbose voice pipeline tracing (capture/send/mix/playout correlation aid). */
-  voiceTrace: process.env.VOICE_TRACE === "1" || process.env.VOICE_TRACE === "true"
+  voiceTrace: process.env.VOICE_TRACE === "1" || process.env.VOICE_TRACE === "true",
+  /** Optional self-hosted LiveKit SFU endpoint, e.g. wss://livekit.example.com. */
+  livekitUrl: process.env.LIVEKIT_URL?.trim() ?? "",
+  livekitApiKey: process.env.LIVEKIT_API_KEY?.trim() ?? "",
+  livekitApiSecret: process.env.LIVEKIT_API_SECRET?.trim() ?? "",
+  livekitTokenTtlSec: Number(process.env.LIVEKIT_TOKEN_TTL_SEC ?? 60 * 30),
+  /** Evict member_state when last_seen is older than this (seconds). */
+  presenceTtlSec: Number(process.env.PRESENCE_TTL_SEC ?? 45),
+  /** How often the server scans for stale presence rows (seconds). */
+  presenceSweepSec: Number(process.env.PRESENCE_SWEEP_SEC ?? 30),
+  /** UDP/TCP media session idle timeout when in a voice room (seconds). */
+  mediaSessionIdleSec: Number(process.env.MEDIA_SESSION_IDLE_SEC ?? 60)
 }
 
 if (config.tlsEnabled && (!config.tlsCertPath || !config.tlsKeyPath)) {

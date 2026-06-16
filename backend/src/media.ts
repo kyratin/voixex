@@ -45,6 +45,7 @@ type MemberSession = {
   speaking: boolean
   lastSpeakingSignalAtMs: number
   lastProbeAckAtMs: number
+  lastPacketAtMs: number
   rxAudioFrames: number
   txAudioFrames: number
   rxOpusDecodeDropped: number
@@ -309,6 +310,7 @@ function calcRmsEnergyPcm16(payload: Buffer): number {
 
 type MediaHooks = {
   onSpeakingChanged?: (input: { clientId: string; speaking: boolean }) => void
+  onSessionStale?: (input: { clientId: string }) => void
 }
 
 type DecodedFrame = NonNullable<ReturnType<typeof decryptFrame>>
@@ -363,6 +365,7 @@ function applyHelloForSession(
     speaking: desiredSpeakingByClient.get(input.clientId) ?? existing?.speaking ?? false,
     lastSpeakingSignalAtMs: existing?.lastSpeakingSignalAtMs ?? 0,
     lastProbeAckAtMs: existing?.lastProbeAckAtMs ?? 0,
+    lastPacketAtMs: now,
     rxAudioFrames: existing?.rxAudioFrames ?? 0,
     txAudioFrames: existing?.txAudioFrames ?? 0,
     rxOpusDecodeDropped: existing?.rxOpusDecodeDropped ?? 0,
@@ -390,6 +393,7 @@ function processDecodedPacket(
 ) {
   const key = session.key
   if (!key) return
+  session.lastPacketAtMs = Date.now()
 
   const sec = Math.floor(Date.now() / 1000)
   if (sec !== session.currentSecond) {
@@ -509,6 +513,30 @@ function sendViaTransport(socket: dgram.Socket, session: MemberSession, packet: 
   }
   if (!session.remote) return
   socket.send(packet, session.remote.port, session.remote.address)
+}
+
+function evictStaleMediaSession(clientId: string) {
+  for (const [roomId, speakers] of roomSpeakerBuffers.entries()) {
+    speakers.delete(clientId)
+    if (speakers.size === 0) roomSpeakerBuffers.delete(roomId)
+  }
+  sessions.delete(clientId)
+}
+
+let mediaIdleMonitorStarted = false
+function ensureMediaIdleMonitor(hooks: MediaHooks) {
+  if (mediaIdleMonitorStarted) return
+  mediaIdleMonitorStarted = true
+  setInterval(() => {
+    const now = Date.now()
+    const idleMs = config.mediaSessionIdleSec * 1000
+    for (const [clientId, session] of [...sessions.entries()]) {
+      if (!session.roomId) continue
+      if (now - session.lastPacketAtMs < idleMs) continue
+      evictStaleMediaSession(clientId)
+      hooks.onSessionStale?.({ clientId })
+    }
+  }, 15_000).unref?.()
 }
 
 export function registerTcpHello(
@@ -788,6 +816,8 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       session.rxOpusDecodeDropped = 0
     }
   }, 5000)
+
+  ensureMediaIdleMonitor(hooks)
 
   socket.bind(config.udpPort, config.udpHost, () => {
     logger.info({ udpHost: config.udpHost, udpPort: config.udpPort }, "media UDP server listening")

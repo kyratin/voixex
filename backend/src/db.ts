@@ -26,6 +26,8 @@ export type MemberStateRow = {
   muted: number
   deafened: number
   speaking: number
+  screen_sharing: number
+  watching_screen: number
   last_seen: string
 }
 
@@ -142,10 +144,17 @@ export function initDb(dbPath: string) {
   `)
 
   const memberStateColumns = db.prepare("PRAGMA table_info(member_state)").all() as Array<{ name: string }>
-  const hasDisplayName = memberStateColumns.some((c) => c.name === "display_name")
-  if (!hasDisplayName) {
+  const hasColumn = (name: string) => memberStateColumns.some((c) => c.name === name)
+  if (!hasColumn("display_name")) {
     db.exec("ALTER TABLE member_state ADD COLUMN display_name TEXT DEFAULT ''")
   }
+  if (!hasColumn("screen_sharing")) {
+    db.exec("ALTER TABLE member_state ADD COLUMN screen_sharing INTEGER NOT NULL DEFAULT 0")
+  }
+  if (!hasColumn("watching_screen")) {
+    db.exec("ALTER TABLE member_state ADD COLUMN watching_screen INTEGER NOT NULL DEFAULT 0")
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_member_state_server_room ON member_state(server_id, room_id)")
 
   return db
 }
