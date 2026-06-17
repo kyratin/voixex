@@ -1,6 +1,8 @@
 import type { Metadata } from 'next'
 import { Toaster } from 'sonner'
 import { Analytics } from '@vercel/analytics/next'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { I18nProvider } from '@/lib/i18n/provider'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -32,21 +34,25 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className="font-sans antialiased">
-        {children}
-        <Toaster
-          theme="dark"
-          position="bottom-right"
-          toastOptions={{
-            style: {
-              background: 'var(--popover)',
-              color: 'var(--popover-foreground)',
-              border: '1px solid var(--border)',
-            },
-          }}
-        />
-        <Analytics />
+    <html lang="en" className="dark h-full">
+      <body className="h-full font-sans antialiased">
+        <I18nProvider>
+          <TooltipProvider delayDuration={300}>
+            {children}
+          </TooltipProvider>
+          <Toaster
+            theme="dark"
+            position="bottom-right"
+            toastOptions={{
+              style: {
+                background: 'var(--popover)',
+                color: 'var(--popover-foreground)',
+                border: '1px solid var(--border)',
+              },
+            }}
+          />
+          <Analytics />
+        </I18nProvider>
       </body>
     </html>
   )

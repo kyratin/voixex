@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
+import { useI18n } from "@/lib/i18n/provider"
 
 export interface Message {
   id: string
@@ -51,6 +52,7 @@ export function ChatArea({
   onToggleMemberList,
   canSend = true
 }: ChatAreaProps) {
+  const { t, dict } = useI18n()
   const [messageInput, setMessageInput] = useState("")
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -104,22 +106,22 @@ export function ChatArea({
     const now = new Date()
     const diffMs = now.getTime() - date.getTime()
     const diffMin = Math.floor(diffMs / 60000)
-    if (diffMin < 1) return "just now"
-    if (diffMin < 60) return `${diffMin}m ago`
+    if (diffMin < 1) return t("chat.justNow")
+    if (diffMin < 60) return t("chat.minutesAgo", { n: diffMin })
     const diffHr = Math.floor(diffMin / 60)
-    if (diffHr < 24) return `${diffHr}h ago`
+    if (diffHr < 24) return t("chat.hoursAgo", { n: diffHr })
     const diffDay = Math.floor(diffHr / 24)
-    if (diffDay < 7) return `${diffDay}d ago`
+    if (diffDay < 7) return t("chat.daysAgo", { n: diffDay })
     return formatFullDate(date)
   }
 
   const formatFullDate = (date: Date) => {
-    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    const months = dict.time.months
     return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()} ${formatTime(date)}`
   }
 
   return (
-    <div className="flex h-full flex-1 flex-col bg-background">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
         <div className="flex items-center gap-2">
           <Hash className="h-5 w-5 text-muted-foreground" />
@@ -135,7 +137,7 @@ export function ChatArea({
               <Users className="h-4 w-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Toggle member list</TooltipContent>
+          <TooltipContent>{t("chat.toggleMembers")}</TooltipContent>
         </Tooltip>
       </div>
 
@@ -146,18 +148,18 @@ export function ChatArea({
               <MessageSquare className="h-8 w-8 text-muted-foreground" />
             </div>
             <div>
-              <h3 className="text-base font-semibold text-foreground">Welcome to #{channelName}</h3>
+              <h3 className="text-base font-semibold text-foreground">{t("chat.welcomeTitle", { channel: channelName })}</h3>
               <p className="mt-1 text-sm text-muted-foreground">
-                This is the start of the channel. Send a message to begin the conversation.
+                {t("chat.welcomeEmpty")}
               </p>
             </div>
           </div>
         ) : (
           <div className="p-4">
             <div className="mb-4 pb-4 border-b border-border">
-              <h3 className="text-base font-semibold text-foreground">Welcome to #{channelName}</h3>
+              <h3 className="text-base font-semibold text-foreground">{t("chat.welcomeTitle", { channel: channelName })}</h3>
               <p className="mt-1 text-sm text-muted-foreground">
-                This is the beginning of the channel.
+                {t("chat.welcomeStart")}
               </p>
             </div>
 
@@ -187,7 +189,7 @@ export function ChatArea({
                         </TooltipContent>
                       </Tooltip>
                       {message.isEdited && (
-                        <span className="text-[10px] text-muted-foreground">(edited)</span>
+                        <span className="text-[10px] text-muted-foreground">{t("common.edited")}</span>
                       )}
                     </div>
                     <p className="text-sm text-foreground/90 break-words leading-relaxed">{message.content}</p>
@@ -206,7 +208,7 @@ export function ChatArea({
                               <audio controls className="w-full" src={attachment.url} />
                             ) : (
                               <a href={attachment.url} target="_blank" rel="noreferrer" className="text-sm text-primary hover:underline">
-                                Download attachment
+                                {t("common.downloadAttachment")}
                               </a>
                             )}
                           </div>
@@ -257,14 +259,14 @@ export function ChatArea({
                 {uploading ? <Spinner className="h-5 w-5" /> : <Paperclip className="h-5 w-5" />}
               </button>
             </TooltipTrigger>
-            <TooltipContent>{uploading ? "Uploading..." : "Attach file"}</TooltipContent>
+            <TooltipContent>{uploading ? t("chat.uploading") : t("chat.attachFile")}</TooltipContent>
           </Tooltip>
           <input
             type="text"
             value={messageInput}
             onChange={(e) => setMessageInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={canSend ? `Message #${channelName}` : "Messaging disabled"}
+            placeholder={canSend ? t("chat.messagePlaceholder", { channel: channelName }) : t("chat.messagingDisabled")}
             disabled={!canSend}
             className="flex-1 bg-transparent py-1.5 text-sm text-foreground placeholder:text-muted-foreground outline-none disabled:cursor-not-allowed"
           />
@@ -283,7 +285,7 @@ export function ChatArea({
                 <Send className="h-4 w-4" />
               </button>
             </TooltipTrigger>
-            <TooltipContent>Send message</TooltipContent>
+            <TooltipContent>{t("chat.sendMessage")}</TooltipContent>
           </Tooltip>
         </div>
       </div>

@@ -81,7 +81,8 @@ async function main() {
       muted: true,
       deafened: false,
       screenSharing: false,
-      watchingScreen: false
+      watchingScreen: false,
+      mediaEngine: "legacy"
     })
   )
   await new Promise((r) => setTimeout(r, 500))

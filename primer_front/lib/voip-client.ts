@@ -21,6 +21,8 @@ export type SfuTokenResult = {
   expiresInSec: number
 }
 
+export type MediaEngineMode = "legacy" | "webrtc"
+
 export type RosterMember = {
   clientId: string
   displayName: string
@@ -29,6 +31,7 @@ export type RosterMember = {
   speaking: boolean
   screenSharing?: boolean
   watchingScreen?: boolean
+  mediaEngine?: MediaEngineMode
 }
 
 export type RealtimeState = {
@@ -442,7 +445,8 @@ export class VoipClient {
           deafened: typed.member.deafened,
           speaking: typed.member.speaking,
           screenSharing: typed.member.screenSharing,
-          watchingScreen: typed.member.watchingScreen
+          watchingScreen: typed.member.watchingScreen,
+          mediaEngine: typed.member.mediaEngine === "webrtc" ? "webrtc" : "legacy"
         }
         if (typed.member.roomId) {
           const next = this.state.rosterByRoom[typed.member.roomId] ?? []
@@ -509,6 +513,7 @@ export class VoipClient {
     deafened: boolean
     screenSharing: boolean
     watchingScreen: boolean
+    mediaEngine?: MediaEngineMode
   }) {
     this.sendWsEvent({ type: "sync_presence", ...input })
   }

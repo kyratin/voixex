@@ -113,6 +113,7 @@ Artifacts are written to `desktop-client/release/`.
 |-------|----------------|
 | Empty mic list | OS microphone permission; restart app |
 | No audio / dropouts | Firewall (TCP API + UDP media); `PUBLIC_UDP_HOST` on server |
+| TCP voice always falls back to UDP | Expose media port for **TCP** too (`50000:50000/tcp` in docker-compose); backend needs TCP media (`server` branch, image newer than `0.1.14`) |
 | Metallic/robotic voice through server | Update backend to image `kyratinkokko/voixex:0.1.14` or newer |
 | `npm install` EACCES after Docker build | Re-run `docker-electron-build.sh` (it fixes ownership) |
 

@@ -12,7 +12,7 @@ import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
 import { WebRtcMediaSession } from "@/lib/webrtc-media"
-import { createSpeexNoiseWorklet } from "@/lib/speex-capture"
+import { connectMonoSourceToTap, createMonoMediaStreamTap, createSpeexNoiseWorklet } from "@/lib/speex-capture"
 import type { SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -24,11 +24,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Separator } from "@/components/ui/separator"
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
-import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
-import { Monitor, MonitorOff, Users, ExternalLink, EyeOff, ChevronDown, Wifi, WifiOff, Headphones, Server, ScreenShare, BarChart3 } from "lucide-react"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { MicLevelMeter, type MicLevelMeterSample } from "@/components/voip/mic-level-meter"
+import { ConnectServerDialog } from "@/components/voip/connect-server-dialog"
+import { LanguageSelector } from "@/components/voip/language-selector"
+import { VoiceChannelView } from "@/components/voip/voice-channel-view"
+import { useI18n } from "@/lib/i18n/provider"
+import { Headphones, Server } from "lucide-react"
 
 /** Build-time defaults for Electron (NEXT_PUBLIC_* inlined at `next build`). */
 function parseNextPublicApiBase(): { host: string; port: string; useHttps: boolean } | null {
@@ -72,10 +76,41 @@ function effectiveVoiceUdpPort(announcedPort: number, overrideStr: string): numb
   return n
 }
 
+function voiceTransportFailureHint(msg: string, triedTransport: "udp" | "tcp"): string {
+  if (triedTransport !== "tcp") return msg
+  if (/ECONNREFUSED|connect timeout|TCP connect|socket closed before HELLO/i.test(msg)) {
+    return `${msg}. TCP is not reachable on the media port — expose "50000:50000/tcp" in docker-compose and run a backend image with TCP media support.`
+  }
+  return msg
+}
+
+type ServerAppearance = {
+  serverBannerUrl?: string
+  channelBanners?: Record<string, string>
+}
+
+function loadServerAppearance(serverId: string): ServerAppearance {
+  if (!serverId) return {}
+  try {
+    const raw = localStorage.getItem(`voixex-server-appearance-${serverId}`)
+    if (!raw) return {}
+    return JSON.parse(raw) as ServerAppearance
+  } catch {
+    return {}
+  }
+}
+
+function saveServerAppearance(serverId: string, appearance: ServerAppearance) {
+  if (!serverId) return
+  localStorage.setItem(`voixex-server-appearance-${serverId}`, JSON.stringify(appearance))
+}
+
 const CONNECTION_DEFAULTS = getBuildTimeConnectionDefaults()
 const VOICE_TRACE = process.env.NEXT_PUBLIC_VOICE_TRACE === "1"
 
 export default function VoIPApp() {
+  const { t } = useI18n()
+  type AppSettingsTab = "language" | "voice" | "keybinds" | "server_general" | "server_channels" | "server_roles"
   type SavedServerProfile = {
     serverId: string
     serverName: string
@@ -122,6 +157,11 @@ export default function VoIPApp() {
     micGainNode: GainNode
     captureHighpass: BiquadFilterNode
     speexWorklet: SpeexWorkletNode | null
+    postDspGain: GainNode
+    webrtcMicMerger: ChannelMergerNode
+    /** Processed mic branch for LiveKit (parallel to ScriptProcessor UDP uplink). */
+    webrtcMicDestNode: MediaStreamAudioDestinationNode
+    monitorMicMerger: ChannelMergerNode
     captureSinkNode: MediaStreamAudioDestinationNode
     capturePumpGainNode: GainNode
     monitorDestNode: MediaStreamAudioDestinationNode
@@ -162,6 +202,7 @@ export default function VoIPApp() {
   const [udpPortOverride, setUdpPortOverride] = useState(CONNECTION_DEFAULTS.udpPort)
   const [voiceTransport, setVoiceTransport] = useState<"udp" | "tcp">("udp")
   const [mediaEngine, setMediaEngine] = useState<"legacy" | "webrtc">("legacy")
+  const mediaEngineRef = useRef(mediaEngine)
   const [displayNameInput, setDisplayNameInput] = useState("User")
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
@@ -197,9 +238,8 @@ export default function VoIPApp() {
   const voicePlayoutBufferedRef = useRef(0)
   const [isSpeakingNow, setIsSpeakingNow] = useState(false)
   const [hasDesktopBridge, setHasDesktopBridge] = useState(false)
-  const [showVoiceStatsPanel, setShowVoiceStatsPanel] = useState(false)
   const [showAppSettings, setShowAppSettings] = useState(false)
-  const [appSettingsTab, setAppSettingsTab] = useState<"voice" | "keybinds" | "server_general" | "server_channels" | "server_roles">("voice")
+  const [appSettingsTab, setAppSettingsTab] = useState<AppSettingsTab>("voice")
   const [audioDevices, setAudioDevices] = useState<{ input: AudioDevice[]; output: AudioDevice[] }>({ input: [], output: [] })
   const [selectedDevices, setSelectedDevices] = useState<{ inputId: string | null; outputId: string | null }>({
     inputId: null,
@@ -225,14 +265,19 @@ export default function VoIPApp() {
   const [monitorVolumePct, setMonitorVolumePct] = useState(15)
   /** Off by default: condenser mics pump with aggressive gating; browser NS + mic level is enough. */
   const [gateEnabled, setGateEnabled] = useState(false)
-  const [gateThreshold, setGateThreshold] = useState(150)
+  /** Below this peak: silence (zone 1). */
+  const [gateMuteThreshold, setGateMuteThreshold] = useState(120)
+  /** Between mute and open thresholds: reduced level (zone 2). */
+  const [gateFloorPct, setGateFloorPct] = useState(15)
+  /** Above this peak: full passthrough (zone 3). */
+  const [gateOpenThreshold, setGateOpenThreshold] = useState(320)
   const [gateReleaseMs, setGateReleaseMs] = useState(180)
   const [playbackGateEnabled, setPlaybackGateEnabled] = useState(false)
   const [playbackGateThreshold, setPlaybackGateThreshold] = useState(96)
   const [playbackHighpassEnabled, setPlaybackHighpassEnabled] = useState(false)
   const [playbackHighpassHz, setPlaybackHighpassHz] = useState(85)
   const [playbackLimiterEnabled, setPlaybackLimiterEnabled] = useState(false)
-  const [micMeter, setMicMeter] = useState<{ rms: number; peak: number } | null>(null)
+  const [micMeter, setMicMeter] = useState<MicLevelMeterSample | null>(null)
   const [keybinds, setKeybinds] = useState<{ toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }>({
     toggleMute: null,
     toggleDeafen: null,
@@ -249,13 +294,24 @@ export default function VoIPApp() {
   const [activeScreenSharerName, setActiveScreenSharerName] = useState("")
   const [screenImageUrl, setScreenImageUrl] = useState<string | null>(null)
   const [screenVideoUrl, setScreenVideoUrl] = useState<string | null>(null)
+  const [hasRemoteWebRtcVideo, setHasRemoteWebRtcVideo] = useState(false)
   const [localScreenPreviewUrl, setLocalScreenPreviewUrl] = useState<string | null>(null)
   const [screenSources, setScreenSources] = useState<Array<{ id: string; name: string }>>([])
   const [selectedScreenSourceId, setSelectedScreenSourceId] = useState<string | null>(null)
   const [screenResolution, setScreenResolution] = useState("1280x720")
   const [screenFps, setScreenFps] = useState(30)
   const [screenBitrateKbps, setScreenBitrateKbps] = useState(3500)
+  const [screenShareWithAudio, setScreenShareWithAudio] = useState(false)
+  const screenShareWithAudioRef = useRef(false)
   const [showingStreamWindow, setShowingStreamWindow] = useState(false)
+  const [streamVideoFullscreen, setStreamVideoFullscreen] = useState(false)
+  const [streamVolumePct, setStreamVolumePct] = useState(100)
+  const [streamLoading, setStreamLoading] = useState(false)
+  const [serverAppearance, setServerAppearance] = useState<ServerAppearance>({})
+  const [serverBannerDraft, setServerBannerDraft] = useState("")
+  const [channelBannerChannelId, setChannelBannerChannelId] = useState("")
+  const [channelBannerDraft, setChannelBannerDraft] = useState("")
+  const streamVolumePctRef = useRef(streamVolumePct)
   const screenShareTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const screenCaptureStreamRef = useRef<MediaStream | null>(null)
   const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -278,6 +334,10 @@ export default function VoIPApp() {
   const screenRecorderResyncAtRef = useRef(0)
   const screenRecorderRestartingRef = useRef(false)
   const lastViewerScreenResyncReqRef = useRef<{ room: string; at: number } | null>(null)
+  const screenInitSegmentRef = useRef<ArrayBuffer | null>(null)
+  const pendingLegacyStreamResyncRef = useRef(false)
+  const screenVideoUrlRef = useRef<string | null>(null)
+  const legacyStreamHasBufferedRef = useRef(false)
   const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
   const localPresenceToggleRef = useRef(false)
   const isWatchingScreenRef = useRef(false)
@@ -299,11 +359,15 @@ export default function VoIPApp() {
   const monitorEnabledRef = useRef(monitorEnabled)
   const monitorVolumePctRef = useRef(monitorVolumePct)
   const gateEnabledRef = useRef(gateEnabled)
-  const gateThresholdRef = useRef(gateThreshold)
+  const gateMuteThresholdRef = useRef(gateMuteThreshold)
+  const gateOpenThresholdRef = useRef(gateOpenThreshold)
   const gateReleaseMsRef = useRef(gateReleaseMs)
+  const gateFloorPctRef = useRef(gateFloorPct)
   const speexNoiseSuppressionEnabledRef = useRef(speexNoiseSuppressionEnabled)
-  /** Persists noise-gate envelope across 20ms frames; resetting each frame caused pumping on dynamic mics. */
+  /** Persists noise-gate envelope across frames. */
   const uplinkGateEnvRef = useRef(0)
+  const uplinkGateZoneRef = useRef<"mute" | "duck" | "open">("mute")
+  const uplinkGateGainRef = useRef(1)
   const playbackGateEnabledRef = useRef(playbackGateEnabled)
   const playbackGateThresholdRef = useRef(playbackGateThreshold)
   const playbackHighpassEnabledRef = useRef(playbackHighpassEnabled)
@@ -377,6 +441,7 @@ export default function VoIPApp() {
     const nextVolume = Number.isFinite(volumePct) ? Math.max(0, Math.min(200, Math.round(volumePct))) : 100
     setPeerVolumeStored(sid, roomId, targetClientId, targetName, nextVolume)
     setPeerVolumeRevision((r) => r + 1)
+    webRtcSessionRef.current?.setPeerVoiceVolume(targetClientId, nextVolume)
     const timerKey = `${roomId}:${targetClientId}`
     const prev = peerVolTimersRef.current[timerKey]
     if (prev) clearTimeout(prev)
@@ -549,6 +614,7 @@ export default function VoIPApp() {
         if (u.id === me) continue
         const pct = getPeerVolume(peerVolServerId, roomId, u.id, u.name)
         ws.setPeerVolume(roomId, u.id, pct)
+        webRtcSessionRef.current?.setPeerVoiceVolume(u.id, pct)
       }
     }
   }, [hasDesktopBridge, wsForVoiceJoin, isInVoice, peerVolServerId, peerVolRosterSig])
@@ -566,16 +632,17 @@ export default function VoIPApp() {
       muted: mutedRef.current,
       deafened: deafenedRef.current,
       screenSharing: isScreenSharingRef.current,
-      watchingScreen: isWatchingScreenRef.current
+      watchingScreen: isWatchingScreenRef.current,
+      mediaEngine: mediaEngineRef.current
     })
-  }, [wsForVoiceJoin, isVoiceSplit, wsConnected, isInVoice, currentVoiceChannel, uiClient, voiceClient])
+  }, [wsForVoiceJoin, isVoiceSplit, wsConnected, isInVoice, currentVoiceChannel, mediaEngine, uiClient, voiceClient])
 
   useEffect(() => {
     const watching = Boolean(
       isInVoice &&
         currentVoiceChannel &&
         !isScreenSharing &&
-        (screenVideoUrl || screenImageUrl || (showingStreamWindow && activeScreenSharerName))
+        (screenVideoUrl || screenImageUrl || hasRemoteWebRtcVideo || (showingStreamWindow && activeScreenSharerName))
     )
     isWatchingScreenRef.current = watching
     if (!wsForVoiceJoin || !currentVoiceChannel) return
@@ -587,6 +654,7 @@ export default function VoIPApp() {
     isScreenSharing,
     screenVideoUrl,
     screenImageUrl,
+    hasRemoteWebRtcVideo,
     showingStreamWindow,
     activeScreenSharerName,
     uiClient,
@@ -657,7 +725,10 @@ export default function VoIPApp() {
         monitorVolumePct?: number
         gateEnabled?: boolean
         gateThreshold?: number
+        gateMuteThreshold?: number
+        gateOpenThreshold?: number
         gateReleaseMs?: number
+        gateFloorPct?: number
         playbackGateEnabled?: boolean
         playbackGateThreshold?: number
         playbackHighpassEnabled?: boolean
@@ -676,8 +747,20 @@ export default function VoIPApp() {
       if (typeof parsed.monitorEnabled === "boolean") setMonitorEnabled(parsed.monitorEnabled)
       if (typeof parsed.monitorVolumePct === "number") setMonitorVolumePct(Math.max(0, Math.min(200, Math.round(parsed.monitorVolumePct))))
       if (typeof parsed.gateEnabled === "boolean") setGateEnabled(parsed.gateEnabled)
-      if (typeof parsed.gateThreshold === "number") setGateThreshold(Math.max(0, Math.min(4000, Math.round(parsed.gateThreshold))))
-      if (typeof parsed.gateReleaseMs === "number") setGateReleaseMs(Math.max(0, Math.min(2000, Math.round(parsed.gateReleaseMs))))
+      const legacyMute =
+        typeof parsed.gateMuteThreshold === "number"
+          ? parsed.gateMuteThreshold
+          : typeof parsed.gateThreshold === "number"
+            ? parsed.gateThreshold
+            : null
+      if (legacyMute !== null) setGateMuteThreshold(Math.max(0, Math.min(4000, Math.round(legacyMute))))
+      if (typeof parsed.gateOpenThreshold === "number") {
+        setGateOpenThreshold(Math.max(0, Math.min(4000, Math.round(parsed.gateOpenThreshold))))
+      } else if (legacyMute !== null) {
+        setGateOpenThreshold(Math.max(legacyMute + 80, Math.min(4000, Math.round(legacyMute * 2.2))))
+      }
+      if (typeof parsed.gateReleaseMs === "number") setGateReleaseMs(Math.max(80, Math.min(2000, Math.round(parsed.gateReleaseMs))))
+      if (typeof parsed.gateFloorPct === "number") setGateFloorPct(Math.max(1, Math.min(50, Math.round(parsed.gateFloorPct))))
       // Playback DSP stays manual-only from Settings.
       // Do not auto-restore these toggles from old profiles/localStorage.
       if (typeof parsed.useOpusUplink === "boolean") setUseOpusUplink(parsed.useOpusUplink)
@@ -699,8 +782,10 @@ export default function VoIPApp() {
         monitorEnabled,
         monitorVolumePct,
         gateEnabled,
-        gateThreshold,
+        gateMuteThreshold,
+        gateOpenThreshold,
         gateReleaseMs,
+        gateFloorPct,
         playbackGateEnabled,
         playbackGateThreshold,
         playbackHighpassEnabled,
@@ -719,8 +804,10 @@ export default function VoIPApp() {
     monitorEnabled,
     monitorVolumePct,
     gateEnabled,
-    gateThreshold,
+    gateMuteThreshold,
+    gateOpenThreshold,
     gateReleaseMs,
+    gateFloorPct,
     playbackGateEnabled,
     playbackGateThreshold,
     playbackHighpassEnabled,
@@ -770,6 +857,15 @@ export default function VoIPApp() {
   }, [isDeafened])
 
   useEffect(() => {
+    mediaEngineRef.current = mediaEngine
+    webRtcSessionRef.current?.setPlayRemoteVoice(mediaEngine === "webrtc")
+    republishWebRtcMicFromPipeline()
+    if (wsForVoiceJoin) {
+      getVoiceWsClient().syncPresence(buildPresenceSync())
+    }
+  }, [mediaEngine, wsForVoiceJoin, uiClient, voiceClient])
+
+  useEffect(() => {
     micVolumePctRef.current = micVolumePct
     const rt = voicePipelineRef.current
     if (rt) rt.micGainNode.gain.value = micVolumePct / 100
@@ -796,9 +892,17 @@ export default function VoIPApp() {
 
   useEffect(() => {
     gateEnabledRef.current = gateEnabled
-    gateThresholdRef.current = gateThreshold
+    gateMuteThresholdRef.current = gateMuteThreshold
+    gateOpenThresholdRef.current = gateOpenThreshold
     gateReleaseMsRef.current = gateReleaseMs
-  }, [gateEnabled, gateThreshold, gateReleaseMs])
+    gateFloorPctRef.current = gateFloorPct
+  }, [gateEnabled, gateMuteThreshold, gateOpenThreshold, gateReleaseMs, gateFloorPct])
+
+  useEffect(() => {
+    uplinkGateEnvRef.current = 0
+    uplinkGateZoneRef.current = "mute"
+    uplinkGateGainRef.current = 1
+  }, [gateEnabled, gateMuteThreshold, gateOpenThreshold, gateFloorPct, gateReleaseMs])
 
   useEffect(() => {
     speexNoiseSuppressionEnabledRef.current = speexNoiseSuppressionEnabled
@@ -833,6 +937,10 @@ export default function VoIPApp() {
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
     runtime.captureHighpass.disconnect()
+    runtime.postDspGain.disconnect()
+    runtime.webrtcMicMerger.disconnect()
+    runtime.webrtcMicDestNode.disconnect()
+    runtime.monitorMicMerger.disconnect()
     runtime.captureSinkNode.disconnect()
     runtime.capturePumpGainNode.disconnect()
     runtime.monitorDestNode.disconnect()
@@ -849,6 +957,9 @@ export default function VoIPApp() {
       runtime.playbackIdleTimer = null
     }
     uplinkGateEnvRef.current = 0
+    uplinkGateZoneRef.current = "mute"
+    uplinkGateGainRef.current = 1
+    void webRtcSessionRef.current?.unpublishMic()
     void runtime.captureCtx.close()
     void runtime.playbackCtx.close()
     runtime.stream.getTracks().forEach((t) => t.stop())
@@ -865,7 +976,8 @@ export default function VoIPApp() {
         muted: mutedRef.current,
         deafened: deafenedRef.current,
         screenSharing: false,
-        watchingScreen: false
+        watchingScreen: false,
+        mediaEngine: mediaEngineRef.current
       })
     }
   }
@@ -875,49 +987,121 @@ export default function VoIPApp() {
     void window.electronVoice?.setDeafen(deafenedRef.current)
   }
 
+  const buildPresenceSync = () => ({
+    roomId: isInVoiceRef.current && currentVoiceChannelRef.current ? currentVoiceChannelRef.current : null,
+    muted: mutedRef.current,
+    deafened: deafenedRef.current,
+    screenSharing: isScreenSharingRef.current,
+    watchingScreen: isWatchingScreenRef.current,
+    mediaEngine: mediaEngineRef.current
+  })
+
+  const getWebRtcMicTrackFromPipeline = (): MediaStreamTrack | null => {
+    const rt = voicePipelineRef.current
+    if (!rt) return null
+    const processed = rt.webrtcMicDestNode.stream.getAudioTracks()[0]
+    if (processed && processed.readyState === "live") return processed
+    return rt.stream.getAudioTracks()[0] ?? null
+  }
+
+  const republishWebRtcMicFromPipeline = () => {
+    const mic = getWebRtcMicTrackFromPipeline()
+    if (!mic || !webRtcSessionRef.current?.connected) return
+    void webRtcSessionRef.current.publishMicTrack(mic)
+    void webRtcSessionRef.current.setMuted(mutedRef.current)
+  }
+
+  const resolveRosterDisplayName = (clientId: string) => {
+    const rt = latestVoiceStateRef.current ?? latestUiStateRef.current
+    if (!rt) return clientId
+    for (const users of Object.values(rt.rosterByRoom)) {
+      const found = users.find((m) => m.clientId === clientId)
+      if (found) return found.displayName
+    }
+    const lobby = rt.lobby.find((m) => m.clientId === clientId)
+    return lobby?.displayName ?? clientId
+  }
+
+  const applyRemoteWebRtcVideo = (active: boolean, participantIdentity: string | null) => {
+    const roomId = currentVoiceChannelRef.current
+    if (roomId) getVoiceWsClientRef.current().setWatchingScreen(active, roomId)
+    if (active && participantIdentity) {
+      setHasRemoteWebRtcVideo(true)
+      setActiveScreenSharerName(resolveRosterDisplayName(participantIdentity))
+      const legacyActive = legacyStreamHasBufferedRef.current
+      if (!legacyActive) {
+        webRtcSessionRef.current?.bindRemoteScreenVideo(remoteStreamVideoRef.current)
+        if (streamWindowRef.current && !streamWindowRef.current.closed) renderStreamWindowRef.current()
+        setStreamLoading(false)
+      }
+      return
+    }
+    webRtcSessionRef.current?.bindRemoteScreenVideo(null)
+    setHasRemoteWebRtcVideo(false)
+    if (remoteStreamVideoRef.current) remoteStreamVideoRef.current.srcObject = null
+  }
+
+  const isLegacyStreamBuffered = () => {
+    const sbuf = remoteSourceBufferRef.current
+    return Boolean(sbuf && sbuf.buffered.length > 0)
+  }
+
+  const requestViewerStreamResync = (roomId: string, force = false) => {
+    if (!roomId || !hasDesktopBridge) return
+    const now = Date.now()
+    const prev = lastViewerScreenResyncReqRef.current
+    if (!force && prev && prev.room === roomId && now - prev.at < 2500) return
+    lastViewerScreenResyncReqRef.current = { room: roomId, at: now }
+    pendingLegacyStreamResyncRef.current = true
+    setStreamLoading(true)
+    getVoiceWsClientRef.current().requestScreenResync(roomId)
+  }
+
   const startWebRtcSession = async (serverId: string, roomId: string) => {
     const sink = webRtcAudioSinkRef.current
     if (!sink) throw new Error("WebRTC audio sink is not ready")
+    await stopWebRtcSession()
     const token = await getVoiceWsClientRef.current().getSfuToken(serverId, roomId)
     const session = new WebRtcMediaSession({
       audioSink: sink,
+      playRemoteVoice: mediaEngineRef.current === "webrtc",
       onStatus: setStatus,
-      onMutedChange: (muted) => {
-        getVoiceWsClientRef.current().setMute(muted)
-      },
-      onScreenShareChange: (active) => {
-        getVoiceWsClientRef.current().setScreenShare(active)
+      onScreenShareChange: () => {
+        /* screen share state is driven by server set_screen_share + local capture */
       },
       onWatchingScreenChange: (watching) => {
         getVoiceWsClientRef.current().setWatchingScreen(watching, roomId)
       },
-      onRemoteVideo: (stream, participantIdentity) => {
-        getVoiceWsClientRef.current().setWatchingScreen(Boolean(stream), roomId)
-        if (stream) {
-          if (screenVideoUrl) URL.revokeObjectURL(screenVideoUrl)
-          setScreenVideoUrl(null)
-          setActiveScreenSharerName(participantIdentity ?? "WebRTC user")
-          if (remoteStreamVideoRef.current) {
-            remoteStreamVideoRef.current.srcObject = stream
-            void remoteStreamVideoRef.current.play().catch(() => {})
-          }
-        } else {
-          setActiveScreenSharerName("")
-          if (remoteStreamVideoRef.current) remoteStreamVideoRef.current.srcObject = null
-        }
+      onRemoteVideo: (active, participantIdentity) => {
+        applyRemoteWebRtcVideo(active, participantIdentity)
       }
     })
     await session.connect(token)
-    await session.publishMicrophone(!mutedRef.current)
-    await session.setMuted(mutedRef.current)
+    const devices = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
+    await session.setOutputDevice(devices?.outputId ?? null)
+    await session.setDeafened(deafenedRef.current)
+    const mic = getWebRtcMicTrackFromPipeline()
+    if (mic) {
+      await session.publishMicTrack(mic)
+      await session.setMuted(mutedRef.current)
+    }
     getVoiceWsClientRef.current().syncPresence({
       roomId,
       muted: mutedRef.current,
       deafened: deafenedRef.current,
       screenSharing: false,
-      watchingScreen: false
+      watchingScreen: false,
+      mediaEngine: mediaEngineRef.current
     })
     webRtcSessionRef.current = session
+  }
+
+  const ensureLiveKitForVoiceRoom = async (serverId: string, roomId: string) => {
+    try {
+      await startWebRtcSession(serverId, roomId)
+    } catch {
+      // LiveKit is optional; legacy WS screen chunks and UDP voice still work.
+    }
   }
 
   const encodePcm16Base64 = (frame: Int16Array) => {
@@ -957,6 +1141,16 @@ export default function VoIPApp() {
     return bytes
   }
 
+  const isWebmInitSegment = (chunk: Uint8Array) =>
+    chunk.length >= 4 && chunk[0] === 0x1a && chunk[1] === 0x45 && chunk[2] === 0xdf && chunk[3] === 0xa3
+
+  const sendScreenVideoChunkBytes = (bytes: Uint8Array) => {
+    if (isWebmInitSegment(bytes)) {
+      screenInitSegmentRef.current = bytes.slice().buffer
+    }
+    getVoiceWsClientRef.current().sendScreenVideoChunk(encodeBytesBase64(bytes))
+  }
+
   const stopPopupMirrorTracks = useCallback(() => {
     const s = popupMirrorStreamRef.current
     if (s) {
@@ -966,9 +1160,9 @@ export default function VoIPApp() {
     lastPopupMirrorVideoUrlRef.current = null
   }, [])
 
-  const resetRemoteStreamPlayback = () => {
-    stopPopupMirrorTracks()
+  const resetLegacyStreamPlayback = () => {
     remoteAppendQueueRef.current = []
+    legacyStreamHasBufferedRef.current = false
     const sb = remoteSourceBufferRef.current
     if (sb && remoteMseUpdateEndRef.current) {
       try {
@@ -993,11 +1187,24 @@ export default function VoIPApp() {
       return null
     })
   }
+
+  const resetWebRtcStreamPlayback = () => {
+    webRtcSessionRef.current?.bindRemoteScreenVideo(null)
+    setHasRemoteWebRtcVideo(false)
+  }
+
+  const resetRemoteStreamPlayback = () => {
+    stopPopupMirrorTracks()
+    resetLegacyStreamPlayback()
+    resetWebRtcStreamPlayback()
+    if (remoteStreamVideoRef.current) remoteStreamVideoRef.current.srcObject = null
+  }
   resetRemoteStreamPlaybackRef.current = resetRemoteStreamPlayback
 
   useEffect(() => {
     if (!currentVoiceChannel || isScreenSharing) return
     resetRemoteStreamPlaybackRef.current()
+    setStreamLoading(false)
   }, [currentVoiceChannel, isScreenSharing])
 
   const pushRemoteVideoChunk = (chunk: Uint8Array) => {
@@ -1006,11 +1213,18 @@ export default function VoIPApp() {
         ? chunk.buffer
         : chunk.slice().buffer
 
-    const isWebmInitSegment =
+    const isWebmInit =
       chunk.length >= 4 && chunk[0] === 0x1a && chunk[1] === 0x45 && chunk[2] === 0xdf && chunk[3] === 0xa3
 
-    if (isWebmInitSegment && remoteMediaSourceRef.current) {
-      resetRemoteStreamPlayback()
+    if (isWebmInit && remoteMediaSourceRef.current) {
+      const sbuf = remoteSourceBufferRef.current
+      const established =
+        Boolean(sbuf && sbuf.buffered.length > 0 && (remoteStreamVideoRef.current?.readyState ?? 0) >= 2)
+      if (established && !pendingLegacyStreamResyncRef.current) {
+        return
+      }
+      pendingLegacyStreamResyncRef.current = false
+      resetLegacyStreamPlayback()
     }
 
     const drainRemoteMse = () => {
@@ -1040,6 +1254,16 @@ export default function VoIPApp() {
       }
     }
 
+    const onMseUpdateEnd = () => {
+      const sbuf = remoteSourceBufferRef.current
+      if (sbuf && sbuf.buffered.length > 0) {
+        legacyStreamHasBufferedRef.current = true
+        setStreamLoading(false)
+        void remoteStreamVideoRef.current?.play().catch(() => {})
+      }
+      drainRemoteMse()
+    }
+
     remoteAppendQueueRef.current.push(buf)
 
     if (!remoteMediaSourceRef.current) {
@@ -1054,14 +1278,19 @@ export default function VoIPApp() {
         if (remoteSourceBufferRef.current) return
         const ms = remoteMediaSourceRef.current
         if (!ms || ms.readyState !== "open") return
-        const mimeCandidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+        const mimeCandidates = [
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
+          "video/webm;codecs=vp9",
+          "video/webm;codecs=vp8",
+          "video/webm"
+        ]
         const mime = mimeCandidates.find((m) => MediaSource.isTypeSupported(m)) ?? "video/webm"
         try {
           const sbuf = ms.addSourceBuffer(mime)
           remoteSourceBufferRef.current = sbuf
-          const onEnd = () => drainRemoteMse()
-          remoteMseUpdateEndRef.current = onEnd
-          sbuf.addEventListener("updateend", onEnd)
+          remoteMseUpdateEndRef.current = onMseUpdateEnd
+          sbuf.addEventListener("updateend", onMseUpdateEnd)
           drainRemoteMse()
         } catch {
           /* ignore */
@@ -1122,26 +1351,64 @@ export default function VoIPApp() {
   }
 
   /**
-   * Soft noise gate with peak envelope **held across frames** (critical for condenser / studio mics).
-   * Per-frame reset caused audible pumping (quiet/loud jumps). Release follows `gateReleaseMs`.
+   * Three-zone uplink gate:
+   * 1) below mute threshold → silence
+   * 2) between mute and open → floor % of full level
+   * 3) above open threshold → 100%
    */
-  const applyUplinkNoiseAttenuate = (frame: Int16Array, threshold: number, floorRatio = 0.1) => {
+  const applyUplinkNoiseGate = (
+    frame: Int16Array,
+    muteThreshold: number,
+    openThreshold: number,
+    floorRatio: number
+  ) => {
     if (frame.length === 0) return frame
-    const t = Math.max(32, threshold)
-    const floor = Math.max(0.04, Math.min(0.45, floorRatio))
+    const muteT = Math.max(8, muteThreshold)
+    const openT = Math.max(muteT + 24, openThreshold)
+    const floor = Math.max(0.01, Math.min(0.5, floorRatio))
+    const muteEnter = muteT
+    const muteLeave = muteT * 0.88
+    const openEnter = openT
+    const openLeave = openT * 0.9
     const sr = 48000
     const releaseMs = Math.max(80, gateReleaseMsRef.current)
     const coeffR = Math.exp(-1 / (sr * (releaseMs / 1000)))
+    const coeffA = Math.exp(-1 / (sr * 0.004))
+    const gainSmoothUp = Math.exp(-1 / (sr * 0.003))
+    const gainSmoothDown = Math.exp(-1 / (sr * 0.012))
+
     let env = uplinkGateEnvRef.current
+    let zone = uplinkGateZoneRef.current
+    let gain = uplinkGateGainRef.current
     const out = new Int16Array(frame.length)
     for (let i = 0; i < frame.length; i += 1) {
       const s = frame[i]
       const p = Math.abs(s)
-      env = Math.max(p, env * coeffR)
-      const g = env < t ? floor + (1 - floor) * (env / t) * (env / t) : 1
-      out[i] = Math.round(s * g)
+      if (p >= env) {
+        env = env + (p - env) * (1 - coeffA)
+      } else {
+        env = env * coeffR
+      }
+      if (zone === "open") {
+        if (env < openLeave) zone = env >= muteEnter ? "duck" : "mute"
+      } else if (zone === "duck") {
+        if (env >= openEnter) zone = "open"
+        else if (env < muteLeave) zone = "mute"
+      } else if (env >= openEnter) {
+        zone = "open"
+      } else if (env >= muteEnter) {
+        zone = "duck"
+      } else {
+        zone = "mute"
+      }
+      const targetGain = zone === "open" ? 1 : zone === "duck" ? floor : 0
+      const smooth = targetGain > gain ? gainSmoothUp : gainSmoothDown
+      gain = gain + (targetGain - gain) * (1 - smooth)
+      out[i] = Math.round(s * gain)
     }
     uplinkGateEnvRef.current = env
+    uplinkGateZoneRef.current = zone
+    uplinkGateGainRef.current = gain
     return out
   }
 
@@ -1225,7 +1492,7 @@ export default function VoIPApp() {
   }, [voiceStats])
 
   useEffect(() => {
-    if (mediaEngine === "webrtc" || !hasDesktopBridge || !isInVoice || !currentVoiceChannel) {
+    if (!hasDesktopBridge || !isInVoice || !currentVoiceChannel) {
       stopVoicePipeline()
       return
     }
@@ -1236,17 +1503,9 @@ export default function VoIPApp() {
       try {
         stopVoicePipeline()
         const selected = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
-        const useSpeexNs = hasDesktopBridge && speexNoiseSuppressionEnabledRef.current
         const preferredInputId = selected?.inputId ?? null
-        const preferredConstraints: MediaTrackConstraints = {
-          ...(preferredInputId ? { deviceId: { exact: preferredInputId } } : {}),
-          channelCount: 1,
-          sampleRate: 48000,
-          sampleSize: 16,
-          echoCancellation: echoCancellationEnabled,
-          noiseSuppression: useSpeexNs ? false : noiseSuppressionEnabled,
-          autoGainControl: autoGainControlEnabled
-        }
+        const speexRequested = hasDesktopBridge && speexNoiseSuppressionEnabledRef.current
+
         if (window.electronVoice?.requestMicrophoneAccess) {
           const micAccess = await window.electronVoice.requestMicrophoneAccess()
           if (!micAccess.granted) {
@@ -1257,6 +1516,32 @@ export default function VoIPApp() {
             return
           }
         }
+
+        const captureCtx = new AudioContext({ sampleRate: 48000 })
+        let speexWorklet: SpeexWorkletNode | null = null
+        if (speexRequested) {
+          try {
+            speexWorklet = await createSpeexNoiseWorklet(captureCtx)
+          } catch (e) {
+            console.warn("[voixex] Speex DSP failed:", e)
+            setDeviceError(
+              e instanceof Error
+                ? `Speex failed (${e.message}); using browser noise suppression if enabled.`
+                : "Speex failed to load; using browser noise suppression if enabled."
+            )
+          }
+        }
+        const speexActive = Boolean(speexWorklet)
+
+        const preferredConstraints: MediaTrackConstraints = {
+          ...(preferredInputId ? { deviceId: { exact: preferredInputId } } : {}),
+          channelCount: 1,
+          sampleRate: 48000,
+          sampleSize: 16,
+          echoCancellation: echoCancellationEnabled,
+          noiseSuppression: speexActive ? false : noiseSuppressionEnabled,
+          autoGainControl: autoGainControlEnabled
+        }
         let stream: MediaStream
         try {
           stream = await navigator.mediaDevices.getUserMedia({ audio: preferredConstraints })
@@ -1266,24 +1551,30 @@ export default function VoIPApp() {
           // 2) drop preferred inputId too (default system input)
           // Some drivers reject stale deviceId/sinkId and would otherwise kill the whole pipeline.
           try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: preferredInputId ? { deviceId: { exact: preferredInputId } } : true })
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                ...(preferredInputId ? { deviceId: { exact: preferredInputId } } : {}),
+                channelCount: 1,
+                noiseSuppression: speexActive ? false : noiseSuppressionEnabled
+              }
+            })
           } catch {
             stream = await navigator.mediaDevices.getUserMedia({ audio: true })
             if (preferredInputId) {
               void window.electronVoice?.setAudioDevices({ inputId: null, outputId: selected?.outputId ?? null })
               setSelectedDevices((prev) => ({ ...prev, inputId: null }))
               setDeviceError("Selected input device is unavailable. Switched to default input.")
-            } else if (noiseSuppressionEnabled) {
+            } else if (!speexActive && noiseSuppressionEnabled) {
               setDeviceError("Noise suppression constraints are not supported on this device. Running without DSP constraints.")
             }
           }
         }
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop())
+          void captureCtx.close()
           return
         }
 
-        const captureCtx = new AudioContext({ sampleRate: 48000 })
         const playbackCtx = new AudioContext({ sampleRate: 48000 })
         if (selected?.outputId && typeof (playbackCtx as unknown as { setSinkId?: (id: string) => Promise<void> }).setSinkId === "function") {
           try {
@@ -1306,10 +1597,15 @@ export default function VoIPApp() {
         captureHighpass.type = "highpass"
         captureHighpass.frequency.value = 75
         captureHighpass.Q.value = 0.707
+        const postDspGain = captureCtx.createGain()
+        postDspGain.gain.value = 1
+        const webrtcMicTap = createMonoMediaStreamTap(captureCtx)
+        const webrtcMicDestNode = webrtcMicTap.destination
+        const webrtcMicMerger = webrtcMicTap.merger
+        const monitorMicTap = createMonoMediaStreamTap(captureCtx)
+        const monitorDestNode = monitorMicTap.destination
+        const monitorMicMerger = monitorMicTap.merger
         const captureSinkNode = captureCtx.createMediaStreamDestination()
-        const capturePumpGainNode = captureCtx.createGain()
-        capturePumpGainNode.gain.value = 0
-        const monitorDestNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
         const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
           startMs: 220,
@@ -1336,17 +1632,8 @@ export default function VoIPApp() {
         const monitorSourceNode = playbackCtx.createMediaStreamSource(monitorDestNode.stream)
         const monitorGainNode = playbackCtx.createGain()
         monitorGainNode.gain.value = monitorEnabledRef.current ? monitorVolumePctRef.current / 100 : 0
-        let speexWorklet: SpeexWorkletNode | null = null
-        if (hasDesktopBridge && speexNoiseSuppressionEnabledRef.current) {
-          try {
-            speexWorklet = await createSpeexNoiseWorklet(captureCtx)
-          } catch (e) {
-            console.warn("[voixex] Speex DSP failed:", e)
-            setDeviceError(
-              e instanceof Error ? `Speex noise suppression failed: ${e.message}` : "Speex noise suppression failed to load."
-            )
-          }
-        }
+        const capturePumpGainNode = captureCtx.createGain()
+        capturePumpGainNode.gain.value = 0
         const runtime: VoicePipelineRuntime = {
           stream,
           captureCtx,
@@ -1355,6 +1642,10 @@ export default function VoIPApp() {
           micGainNode,
           captureHighpass,
           speexWorklet,
+          postDspGain,
+          webrtcMicMerger,
+          webrtcMicDestNode,
+          monitorMicMerger,
           captureSinkNode,
           capturePumpGainNode,
           monitorDestNode,
@@ -1379,6 +1670,7 @@ export default function VoIPApp() {
         }
         voicePipelineRef.current = runtime
         voicePlayoutBufferedRef.current = 0
+        republishWebRtcMicFromPipeline()
         setAudioPipelineDiag({
           captureSampleRate: captureCtx.sampleRate,
           playbackSampleRate: playbackCtx.sampleRate,
@@ -1419,26 +1711,45 @@ export default function VoIPApp() {
         captureNode.onaudioprocess = (ev) => {
           if (!voicePipelineRef.current || voicePipelineRef.current !== runtime) return
           const input = ev.inputBuffer.getChannelData(0)
+          const output = ev.outputBuffer.getChannelData(0)
           const resampled = resampleFloat32Chunk(input, runtime.captureCtx.sampleRate, 48000, runtime)
           const pcm = new Int16Array(resampled.length)
           for (let i = 0; i < resampled.length; i += 1) {
             const sample = Math.max(-1, Math.min(1, resampled[i]))
             pcm[i] = sample < 0 ? Math.round(sample * 32768) : Math.round(sample * 32767)
           }
-          const merged = concatInt16(runtime.txRemainder, pcm)
+
+          const muteAmp = Math.max(0, Math.round(gateMuteThresholdRef.current))
+          const openAmp = Math.max(muteAmp + 24, Math.round(gateOpenThresholdRef.current))
+          const gateFloorRatio = Math.max(0.01, Math.min(0.5, gateFloorPctRef.current / 100))
+          const gatedPcm = gateEnabledRef.current
+            ? applyUplinkNoiseGate(pcm, muteAmp, openAmp, gateFloorRatio)
+            : pcm
+          const txPcm = mutedRef.current ? new Int16Array(gatedPcm.length) : gatedPcm
+
+          const now = Date.now()
+          if (now - lastMeterEmitAt >= 80) {
+            lastMeterEmitAt = now
+            const pre = calcFrameEnergy(pcm)
+            const post = calcFrameEnergy(gatedPcm)
+            setMicMeter({
+              inputPeak: pre.peak,
+              inputRms: pre.rms,
+              txPeak: post.peak,
+              txRms: post.rms,
+              gateZone: gateEnabledRef.current ? uplinkGateZoneRef.current : "off"
+            })
+          }
+
+          for (let i = 0; i < output.length; i += 1) {
+            output[i] = i < txPcm.length ? txPcm[i] / 32768 : 0
+          }
+
+          const merged = concatInt16(runtime.txRemainder, txPcm)
           let offset = 0
           while (offset + frameSize <= merged.length) {
             if (!mutedRef.current) {
-              let frame = merged.subarray(offset, offset + frameSize)
-              const now = Date.now()
-              if (now - lastMeterEmitAt >= 120) {
-                lastMeterEmitAt = now
-                setMicMeter(calcFrameEnergy(frame))
-              }
-              if (gateEnabledRef.current) {
-                const thresholdAmp = Math.max(0, Math.round(gateThresholdRef.current))
-                frame = applyUplinkNoiseAttenuate(frame, thresholdAmp, 0.1)
-              }
+              const frame = merged.subarray(offset, offset + frameSize)
               if (opusEncoder && window.electronVoice?.sendOpusFrame) {
                 try {
                   const pcmBytes = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength)
@@ -1478,6 +1789,7 @@ export default function VoIPApp() {
         }
 
         runtime.unsubscribeIncoming = window.electronVoice?.onPcm16Frame((pcm16Base64) => {
+          if (mediaEngineRef.current === "webrtc") return
           if (deafenedRef.current) return
           const frame48k = decodePcm16Base64(pcm16Base64)
           const resampled = resampleInt16Chunk(frame48k, 48000, runtime.playbackSampleRate, runtime)
@@ -1522,12 +1834,13 @@ export default function VoIPApp() {
         micGainNode.connect(captureHighpass)
         if (speexWorklet) {
           captureHighpass.connect(speexWorklet)
-          speexWorklet.connect(captureNode)
-          speexWorklet.connect(monitorDestNode)
+          speexWorklet.connect(postDspGain)
         } else {
-          captureHighpass.connect(captureNode)
-          captureHighpass.connect(monitorDestNode)
+          captureHighpass.connect(postDspGain)
         }
+        postDspGain.connect(captureNode)
+        connectMonoSourceToTap(captureNode, webrtcMicTap)
+        connectMonoSourceToTap(captureNode, monitorMicTap)
         // Keep capture worklet actively pulled while avoiding sidetone.
         captureNode.connect(captureSinkNode)
         captureNode.connect(capturePumpGainNode)
@@ -1568,19 +1881,12 @@ export default function VoIPApp() {
     hasDesktopBridge,
     isInVoice,
     currentVoiceChannel,
-    mediaEngine,
     audioDevicesRevision,
     noiseSuppressionEnabled,
     echoCancellationEnabled,
     autoGainControlEnabled,
     speexNoiseSuppressionEnabled
   ])
-
-  useEffect(() => {
-    if (isInVoice) {
-      setShowVoiceStatsPanel(true)
-    }
-  }, [isInVoice])
 
   useEffect(() => {
     if (!hasDesktopBridge || !window.electronVoice) return
@@ -1598,12 +1904,18 @@ export default function VoIPApp() {
   }, [hasDesktopBridge, selectedScreenSourceId])
 
   useEffect(() => {
+    screenShareWithAudioRef.current = screenShareWithAudio
+  }, [screenShareWithAudio])
+
+  useEffect(() => {
     const savedRes = localStorage.getItem("voixex-screen-resolution")
     const savedFps = Number(localStorage.getItem("voixex-screen-fps") || "30")
     const savedBitrate = Number(localStorage.getItem("voixex-screen-bitrate-kbps") || "3500")
+    const savedWithAudio = localStorage.getItem("voixex-screen-with-audio")
     if (savedRes && /^\d+x\d+$/.test(savedRes)) setScreenResolution(savedRes)
     if (Number.isFinite(savedFps) && savedFps > 0) setScreenFps(savedFps)
     if (Number.isFinite(savedBitrate) && savedBitrate > 0) setScreenBitrateKbps(savedBitrate)
+    if (savedWithAudio === "1") setScreenShareWithAudio(true)
   }, [])
 
   useEffect(() => {
@@ -1617,6 +1929,58 @@ export default function VoIPApp() {
   useEffect(() => {
     localStorage.setItem("voixex-screen-bitrate-kbps", String(screenBitrateKbps))
   }, [screenBitrateKbps])
+
+  useEffect(() => {
+    localStorage.setItem("voixex-screen-with-audio", screenShareWithAudio ? "1" : "0")
+  }, [screenShareWithAudio])
+
+  useEffect(() => {
+    screenVideoUrlRef.current = screenVideoUrl
+  }, [screenVideoUrl])
+
+  const viewingLegacyStream = Boolean(screenVideoUrl || screenImageUrl)
+  const viewingWebRtcStream = hasRemoteWebRtcVideo && !viewingLegacyStream
+  const streamPathLabel = viewingLegacyStream ? "Legacy" : viewingWebRtcStream ? "WebRTC" : ""
+  const activeChannelBannerUrl =
+    activeChannelId && serverAppearance.channelBanners?.[activeChannelId]
+      ? serverAppearance.channelBanners[activeChannelId]
+      : null
+
+  const saveServerBanner = () => {
+    if (!activeServerId) return
+    const next: ServerAppearance = {
+      ...serverAppearance,
+      serverBannerUrl: serverBannerDraft.trim() || undefined
+    }
+    if (!next.serverBannerUrl) delete next.serverBannerUrl
+    saveServerAppearance(activeServerId, next)
+    setServerAppearance(next)
+    toast.success("Server banner saved")
+  }
+
+  const saveChannelBanner = () => {
+    if (!activeServerId || !channelBannerChannelId) return
+    const banners = { ...(serverAppearance.channelBanners ?? {}) }
+    const url = channelBannerDraft.trim()
+    if (url) banners[channelBannerChannelId] = url
+    else delete banners[channelBannerChannelId]
+    const next: ServerAppearance = { ...serverAppearance, channelBanners: banners }
+    saveServerAppearance(activeServerId, next)
+    setServerAppearance(next)
+    toast.success("Channel banner saved")
+  }
+
+  useEffect(() => {
+    if (viewingWebRtcStream) {
+      webRtcSessionRef.current?.bindRemoteScreenVideo(remoteStreamVideoRef.current)
+    } else {
+      webRtcSessionRef.current?.bindRemoteScreenVideo(null)
+    }
+  }, [viewingWebRtcStream, hasRemoteWebRtcVideo, screenVideoUrl])
+
+  useEffect(() => {
+    void webRtcSessionRef.current?.setDeafened(isDeafened)
+  }, [isDeafened])
 
   useEffect(() => {
     if (activeScreenSharerName) return
@@ -1676,7 +2040,12 @@ export default function VoIPApp() {
       v.removeEventListener("playing", sync)
       v.removeEventListener("loadeddata", sync)
     }
-  }, [showingStreamWindow, screenVideoUrl])
+  }, [showingStreamWindow, screenVideoUrl, hasRemoteWebRtcVideo])
+
+  useEffect(() => {
+    if (!showingStreamWindow) return
+    renderStreamWindowRef.current()
+  }, [showingStreamWindow, hasRemoteWebRtcVideo, screenVideoUrl, screenImageUrl, isDeafened, activeScreenSharerName])
 
   useEffect(() => {
     if (!localPreviewVideoRef.current) return
@@ -1706,6 +2075,7 @@ export default function VoIPApp() {
     if (input.deafened !== undefined) {
       setIsDeafened(input.deafened)
       void window.electronVoice?.setDeafen(input.deafened)
+      void webRtcSessionRef.current?.setDeafened(input.deafened)
     }
     if (input.screenSharing !== undefined) {
       setIsScreenSharing(input.screenSharing)
@@ -1715,7 +2085,8 @@ export default function VoIPApp() {
       muted,
       deafened,
       screenSharing,
-      watchingScreen: isWatchingScreenRef.current
+      watchingScreen: isWatchingScreenRef.current,
+      mediaEngine: mediaEngineRef.current
     })
   }
 
@@ -1736,6 +2107,7 @@ export default function VoIPApp() {
     setIsDeafened(next)
     getVoiceWsClient().setDeafen(next)
     void window.electronVoice?.setDeafen(next)
+    void webRtcSessionRef.current?.setDeafened(next)
     setStatus(next ? "Headphones deafened" : "Headphones undeafened")
     window.setTimeout(() => {
       localPresenceToggleRef.current = false
@@ -1763,9 +2135,7 @@ export default function VoIPApp() {
   }
 
   const stopScreenShare = async () => {
-    if (mediaEngine === "webrtc") {
-      await webRtcSessionRef.current?.stopScreenShare()
-    }
+    await webRtcSessionRef.current?.stopScreenShare()
     if (screenShareTimerRef.current) {
       clearInterval(screenShareTimerRef.current)
       screenShareTimerRef.current = null
@@ -1785,6 +2155,7 @@ export default function VoIPApp() {
       screenCaptureStreamRef.current = null
     }
     screenEncodeInFlightRef.current = false
+    screenInitSegmentRef.current = null
     setIsScreenSharing(false)
     getVoiceWsClientRef.current().setScreenShare(false)
     setLocalScreenPreviewUrl((prev) => {
@@ -1798,17 +2169,23 @@ export default function VoIPApp() {
       if (prev) URL.revokeObjectURL(prev)
       return null
     })
-    resetRemoteStreamPlayback()
   }
 
-  const restartScreenRecorderForLateViewers = useCallback(() => {
+  const resyncScreenForLateViewers = useCallback(() => {
     if (!isScreenSharingRef.current) return
+    const now = Date.now()
+    if (now - screenRecorderResyncAtRef.current < 3000) return
+    screenRecorderResyncAtRef.current = now
+
+    const cachedInit = screenInitSegmentRef.current
+    if (cachedInit) {
+      sendScreenVideoChunkBytes(new Uint8Array(cachedInit))
+      return
+    }
+
     const stream = screenCaptureStreamRef.current
     const oldRec = screenMediaRecorderRef.current
     if (!stream || !oldRec || oldRec.state !== "recording") return
-    const now = Date.now()
-    if (now - screenRecorderResyncAtRef.current < 1200) return
-    screenRecorderResyncAtRef.current = now
     if (screenRecorderRestartingRef.current) return
     screenRecorderRestartingRef.current = true
 
@@ -1819,8 +2196,7 @@ export default function VoIPApp() {
     const onData = (event: BlobEvent) => {
       if (!event.data || event.data.size === 0) return
       void event.data.arrayBuffer().then((buffer) => {
-        const bytes = new Uint8Array(buffer)
-        getVoiceWsClientRef.current().sendScreenVideoChunk(encodeBytesBase64(bytes))
+        sendScreenVideoChunkBytes(new Uint8Array(buffer))
       })
     }
 
@@ -1850,22 +2226,90 @@ export default function VoIPApp() {
     const c = isVoiceSplit ? voiceClient : uiClient
     return c.subscribeScreenResyncRequests((roomId) => {
       if (roomId !== currentVoiceChannelRef.current) return
-      restartScreenRecorderForLateViewers()
+      resyncScreenForLateViewers()
     })
-  }, [hasDesktopBridge, isScreenSharing, isVoiceSplit, uiClient, voiceClient, restartScreenRecorderForLateViewers])
+  }, [hasDesktopBridge, isScreenSharing, isVoiceSplit, uiClient, voiceClient, resyncScreenForLateViewers])
 
   useEffect(() => {
-    if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName) return
-    const now = Date.now()
-    const prev = lastViewerScreenResyncReqRef.current
-    if (prev && prev.room === currentVoiceChannel && now - prev.at < 5000) return
+    if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName || !isInVoice) return
+    setStreamLoading(true)
     const room = currentVoiceChannel
-    const timer = window.setTimeout(() => {
-      lastViewerScreenResyncReqRef.current = { room, at: Date.now() }
-      getVoiceWsClientRef.current().requestScreenResync(room)
-    }, 400)
+    const timer = window.setTimeout(() => requestViewerStreamResync(room, true), 350)
     return () => clearTimeout(timer)
-  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, isVoiceSplit])
+  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, isInVoice])
+
+  useEffect(() => {
+    if (!activeScreenSharerName || !isInVoice || isScreenSharing) {
+      setStreamLoading(false)
+      return
+    }
+    const hasLegacy = Boolean(screenVideoUrl && legacyStreamHasBufferedRef.current)
+    const hasWebRtc = hasRemoteWebRtcVideo && !screenVideoUrl
+    if (hasLegacy || hasWebRtc) {
+      setStreamLoading(false)
+      return
+    }
+    setStreamLoading(true)
+    const room = currentVoiceChannelRef.current
+    const retryTimer = window.setTimeout(() => {
+      if (!isLegacyStreamBuffered() && !hasRemoteWebRtcVideo) {
+        requestViewerStreamResync(room, true)
+      }
+    }, 5000)
+    const fallbackTimer = window.setTimeout(() => {
+      if (!isLegacyStreamBuffered() && hasRemoteWebRtcVideo) {
+        resetLegacyStreamPlayback()
+        webRtcSessionRef.current?.bindRemoteScreenVideo(remoteStreamVideoRef.current)
+        setStreamLoading(false)
+      } else if (!isLegacyStreamBuffered() && !hasRemoteWebRtcVideo) {
+        setStreamLoading(false)
+      }
+    }, 12000)
+    return () => {
+      clearTimeout(retryTimer)
+      clearTimeout(fallbackTimer)
+    }
+  }, [activeScreenSharerName, isInVoice, isScreenSharing, screenVideoUrl, hasRemoteWebRtcVideo])
+
+  useEffect(() => {
+    streamVolumePctRef.current = streamVolumePct
+    const vol = Math.max(0, Math.min(2, streamVolumePct / 100))
+    const v = remoteStreamVideoRef.current
+    if (v && screenVideoUrl) v.volume = vol
+    webRtcSessionRef.current?.setScreenAudioVolume(streamVolumePct)
+  }, [streamVolumePct, screenVideoUrl])
+
+  useEffect(() => {
+    const saved = localStorage.getItem("voixex-stream-volume-pct")
+    if (saved) {
+      const n = Number.parseInt(saved, 10)
+      if (Number.isFinite(n)) setStreamVolumePct(Math.max(0, Math.min(200, n)))
+    }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem("voixex-stream-volume-pct", String(streamVolumePct))
+  }, [streamVolumePct])
+
+  useEffect(() => {
+    if (!activeServerId) {
+      setServerAppearance({})
+      return
+    }
+    const appearance = loadServerAppearance(activeServerId)
+    setServerAppearance(appearance)
+    setServerBannerDraft(appearance.serverBannerUrl ?? "")
+  }, [activeServerId])
+
+  const syncStreamPopupAudio = () => {
+    const popup = streamWindowRef.current
+    if (!popup || popup.closed) {
+      webRtcSessionRef.current?.relocateScreenAudio(null)
+      return
+    }
+    const audioHost = popup.document.getElementById("voixex-stream-audio-host")
+    webRtcSessionRef.current?.relocateScreenAudio(audioHost)
+  }
 
   const renderStreamWindow = () => {
     if (!streamWindowRef.current || streamWindowRef.current.closed) return
@@ -1880,7 +2324,8 @@ export default function VoIPApp() {
         <div id="voixex-stream-root" style="font-family:sans-serif;background:#111;color:#eee;margin:0;padding:12px">
           <div id="voixex-streaming" style="margin-bottom:8px"></div>
           <div id="voixex-viewers" style="margin-bottom:8px"></div>
-          <video id="voixex-stream-video" autoplay muted playsinline controls style="display:none;max-width:100%;max-height:85vh;border:1px solid #444;border-radius:6px"></video>
+          <div id="voixex-stream-audio-host" style="display:none"></div>
+          <video id="voixex-stream-video" autoplay playsinline controls style="display:none;max-width:100%;max-height:85vh;border:1px solid #444;border-radius:6px"></video>
           <div id="voixex-stream-placeholder" style="color:#999">No active stream frame.</div>
         </div>
       `
@@ -1893,6 +2338,7 @@ export default function VoIPApp() {
     if (viewersEl) viewersEl.textContent = `Viewers: ${viewers}`
     if (imageEl && placeholderEl) {
       if (localCapture) {
+        imageEl.muted = true
         stopPopupMirrorTracks()
         if (imageEl.src) imageEl.removeAttribute("src")
         if (imageEl.srcObject !== localCapture) {
@@ -1901,7 +2347,29 @@ export default function VoIPApp() {
         }
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
+      } else if (viewingWebRtcStream && remoteStreamVideoRef.current) {
+        imageEl.muted = true
+        const srcVideo = remoteStreamVideoRef.current
+        const mirrorFps = Math.min(60, Math.max(8, screenFps))
+        stopPopupMirrorTracks()
+        try {
+          const cap = (srcVideo as HTMLVideoElement & { captureStream?: (frameRate?: number) => MediaStream }).captureStream?.(mirrorFps)
+          if (!cap) throw new Error("captureStream unavailable")
+          popupMirrorStreamRef.current = cap
+          lastPopupMirrorVideoUrlRef.current = "__webrtc__"
+          imageEl.srcObject = cap
+          imageEl.removeAttribute("src")
+          imageEl.muted = true
+          void imageEl.play().catch(() => {})
+          imageEl.style.display = "block"
+          placeholderEl.style.display = "none"
+        } catch {
+          imageEl.style.display = "none"
+          placeholderEl.style.display = "block"
+        }
+        syncStreamPopupAudio()
       } else if (screenVideoUrl && remoteStreamVideoRef.current) {
+        imageEl.muted = deafenedRef.current
         // Blob URLs tied to MediaSource in the opener do not reliably play in a second window
         // (Steam overlay / pop-out). Mirror decoded output via captureStream from the main <video>.
         const srcVideo = remoteStreamVideoRef.current
@@ -1932,6 +2400,7 @@ export default function VoIPApp() {
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
       } else if (previewUrl) {
+        imageEl.muted = deafenedRef.current
         stopPopupMirrorTracks()
         if (imageEl.srcObject) imageEl.srcObject = null
         if (imageEl.src !== previewUrl) {
@@ -1946,6 +2415,7 @@ export default function VoIPApp() {
         imageEl.removeAttribute("src")
         imageEl.style.display = "none"
         placeholderEl.style.display = "block"
+        syncStreamPopupAudio()
       }
     }
   }
@@ -1960,6 +2430,7 @@ export default function VoIPApp() {
         /* ignore */
       }
       stopPopupMirrorTracks()
+      webRtcSessionRef.current?.relocateScreenAudio(null)
       streamWindowRef.current.close()
       streamWindowRef.current = null
       setShowingStreamWindow(false)
@@ -1975,6 +2446,30 @@ export default function VoIPApp() {
     renderStreamWindow()
   }
 
+  const toggleStreamVideoFullscreen = async () => {
+    const el = remoteStreamVideoRef.current
+    if (!el) return
+    try {
+      if (document.fullscreenElement === el) {
+        await document.exitFullscreen()
+        setStreamVideoFullscreen(false)
+      } else {
+        await el.requestFullscreen()
+        setStreamVideoFullscreen(true)
+      }
+    } catch {
+      setError("Fullscreen is not available for this stream.")
+    }
+  }
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setStreamVideoFullscreen(document.fullscreenElement === remoteStreamVideoRef.current)
+    }
+    document.addEventListener("fullscreenchange", onFullscreenChange)
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange)
+  }, [])
+
   const startScreenShare = async () => {
     if (!hasDesktopBridge || !window.electronVoice) {
       throw new Error("Screen share is available only in the desktop client.")
@@ -1986,35 +2481,49 @@ export default function VoIPApp() {
       throw new Error("Screen capture API is not available in this runtime.")
     }
     if (isScreenSharing) return
-    if (mediaEngine === "webrtc") {
-      const session = webRtcSessionRef.current
-      if (!session) throw new Error("Join a WebRTC voice room before sharing screen.")
-      await session.startScreenShare()
-      setIsScreenSharing(true)
-      getVoiceWsClientRef.current().setScreenShare(true)
-      setStatus("WebRTC screen share started")
-      return
-    }
+
     const fps = Math.max(8, Math.min(60, screenFps))
     const [targetWidthRaw, targetHeightRaw] = screenResolution.split("x").map((v) => Number(v))
     const targetWidth = Number.isFinite(targetWidthRaw) ? targetWidthRaw : 1280
     const targetHeight = Number.isFinite(targetHeightRaw) ? targetHeightRaw : 720
     const bitrateKbps = Math.max(600, Math.min(10000, screenBitrateKbps))
     await window.electronVoice.setScreenSource(selectedScreenSourceId)
+
+    const wantAudio = screenShareWithAudioRef.current
+    const videoConstraints = {
+      frameRate: fps,
+      width: { ideal: targetWidth, max: targetWidth },
+      height: { ideal: targetHeight, max: targetHeight }
+    }
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: fps,
-        width: { ideal: targetWidth, max: targetWidth },
-        height: { ideal: targetHeight, max: targetHeight }
-      },
-      audio: false
+      video: videoConstraints,
+      audio: wantAudio
     })
+    if (!wantAudio) {
+      for (const track of stream.getAudioTracks()) {
+        track.stop()
+        stream.removeTrack(track)
+      }
+    }
+
     screenCaptureStreamRef.current = stream
     if (localPreviewVideoRef.current) {
       localPreviewVideoRef.current.srcObject = stream
       void localPreviewVideoRef.current.play().catch(() => {})
     }
-    const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+
+    const videoTrack = stream.getVideoTracks()[0]
+    if (videoTrack) videoTrack.contentHint = "detail"
+
+    const mimeCandidates = wantAudio
+      ? [
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
+          "video/webm;codecs=vp9",
+          "video/webm;codecs=vp8",
+          "video/webm"
+        ]
+      : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
     const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? "video/webm"
     const recorder = new MediaRecorder(stream, {
       mimeType,
@@ -2023,14 +2532,14 @@ export default function VoIPApp() {
     recorder.ondataavailable = (event) => {
       if (!event.data || event.data.size === 0) return
       void event.data.arrayBuffer().then((buffer) => {
-        const bytes = new Uint8Array(buffer)
-        getVoiceWsClientRef.current().sendScreenVideoChunk(encodeBytesBase64(bytes))
+        sendScreenVideoChunkBytes(new Uint8Array(buffer))
       })
     }
-    // Server drops screen_chunk until set_screen_share(active:true) is applied; register share before any blob.
+
+    screenInitSegmentRef.current = null
+
     setIsScreenSharing(true)
     getVoiceWsClientRef.current().setScreenShare(true)
-    // Variant A: smaller timeslice for lower end-to-end latency (more appendBuffer work).
     recorder.start(250)
     screenMediaRecorderRef.current = recorder
     stream.getVideoTracks().forEach((track) => {
@@ -2038,6 +2547,13 @@ export default function VoIPApp() {
         void stopScreenShare()
       }
     })
+
+    try {
+      await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps })
+    } catch {
+      /* LiveKit mirror is optional when SFU is unavailable */
+    }
+
     setStatus("Screen share started")
   }
 
@@ -2062,27 +2578,8 @@ export default function VoIPApp() {
       if (isScreenSharing) {
         await stopScreenShare()
       }
-      if (mediaEngine === "webrtc") {
-        if (!activeServerId) {
-          toast.error("Connect to a server before joining WebRTC voice.")
-          return
-        }
-        await stopWebRtcSession()
-        stopVoicePipeline()
-        void window.electronVoice?.leaveRoom()
-        getVoiceWsClient().joinRoom(channelId)
-        setIsInVoice(true)
-        isInVoiceRef.current = true
-        setCurrentVoiceChannel(channelId)
-        setVoiceServerId(activeServerId)
-        voiceServerIdRef.current = activeServerId
-        try {
-          await startWebRtcSession(activeServerId, channelId)
-          setStatus(`In WebRTC room: ${channel.name}`)
-        } catch (e) {
-          setError(e instanceof Error ? e.message : "Failed to start WebRTC media")
-          toast.error(e instanceof Error ? e.message : "Failed to start WebRTC media")
-        }
+      if (!activeServerId) {
+        toast.error("Connect to a server before joining voice.")
         return
       }
       if (isInVoice && voiceServerId && activeServerId && voiceServerId !== activeServerId) {
@@ -2094,20 +2591,25 @@ export default function VoIPApp() {
         voiceClient.leaveRoom()
         voiceClient.disconnect()
         await window.electronVoice.leaveRoom()
+        await stopWebRtcSession()
         const splitUdp = effectiveVoiceUdpPort(vopts.port, udpPortOverride)
         await window.electronVoice.connect({
           host: vopts.host,
           port: splitUdp,
-          mediaToken: vopts.mediaToken
+          mediaToken: vopts.mediaToken,
+          transport: voiceTransport
         })
         applyVoiceEnginePresenceFlags()
         setVoiceServerId(activeServerId)
         voiceServerIdRef.current = activeServerId
         setCurrentVoiceChannel(channelId)
-      setIsInVoice(true)
+        setIsInVoice(true)
         isInVoiceRef.current = true
-        uiClient.joinRoom(channelId)
+        getVoiceWsClient().joinRoom(channelId)
         await window.electronVoice.joinRoom(channelId)
+        await ensureLiveKitForVoiceRoom(activeServerId, channelId)
+        lastViewerScreenResyncReqRef.current = null
+        if (activeScreenSharerName) requestViewerStreamResync(channelId, true)
         setStatus(`In room: ${channel.name}`)
         return
       }
@@ -2118,6 +2620,11 @@ export default function VoIPApp() {
       voiceServerIdRef.current = activeServerId
       getVoiceWsClient().joinRoom(channelId)
       void window.electronVoice?.joinRoom(channelId)
+      applyVoiceEnginePresenceFlags()
+      lastViewerScreenResyncReqRef.current = null
+      void ensureLiveKitForVoiceRoom(activeServerId, channelId).then(() => {
+        if (activeScreenSharerName) requestViewerStreamResync(channelId, true)
+      })
       setStatus(`In room: ${channel.name}`)
     } else if (channel?.type === "text" && activeServerId) {
       setStatus(`Text channel: ${channel.name}`)
@@ -2129,12 +2636,15 @@ export default function VoIPApp() {
     void stopScreenShare()
     void stopWebRtcSession()
     getVoiceWsClientRef.current().leaveRoom()
-    voiceClient.disconnect()
     setIsInVoice(false)
     isInVoiceRef.current = false
     setCurrentVoiceChannel("")
     setVoiceServerId("")
     voiceServerIdRef.current = ""
+    lastViewerScreenResyncReqRef.current = null
+    pendingLegacyStreamResyncRef.current = false
+    setStreamLoading(false)
+    resetRemoteStreamPlayback()
     stopVoicePipeline()
     void window.electronVoice?.leaveRoom()
     setStatus("Connected to server")
@@ -2320,9 +2830,10 @@ export default function VoIPApp() {
             applyVoiceEnginePresenceFlags()
           } catch (voiceErr) {
             const firstMsg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr)
+            const firstHint = voiceTransportFailureHint(firstMsg, effectiveVoiceTransport)
             const fallbackTransport: "udp" | "tcp" = effectiveVoiceTransport === "udp" ? "tcp" : "udp"
             let fallbackOk = false
-            if (/hello|timeout|tcp|udp|connect/i.test(firstMsg)) {
+            if (/hello|timeout|tcp|udp|connect|ECONNREFUSED|socket closed/i.test(firstMsg)) {
               try {
                 await window.electronVoice.connect({
                   host: vopts.host,
@@ -2334,9 +2845,13 @@ export default function VoIPApp() {
                 fallbackOk = true
                 effectiveVoiceTransport = fallbackTransport
                 setVoiceTransport(fallbackTransport)
-                toast.success(
-                  `Voice switched to ${fallbackTransport.toUpperCase()} (fallback after ${resolvedVoiceTransport.toUpperCase()} failed).`
-                )
+                if (resolvedVoiceTransport === "tcp") {
+                  toast.warning(`TCP voice failed; using UDP. ${firstHint}`)
+                } else {
+                  toast.success(
+                    `Voice switched to ${fallbackTransport.toUpperCase()} (fallback after ${resolvedVoiceTransport.toUpperCase()} failed).`
+                  )
+                }
               } catch (fallbackErr) {
                 const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
                 toast.error(
@@ -2346,8 +2861,10 @@ export default function VoIPApp() {
             }
             if (!fallbackOk) {
               if (window.electronVoice?.disconnect) await window.electronVoice.disconnect()
-              if (!/hello|timeout|tcp|udp|connect/i.test(firstMsg)) {
-                toast.error(`Voice error: ${firstMsg}. Connected without voice.`)
+              if (!/hello|timeout|tcp|udp|connect|ECONNREFUSED|socket closed/i.test(firstMsg)) {
+                toast.error(`Voice error: ${firstHint}. Connected without voice.`)
+              } else if (resolvedVoiceTransport === "tcp") {
+                toast.error(`TCP voice failed: ${firstHint}. Connected without voice.`)
               }
             }
           }
@@ -2399,8 +2916,12 @@ export default function VoIPApp() {
     }
   }
 
-  const openAppSettings = async (initialTab: "voice" | "keybinds" | "server_general" | "server_channels" | "server_roles" = "voice") => {
-    if (!window.electronVoice) return
+  const openAppSettings = async (initialTab: AppSettingsTab = "voice") => {
+    if (!window.electronVoice) {
+      setAppSettingsTab(initialTab === "language" ? "language" : initialTab)
+      setShowAppSettings(true)
+      return
+    }
     setDeviceError("")
     let list = (await window.electronVoice.listAudioDevices()) as AudioDevice[]
     if (navigator.mediaDevices?.enumerateDevices) {
@@ -2443,6 +2964,7 @@ export default function VoIPApp() {
 
   const saveAudioSettings = async () => {
     await window.electronVoice?.setAudioDevices(selectedDevices)
+    await webRtcSessionRef.current?.setOutputDevice(selectedDevices.outputId)
     setAudioDevicesRevision((v) => v + 1)
     setShowAppSettings(false)
   }
@@ -2577,277 +3099,235 @@ export default function VoIPApp() {
   }
 
   return (
-    <main className="flex h-screen overflow-hidden bg-background">
-      <div ref={webRtcAudioSinkRef} className="hidden" aria-hidden="true" />
-      <ServerSidebar
-        servers={servers}
-        activeServerId={activeServerId}
-        onServerSelect={handleServerSelect}
-        onRemoveServer={handleRemoveSavedServer}
-        onAddServer={() => {
-          setShowConnectPanel((open) => {
-            if (!open) setConnectServerListName("")
-            return !open
-          })
-        }}
-        onOpenSettings={() => {
-          const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
-          void openAppSettings(initialTab)
-        }}
-      />
+    <>
+      <main className="flex h-dvh overflow-hidden bg-background">
+        <div ref={webRtcAudioSinkRef} className="hidden" aria-hidden="true" />
 
-      <div className="flex h-full flex-col">
-        {showConnectPanel && (
-          <div className="m-3 w-[400px] max-w-[calc(100vw-1.5rem)] rounded-xl border border-border bg-card p-4 shadow-lg">
-            <div className="mb-4 flex items-center gap-2">
-              <Server className="h-5 w-5 text-primary" />
-              <h2 className="text-sm font-semibold text-foreground">Server Connection</h2>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <Label className="mb-1 text-xs text-muted-foreground">Name in list</Label>
-                <Input
-                  className="h-8 text-sm"
-                  value={connectServerListName}
-                  onChange={(e) => setConnectServerListName(e.target.value)}
-                  placeholder="Unique name (sidebar). Empty = use server name from API"
-                />
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Names are compared without case. Two saved servers cannot share the same name.
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <div className="flex-1">
-                  <Label className="mb-1 text-xs text-muted-foreground">Host</Label>
-                  <Input className="h-8 text-sm" value={apiHost} onChange={(e) => setApiHost(e.target.value)} placeholder="localhost" />
-                </div>
-                <div className="w-20">
-                  <Label className="mb-1 text-xs text-muted-foreground">Port</Label>
-                  <Input className="h-8 text-sm" value={apiPort} onChange={(e) => setApiPort(e.target.value)} placeholder="18080" />
-                </div>
-              </div>
-              <div>
-                <Label className="mb-1 text-xs text-muted-foreground">API &amp; WebSocket (TLS)</Label>
-                <Select value={apiUseHttps ? "https" : "http"} onValueChange={(v) => setApiUseHttps(v === "https")}>
-                  <SelectTrigger className="h-8 text-sm w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="http">HTTP — WebSocket ws://</SelectItem>
-                    <SelectItem value="https">HTTPS — WebSocket wss://</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Use HTTPS if the API is behind TLS (same as in the browser address bar).
-                </p>
-              </div>
-              <div>
-                <Label className="mb-1 text-xs text-muted-foreground">Voice UDP port (optional)</Label>
-                <Input
-                  className="h-8 text-sm"
-                  value={udpPortOverride}
-                  onChange={(e) => setUdpPortOverride(e.target.value)}
-                  placeholder="From server (leave empty)"
-                  inputMode="numeric"
-                />
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Override only if NAT maps a different external UDP port than the server announces after join.
-                </p>
-              </div>
-              <div>
-                <Label className="mb-1 text-xs text-muted-foreground">Media engine</Label>
-                <Select value={mediaEngine} onValueChange={(v) => setMediaEngine(v === "webrtc" ? "webrtc" : "legacy")}>
-                  <SelectTrigger className="h-8 text-sm w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="legacy">Legacy UDP/TCP (stable baseline)</SelectItem>
-                    <SelectItem value="webrtc">WebRTC SFU (test)</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  WebRTC requires LIVEKIT_URL/API_KEY/API_SECRET on the server and a reachable SFU/TURN setup.
-                </p>
-              </div>
-              <div>
-                <Label className="mb-1 text-xs text-muted-foreground">Voice transport</Label>
-                <Select value={voiceTransport} onValueChange={(v) => setVoiceTransport(v === "tcp" ? "tcp" : "udp")}>
-                  <SelectTrigger className="h-8 text-sm w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="udp">UDP (low latency)</SelectItem>
-                    <SelectItem value="tcp">TCP fallback (if UDP blocked)</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Client uses only the selected transport. We'll suggest switching only when HELLO/handshake fails.
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <div className="flex-1">
-                  <Label className="mb-1 text-xs text-muted-foreground">Password</Label>
-                  <Input className="h-8 text-sm" type="password" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)} placeholder="Server password" />
-                </div>
-                <div className="flex-1">
-                  <Label className="mb-1 text-xs text-muted-foreground">Nickname</Label>
-                  <Input className="h-8 text-sm" value={displayNameInput} onChange={(e) => setDisplayNameInput(e.target.value)} placeholder="Your name" />
-                </div>
-              </div>
-              <details className="group">
-                <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-                  Advanced options
-                </summary>
-                <div className="mt-2 space-y-2">
-                  <div>
-                    <Label className="mb-1 text-xs text-muted-foreground">Superuser password</Label>
-                    <Input className="h-8 text-sm" type="password" value={superuserPasswordInput} onChange={(e) => setSuperuserPasswordInput(e.target.value)} placeholder="Optional, grants admin" />
-                  </div>
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <Label className="mb-1 text-xs text-muted-foreground">Display name</Label>
-                      <Input className="h-8 text-sm" value={profileDisplayName} onChange={(e) => setProfileDisplayName(e.target.value)} placeholder="Server profile" />
-                    </div>
-                    <div className="flex items-end">
-                      <Button variant="outline" size="sm" onClick={saveProfile} disabled={!activeServerId}>Save</Button>
-                    </div>
-                  </div>
-                  {activeServerId && canManageServer && (
-                    <Button variant="outline" size="sm" className="w-full" onClick={() => void openAppSettings("server_general")}>
-                      Server settings
-                    </Button>
-                  )}
-                </div>
-              </details>
-              <Button className="w-full" onClick={() => void connectAndJoin()} disabled={joining}>
-                {joining ? <><Spinner className="mr-2" /> Connecting...</> : "Connect"}
-              </Button>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <div className="flex items-center gap-1">
-                  {connectedToApi ? <Wifi className="h-3 w-3 text-accent" /> : <WifiOff className="h-3 w-3" />}
-                  <span>{connectedToApi ? "API" : "API ?"}</span>
-                </div>
-                <span className="text-border">|</span>
-                <span>WS: {wsConnected ? "connected" : wsReconnecting ? "reconnecting..." : "disconnected"}</span>
-              </div>
-              {!hasDesktopBridge && (
-                <p className="text-xs text-destructive">Desktop voice bridge not detected.</p>
-              )}
-              {error && <p className="text-xs text-destructive">{error}</p>}
-            </div>
-          </div>
-        )}
-        {activeServerId ? (
-        <ChannelSidebar
-            serverName={servers.find((s) => s.id === activeServerId)?.name || "No Server"}
-          categories={categories}
-          activeChannelId={activeChannelId}
-          onChannelSelect={handleChannelSelect}
-          voiceUsers={voiceUsers}
-          selfClientId={myVoiceClientId}
-          peerVolumePct={peerVolumePct}
-          onPeerVolumeChange={handlePeerVolumeChange}
-          enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
-        />
-        ) : null}
-        <UserPanel
-          user={currentUser}
-          isMuted={isMuted}
-          isDeafened={isDeafened}
-          isInVoice={isInVoice}
-          voiceChannelName={voiceChannelName}
-          onToggleMute={() => {
-            const next = !isMuted
-            if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
-            applyMute(next)
+        <ServerSidebar
+          servers={servers}
+          activeServerId={activeServerId}
+          onServerSelect={handleServerSelect}
+          onRemoveServer={handleRemoveSavedServer}
+          onAddServer={() => {
+            setConnectServerListName("")
+            setShowConnectPanel(true)
           }}
-          onToggleDeafen={() => {
-            const next = !isDeafened
-            applyDeafen(next)
-          }}
-          onToggleVoiceStats={() => setShowVoiceStatsPanel((v) => !v)}
-          onDisconnect={handleDisconnect}
-          voiceStatsSummary={voiceStatsSummary}
           onOpenSettings={() => {
-            void openAppSettings()
+            const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
+            void openAppSettings(initialTab)
           }}
         />
-      </div>
 
-      {/* Voice Stats Popover */}
-      {showVoiceStatsPanel && (
-        <div className="fixed bottom-24 left-20 z-20 w-[380px] rounded-xl border border-border bg-card p-4 shadow-xl">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <BarChart3 className={`h-4 w-4 ${qualityClass}`} />
-              <span className={`text-sm font-semibold ${qualityClass}`}>Voice Stats</span>
+        {activeServerId ? (
+          <aside className="flex h-full min-h-0 w-60 shrink-0 flex-col border-r border-border bg-card">
+            <ChannelSidebar
+              serverName={servers.find((s) => s.id === activeServerId)?.name || "No Server"}
+              serverBannerUrl={serverAppearance.serverBannerUrl}
+              categories={categories}
+              activeChannelId={activeChannelId}
+              currentVoiceChannelId={currentVoiceChannel}
+              isInVoice={isInVoice}
+              onChannelSelect={handleChannelSelect}
+              onLeaveVoice={handleDisconnect}
+              voiceUsers={voiceUsers}
+              selfClientId={myVoiceClientId}
+              peerVolumePct={peerVolumePct}
+              onPeerVolumeChange={handlePeerVolumeChange}
+              enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
+            />
+            <UserPanel
+              user={currentUser}
+              isMuted={isMuted}
+              isDeafened={isDeafened}
+              isInVoice={isInVoice}
+              voiceChannelName={voiceChannelName}
+              onToggleMute={() => {
+                const next = !isMuted
+                if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+                applyMute(next)
+              }}
+              onToggleDeafen={() => applyDeafen(!isDeafened)}
+              onDisconnect={handleDisconnect}
+              voiceStatsSummary={voiceStatsSummary}
+              voiceStats={voiceStats}
+              audioPipelineDiag={audioPipelineDiag}
+              qualityClass={qualityClass}
+              isSpeakingNow={isSpeakingNow}
+              onOpenSettings={() => {
+                void openAppSettings()
+              }}
+            />
+          </aside>
+        ) : null}
+
+        {!activeServerId ? (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-4 bg-background p-8">
+            <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-muted">
+              <Headphones className="h-10 w-10 text-muted-foreground" />
             </div>
-            <Button variant="ghost" size="sm" onClick={() => setShowVoiceStatsPanel(false)}>Close</Button>
+            <div className="max-w-sm text-center">
+              <h2 className="text-lg font-semibold text-foreground">{t("welcome.title")}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">{t("welcome.subtitle")}</p>
+            </div>
+            <Button variant="outline" onClick={() => setShowConnectPanel(true)}>
+              <Server className="mr-2 h-4 w-4" /> {t("welcome.connectToServer")}
+            </Button>
           </div>
-          {voiceStats ? (
-            <div className="space-y-1.5 text-xs text-muted-foreground">
-              <div className="flex justify-between"><span>Status</span><span>{voiceStats.connected ? "Connected" : "Disconnected"} {isSpeakingNow ? "| Speaking" : ""}</span></div>
-              <div className="flex justify-between"><span>TX / RX</span><span>{voiceStats.txPackets ?? 0} / {voiceStats.rxPackets ?? 0}</span></div>
-              <div className="flex justify-between"><span>Loss</span><span>{voiceStats.rxLostEstimated ?? 0} ({voiceStats.packetLossPct ?? 0}%)</span></div>
-              <Separator />
-              <div className={`flex justify-between ${qualityClass}`}><span>Ping</span><span>{voiceStats.pingNowMs ?? 0}ms now / {voiceStats.ping1PctMs ?? 0}ms p1 / {voiceStats.ping01PctMs ?? 0}ms p0.1</span></div>
-              <div className={`flex justify-between ${qualityClass}`}><span>Jitter</span><span>{voiceStats.jitterNowMs ?? 0}ms now / {voiceStats.jitter1PctMs ?? 0}ms p1 / {voiceStats.jitter01PctMs ?? 0}ms p0.1</span></div>
-              {audioPipelineDiag && (
-                <>
-                  <Separator />
-                  <div className="flex justify-between"><span>Capture SR</span><span>{Math.round(audioPipelineDiag.captureSampleRate)} Hz</span></div>
-                  <div className="flex justify-between"><span>Playback SR</span><span>{Math.round(audioPipelineDiag.playbackSampleRate)} Hz</span></div>
-                  <div className="flex justify-between"><span>Playout buffer</span><span>{audioPipelineDiag.playoutBufferedSamples} samples</span></div>
-                  <div className="flex justify-between">
-                    <span>Underruns</span>
-                    <span title="Empty-buffer events per ~1s (not samples)">{audioPipelineDiag.playoutUnderruns}</span>
-                  </div>
-                  <div className="flex justify-between"><span>Overflow drops</span><span>{audioPipelineDiag.playoutOverflowDrops}</span></div>
-                </>
-              )}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No stats yet. Join a voice channel.</p>
-          )}
-        </div>
-      )}
+        ) : activeChannel?.type === "voice" ? (
+          <VoiceChannelView
+            channelName={activeChannel.name}
+            channelBannerUrl={activeChannelBannerUrl}
+            error={error}
+            activeScreenSharerName={activeScreenSharerName}
+            watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"}
+            isScreenSharing={isScreenSharing}
+            viewingLegacyStream={viewingLegacyStream}
+            viewingWebRtcStream={viewingWebRtcStream}
+            streamLoading={streamLoading}
+            streamPathLabel={streamPathLabel}
+            screenVideoUrl={screenVideoUrl}
+            screenImageUrl={screenImageUrl}
+            streamVolumePct={streamVolumePct}
+            streamVideoFullscreen={streamVideoFullscreen}
+            showingStreamWindow={showingStreamWindow}
+            showMemberList={showMemberList}
+            isInVoice={isInVoice}
+            hasDesktopBridge={hasDesktopBridge}
+            isDeafened={isDeafened}
+            screenShareWithAudio={screenShareWithAudio}
+            screenSources={screenSources}
+            selectedScreenSourceId={selectedScreenSourceId}
+            screenResolution={screenResolution}
+            screenFps={screenFps}
+            screenBitrateKbps={screenBitrateKbps}
+            localPreviewVideoRef={localPreviewVideoRef}
+            remoteStreamVideoRef={remoteStreamVideoRef}
+            onScreenSourceChange={setSelectedScreenSourceId}
+            onScreenResolutionChange={setScreenResolution}
+            onScreenFpsChange={setScreenFps}
+            onScreenBitrateChange={setScreenBitrateKbps}
+            onScreenShareWithAudioToggle={() => setScreenShareWithAudio((v) => !v)}
+            onScreenShareToggle={() => void handleScreenShareToggle()}
+            onToggleStreamWindow={toggleStreamWindow}
+            onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
+            onToggleMemberList={() => setShowMemberList((v) => !v)}
+            onStreamVolumeChange={setStreamVolumePct}
+            onJoinVoice={() => void handleChannelSelect(activeChannelId)}
+            onLeaveVoice={handleDisconnect}
+          />
+        ) : (
+          <ChatArea
+            channelName={activeChannel?.name || "general"}
+            channelType={activeChannel?.type || "text"}
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            onUploadAttachment={handleUploadAttachment}
+            canSend={Boolean(activeServerId && activeChannelId && isTextChannel)}
+            showMemberList={showMemberList}
+            onToggleMemberList={() => setShowMemberList(!showMemberList)}
+          />
+        )}
 
-      {/* Settings Dialog */}
+        {showMemberList && activeServerId ? <MemberList members={members} roles={[]} /> : null}
+      </main>
+
+      <ConnectServerDialog
+        open={showConnectPanel}
+        onOpenChange={setShowConnectPanel}
+        connectServerListName={connectServerListName}
+        onConnectServerListNameChange={setConnectServerListName}
+        apiHost={apiHost}
+        onApiHostChange={setApiHost}
+        apiPort={apiPort}
+        onApiPortChange={setApiPort}
+        apiUseHttps={apiUseHttps}
+        onApiUseHttpsChange={setApiUseHttps}
+        udpPortOverride={udpPortOverride}
+        onUdpPortOverrideChange={setUdpPortOverride}
+        mediaEngine={mediaEngine}
+        onMediaEngineChange={setMediaEngine}
+        voiceTransport={voiceTransport}
+        onVoiceTransportChange={setVoiceTransport}
+        serverPassword={serverPassword}
+        onServerPasswordChange={setServerPassword}
+        displayNameInput={displayNameInput}
+        onDisplayNameChange={setDisplayNameInput}
+        superuserPasswordInput={superuserPasswordInput}
+        onSuperuserPasswordChange={setSuperuserPasswordInput}
+        profileDisplayName={profileDisplayName}
+        onProfileDisplayNameChange={setProfileDisplayName}
+        onSaveProfile={saveProfile}
+        activeServerId={activeServerId}
+        canManageServer={canManageServer}
+        onOpenServerSettings={() => void openAppSettings("server_general")}
+        onConnect={() => void connectAndJoin()}
+        joining={joining}
+        connectedToApi={connectedToApi}
+        wsConnected={wsConnected}
+        wsReconnecting={wsReconnecting}
+        hasDesktopBridge={hasDesktopBridge}
+        error={error}
+      />
       <Dialog open={showAppSettings} onOpenChange={setShowAppSettings}>
-        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Settings</DialogTitle>
-            <DialogDescription>Configure voice, video, keybinds, and server options.</DialogDescription>
+        <DialogContent className="flex h-[min(85vh,720px)] max-w-3xl flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+          <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
+            <DialogTitle>{t("settings.title")}</DialogTitle>
+            <DialogDescription>{t("settings.description")}</DialogDescription>
           </DialogHeader>
-          <Tabs value={appSettingsTab} onValueChange={(v) => setAppSettingsTab(v as typeof appSettingsTab)}>
-            <TabsList className="w-full">
-              <TabsTrigger value="voice">Voice & Video</TabsTrigger>
-              <TabsTrigger value="keybinds">Keybinds</TabsTrigger>
-              {canOpenServerSettings && (
-                <>
-                  <TabsTrigger value="server_general">General</TabsTrigger>
-                  <TabsTrigger value="server_channels">Channels</TabsTrigger>
-                  <TabsTrigger value="server_roles">Roles</TabsTrigger>
-                </>
-              )}
-            </TabsList>
-
-            <TabsContent value="voice" className="space-y-5 pt-4">
+          <Tabs
+            value={appSettingsTab}
+            onValueChange={(v) => setAppSettingsTab(v as AppSettingsTab)}
+            className="flex min-h-0 flex-1 flex-col gap-0"
+          >
+            <div className="flex min-h-0 flex-1">
+              <TabsList className="flex h-auto w-44 shrink-0 flex-col items-stretch justify-start gap-1 rounded-none border-r border-border bg-muted/20 p-2">
+                <TabsTrigger value="language" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                  {t("settings.tabLanguage")}
+                </TabsTrigger>
+                <TabsTrigger value="voice" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                  {t("settings.tabVoice")}
+                </TabsTrigger>
+                <TabsTrigger value="keybinds" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                  {t("settings.tabKeybinds")}
+                </TabsTrigger>
+                {canOpenServerSettings ? (
+                  <>
+                    <TabsTrigger value="server_general" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabServer")}
+                    </TabsTrigger>
+                    <TabsTrigger value="server_channels" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabChannels")}
+                    </TabsTrigger>
+                    <TabsTrigger value="server_roles" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabRoles")}
+                    </TabsTrigger>
+                  </>
+                ) : null}
+              </TabsList>
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="px-6 py-4">
+            <TabsContent value="language" className="mt-0 space-y-4">
+              <div>
+                <Label className="text-base">{t("language.title")}</Label>
+              </div>
+              <LanguageSelector />
+            </TabsContent>
+            <TabsContent value="voice" className="mt-0 space-y-5">
               <div className="space-y-2">
-                <Label>Input Device</Label>
+                <Label>{t("settings.inputDevice")}</Label>
                 <select
                   className="w-full rounded-md border border-input bg-input px-3 py-2 text-sm focus:border-ring focus:outline-none"
                   value={selectedDevices.inputId ?? ""}
                   onChange={(e) => setSelectedDevices((prev) => ({ ...prev, inputId: e.target.value || null }))}
                 >
-                  <option value="">Default</option>
+                  <option value="">{t("common.default")}</option>
                   {audioDevices.input.map((d) => (
                     <option key={d.id} value={d.id}>{d.label}</option>
                   ))}
                 </select>
               </div>
               <div className="space-y-2">
-                <Label>Output Device</Label>
+                <Label>{t("settings.outputDevice")}</Label>
                 <select
                   className="w-full rounded-md border border-input bg-input px-3 py-2 text-sm focus:border-ring focus:outline-none"
                   value={selectedDevices.outputId ?? ""}
@@ -2861,58 +3341,55 @@ export default function VoIPApp() {
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label>Input Volume</Label>
+                  <Label>{t("settings.inputVolume")}</Label>
                   <span className="text-xs text-muted-foreground">{micVolumePct}%</span>
                 </div>
                 <Slider value={[micVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setMicVolumePct(v)} />
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label>Output Volume</Label>
+                  <Label>{t("settings.outputVolume")}</Label>
                   <span className="text-xs text-muted-foreground">{outputVolumePct}%</span>
                 </div>
                 <Slider value={[outputVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setOutputVolumePct(v)} />
               </div>
-              <div className="rounded-lg border border-border p-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Microphone Meter</Label>
-                    <p className="text-xs text-muted-foreground">Helps you set gate thresholds and levels.</p>
-                  </div>
-                  <div className="text-right text-xs text-muted-foreground tabular-nums">
-                    <div>Peak: {micMeter ? Math.round(micMeter.peak) : 0}</div>
-                    <div>RMS: {micMeter ? micMeter.rms.toFixed(3) : "0.000"}</div>
-                  </div>
+              <div className="rounded-lg border border-border p-4 space-y-4 bg-muted/20">
+                <div>
+                  <Label>{t("settings.micLevels")}</Label>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {t("settings.micLevelsHint")}
+                  </p>
                 </div>
-                <div className="h-2 w-full overflow-hidden rounded bg-muted">
-                  <div
-                    className="h-full bg-primary transition-[width]"
-                    style={{ width: `${Math.min(100, Math.round(((micMeter?.peak ?? 0) / 4000) * 100))}%` }}
-                  />
-                </div>
+                <MicLevelMeter
+                  sample={micMeter}
+                  gateEnabled={gateEnabled}
+                  gateMuteThreshold={gateMuteThreshold}
+                  gateOpenThreshold={gateOpenThreshold}
+                  active={isInVoice && hasDesktopBridge}
+                />
               </div>
 
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div>
-                  <Label>Capture DSP (getUserMedia constraints)</Label>
+                  <Label>{t("settings.captureDsp")}</Label>
                   <p className="text-xs text-muted-foreground">
-                    These flags affect microphone capture in Electron/Chromium. They do not change your UDP transport.
+                    {t("settings.captureDspHint")}
                   </p>
                 </div>
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm">Noise Suppression</Label>
+                  <Label className="text-sm">{t("settings.noiseSuppression")}</Label>
                   <Switch checked={noiseSuppressionEnabled} onCheckedChange={setNoiseSuppressionEnabled} />
                 </div>
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm">Echo Cancellation (AEC)</Label>
+                  <Label className="text-sm">{t("settings.echoCancellation")}</Label>
                   <Switch checked={echoCancellationEnabled} onCheckedChange={setEchoCancellationEnabled} />
                 </div>
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm">Auto Gain Control (AGC)</Label>
+                  <Label className="text-sm">{t("settings.autoGainControl")}</Label>
                   <Switch checked={autoGainControlEnabled} onCheckedChange={setAutoGainControlEnabled} />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Tip: your OS may have stronger mic noise reduction (Windows Studio Effects, macOS Voice Isolation).
+                  {t("settings.captureTip")}
                 </p>
               </div>
 
@@ -2920,10 +3397,9 @@ export default function VoIPApp() {
                 <div className="rounded-lg border border-border p-3 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label>Speex noise suppression (SpeexDSP)</Label>
+                      <Label>{t("settings.speexNs")}</Label>
                       <p className="text-xs text-muted-foreground">
-                        Off by default — can cause hollow &quot;tube&quot; sound. Browser Noise Suppression (above) is
-                        usually better quality. Enable only if browser NS is unavailable. Rejoin voice after toggling.
+                        {t("settings.speexNsHint")}
                       </p>
                     </div>
                     <Switch checked={speexNoiseSuppressionEnabled} onCheckedChange={setSpeexNoiseSuppressionEnabled} />
@@ -2934,29 +3410,29 @@ export default function VoIPApp() {
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label>Opus uplink (recommended)</Label>
+                    <Label>{t("settings.opusUplink")}</Label>
                     <p className="text-xs text-muted-foreground">
-                      Voice-optimized Opus (VOIP). Raw PCM sends the full noise floor and often sounds like constant hiss.
+                      {t("settings.opusUplinkHint")}
                     </p>
                   </div>
                   <Switch checked={useOpusUplink} onCheckedChange={setUseOpusUplink} />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  If unsupported, the app falls back to PCM uplink automatically.
+                  {t("settings.opusFallback")}
                 </p>
               </div>
 
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label>Mic Monitor (listen to yourself)</Label>
-                    <p className="text-xs text-muted-foreground">Use headphones to avoid feedback.</p>
+                    <Label>{t("settings.micMonitor")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("settings.micMonitorHint")}</p>
                   </div>
                   <Switch checked={monitorEnabled} onCheckedChange={setMonitorEnabled} />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label className="text-sm">Monitor Volume</Label>
+                    <Label className="text-sm">{t("settings.monitorVolume")}</Label>
                     <span className="text-xs text-muted-foreground">{monitorVolumePct}%</span>
                   </div>
                   <Slider value={[monitorVolumePct]} min={0} max={200} step={1} onValueChange={([v]) => setMonitorVolumePct(v)} />
@@ -2964,29 +3440,60 @@ export default function VoIPApp() {
               </div>
 
               <div className="rounded-lg border border-border p-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Noise Gate</Label>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <Label>{t("settings.noiseGate")}</Label>
                     <p className="text-xs text-muted-foreground">
-                      Off by default. Studio condenser mics often sound choppy with gating — browser NS + mic level
-                      are usually enough. Envelope is smoothed across frames; Release controls decay.
+                      {t("settings.noiseGateHint")}
                     </p>
                   </div>
-                  <Switch checked={gateEnabled} onCheckedChange={setGateEnabled} />
+                  <Switch checked={gateEnabled} onCheckedChange={setGateEnabled} className="mt-1 shrink-0" />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label className="text-sm">Gate Threshold</Label>
-                    <span className="text-xs text-muted-foreground">{gateThreshold}</span>
+                    <Label className="text-sm">{t("settings.gateMuteThreshold")}</Label>
+                    <span className="text-xs text-muted-foreground">{gateMuteThreshold}</span>
                   </div>
-                  <Slider value={[gateThreshold]} min={0} max={4000} step={10} onValueChange={([v]) => setGateThreshold(v)} />
+                  <Slider
+                    value={[gateMuteThreshold]}
+                    min={0}
+                    max={4000}
+                    step={10}
+                    onValueChange={([v]) => {
+                      const next = v
+                      setGateMuteThreshold(next)
+                      if (gateOpenThreshold <= next + 20) {
+                        setGateOpenThreshold(Math.min(4000, next + 120))
+                      }
+                    }}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">{t("settings.gateFloor")}</Label>
+                    <span className="text-xs text-muted-foreground">{gateFloorPct}%</span>
+                  </div>
+                  <Slider value={[gateFloorPct]} min={1} max={50} step={1} onValueChange={([v]) => setGateFloorPct(v)} />
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">{t("settings.gateOpenThreshold")}</Label>
+                    <span className="text-xs text-muted-foreground">{gateOpenThreshold}</span>
+                  </div>
+                  <Slider
+                    value={[gateOpenThreshold]}
+                    min={Math.min(4000, gateMuteThreshold + 40)}
+                    max={4000}
+                    step={10}
+                    onValueChange={([v]) => setGateOpenThreshold(Math.max(gateMuteThreshold + 40, v))}
+                  />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label className="text-sm">Release</Label>
                     <span className="text-xs text-muted-foreground">{gateReleaseMs}ms</span>
                   </div>
-                  <Slider value={[gateReleaseMs]} min={0} max={800} step={10} onValueChange={([v]) => setGateReleaseMs(v)} />
+                  <Slider value={[gateReleaseMs]} min={80} max={800} step={10} onValueChange={([v]) => setGateReleaseMs(v)} />
                 </div>
               </div>
               <div className="rounded-lg border border-border p-3 space-y-3">
@@ -3024,65 +3531,109 @@ export default function VoIPApp() {
                   <Switch checked={playbackLimiterEnabled} onCheckedChange={setPlaybackLimiterEnabled} />
                 </div>
               </div>
-              <Button onClick={saveAudioSettings}>Apply Audio Settings</Button>
+              <Button onClick={saveAudioSettings}>{t("settings.applyAudio")}</Button>
               {deviceError && <p className="text-sm text-destructive">{deviceError}</p>}
             </TabsContent>
 
-            <TabsContent value="keybinds" className="space-y-5 pt-4">
-              <p className="text-sm text-muted-foreground">Global OS shortcuts (Electron format, e.g. Ctrl+Shift+M)</p>
+            <TabsContent value="keybinds" className="mt-0 space-y-5">
+              <p className="text-sm text-muted-foreground">{t("settings.keybindsIntro")}</p>
               <div className="space-y-3">
                 <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-                  <Label>Toggle Mute</Label>
+                  <Label>{t("settings.toggleMute")}</Label>
                   <Input value={keybindDraft.toggleMute} onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleMute: e.target.value }))} placeholder="Ctrl+Shift+M" />
-                  <Label>Toggle Deafen</Label>
+                  <Label>{t("settings.toggleDeafen")}</Label>
                   <Input value={keybindDraft.toggleDeafen} onChange={(e) => setKeybindDraft((prev) => ({ ...prev, toggleDeafen: e.target.value }))} placeholder="Ctrl+Shift+D" />
-                  <Label>Push To Talk</Label>
+                  <Label>{t("settings.pushToTalk")}</Label>
                   <Input value={keybindDraft.pushToTalk} onChange={(e) => setKeybindDraft((prev) => ({ ...prev, pushToTalk: e.target.value }))} placeholder="Ctrl+Shift+V" />
                 </div>
               </div>
               <div className="flex gap-2">
-                <Button onClick={saveKeybinds}>Save Keybinds</Button>
-                <Button variant="outline" onClick={clearKeybinds}>Clear All</Button>
+                <Button onClick={saveKeybinds}>{t("settings.saveKeybinds")}</Button>
+                <Button variant="outline" onClick={clearKeybinds}>{t("settings.clearAll")}</Button>
               </div>
               <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground">
-                Active: mute={keybinds.toggleMute ?? "none"}, deafen={keybinds.toggleDeafen ?? "none"}, ptt={keybinds.pushToTalk ?? "none"}
+                {t("settings.activeKeybinds", {
+                  mute: keybinds.toggleMute ?? t("common.none"),
+                  deafen: keybinds.toggleDeafen ?? t("common.none"),
+                  ptt: keybinds.pushToTalk ?? t("common.none")
+                })}
               </div>
             </TabsContent>
 
-            <TabsContent value="server_general" className="space-y-3 pt-4">
+            <TabsContent value="server_general" className="mt-0 space-y-4">
               <div className="rounded-lg border border-border p-4 space-y-2">
-                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">Server</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? "Unknown"}</span></div>
-                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">ID</span><span className="text-xs font-mono text-muted-foreground">{activeServerId}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverLabel")}</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? "Unknown"}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverId")}</span><span className="text-xs font-mono text-muted-foreground">{activeServerId}</span></div>
               </div>
-              <p className="text-sm text-muted-foreground">General server moderation/admin settings will live here.</p>
+              <div className="space-y-2">
+                <Label className="text-sm">{t("settings.serverBannerUrl")}</Label>
+                <p className="text-xs text-muted-foreground">{t("settings.serverBannerHint")}</p>
+                <Input value={serverBannerDraft} onChange={(e) => setServerBannerDraft(e.target.value)} placeholder="https://example.com/banner.jpg" />
+                {serverBannerDraft.trim() ? (
+                  <div className="overflow-hidden rounded-lg border border-border">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={serverBannerDraft.trim()} alt="" className="h-20 w-full object-cover" />
+                  </div>
+                ) : null}
+                <Button size="sm" onClick={saveServerBanner}>{t("settings.saveServerBanner")}</Button>
+              </div>
             </TabsContent>
 
-            <TabsContent value="server_channels" className="space-y-4 pt-4">
-              <p className="text-sm text-muted-foreground">Only admins can create or edit channels.</p>
-              <div className="flex gap-2">
-                <Input className="flex-1" value={roomNameInput} onChange={(e) => setRoomNameInput(e.target.value)} placeholder="Channel name" disabled={creatingChannel} />
+            <TabsContent value="server_channels" className="mt-0 space-y-4">
+              <p className="text-sm text-muted-foreground">{t("settings.channelsAdminHint")}</p>
+              <div className="space-y-2 rounded-lg border border-border p-3">
+                <Label className="text-sm">{t("settings.channelBanner")}</Label>
+                <p className="text-xs text-muted-foreground">{t("settings.channelBannerHint")}</p>
                 <select
-                  className="rounded-md border border-input bg-input px-3 py-2 text-sm"
+                  className="w-full rounded-md border border-input bg-input px-3 py-2 text-sm"
+                  value={channelBannerChannelId}
+                  onChange={(e) => {
+                    const id = e.target.value
+                    setChannelBannerChannelId(id)
+                    setChannelBannerDraft(id ? (serverAppearance.channelBanners?.[id] ?? "") : "")
+                  }}
+                >
+                  <option value="">{t("settings.selectChannel")}</option>
+                  {allChannels.map((ch) => (
+                    <option key={ch.id} value={ch.id}>
+                      {ch.type === "voice" ? `${t("settings.voiceKind")}:` : `${t("settings.textKind")}:`} {ch.name}
+                    </option>
+                  ))}
+                </select>
+                <Input
+                  value={channelBannerDraft}
+                  onChange={(e) => setChannelBannerDraft(e.target.value)}
+                  placeholder="https://example.com/channel-banner.jpg"
+                  disabled={!channelBannerChannelId}
+                />
+                <Button size="sm" onClick={saveChannelBanner} disabled={!channelBannerChannelId}>
+                  {t("settings.saveChannelBanner")}
+                </Button>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input className="min-w-0 flex-1" value={roomNameInput} onChange={(e) => setRoomNameInput(e.target.value)} placeholder={t("settings.channelName")} disabled={creatingChannel} />
+                <select
+                  className="rounded-md border border-input bg-input px-3 py-2 text-sm sm:w-28"
                   value={roomKindInput}
                   onChange={(e) => setRoomKindInput(e.target.value as "voice" | "text")}
                   disabled={creatingChannel}
                 >
-                  <option value="voice">Voice</option>
-                  <option value="text">Text</option>
+                  <option value="voice">{t("settings.voiceKind")}</option>
+                  <option value="text">{t("settings.textKind")}</option>
                 </select>
-                <Button onClick={() => void createChannelFromSettings()} disabled={creatingChannel || roomNameInput.trim().length === 0}>
-                  {creatingChannel ? <><Spinner className="mr-2" /> Creating</> : "Create"}
+                <Button className="shrink-0" onClick={() => void createChannelFromSettings()} disabled={creatingChannel || roomNameInput.trim().length === 0}>
+                  {creatingChannel ? <><Spinner className="mr-2" /> {t("common.creating")}</> : t("common.create")}
                 </Button>
               </div>
               <div className="max-h-60 overflow-auto rounded-lg border border-border">
                 {allChannels.length === 0 ? (
-                  <div className="p-4 text-center text-sm text-muted-foreground">No channels yet.</div>
+                  <div className="p-4 text-center text-sm text-muted-foreground">{t("settings.noChannels")}</div>
                 ) : (
                   <div className="divide-y divide-border">
                     {allChannels.map((ch) => (
                       <div key={ch.id} className="flex items-center justify-between px-3 py-2">
                         <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="text-[10px]">{ch.type === "voice" ? "Voice" : "Text"}</Badge>
+                          <Badge variant="outline" className="text-[10px]">{ch.type === "voice" ? t("settings.voiceKind") : t("settings.textKind")}</Badge>
                           <span className="text-sm">{ch.name}</span>
                         </div>
                         <span className="text-xs font-mono text-muted-foreground">{ch.id.slice(0, 8)}</span>
@@ -3093,192 +3644,17 @@ export default function VoIPApp() {
               </div>
             </TabsContent>
 
-            <TabsContent value="server_roles" className="pt-4">
+            <TabsContent value="server_roles" className="mt-0">
               <p className="text-sm text-muted-foreground">
-                Role permissions (channel access, moderation, speaking/mute controls) will be configured here.
+                {t("settings.rolesPlaceholder")}
               </p>
             </TabsContent>
+                </div>
+              </ScrollArea>
+            </div>
           </Tabs>
         </DialogContent>
       </Dialog>
-
-      {/* Main Content */}
-      {!activeServerId ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-background p-8">
-          <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-muted">
-            <Headphones className="h-10 w-10 text-muted-foreground" />
-          </div>
-          <div className="text-center">
-            <h2 className="text-lg font-semibold text-foreground">Welcome to Voixex</h2>
-            <p className="mt-1 text-sm text-muted-foreground">Connect to a server to start chatting and talking.</p>
-          </div>
-          <Button variant="outline" onClick={() => setShowConnectPanel(true)}>
-            <Server className="mr-2 h-4 w-4" /> Connect to Server
-          </Button>
-        </div>
-      ) : activeChannel?.type === "voice" ? (
-        <div className="flex h-full flex-1 flex-col bg-background">
-          {/* Voice channel toolbar */}
-          <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
-            <div className="flex items-center gap-2">
-              <ScreenShare className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-semibold text-foreground">{activeChannel.name}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Select value={selectedScreenSourceId ?? ""} onValueChange={(v) => setSelectedScreenSourceId(v || null)}>
-                <SelectTrigger size="sm" className="h-7 w-40 text-xs" disabled={screenSources.length === 0}>
-                  <SelectValue placeholder="No sources" />
-                </SelectTrigger>
-                <SelectContent>
-                  {screenSources.map((source) => (
-                    <SelectItem key={source.id} value={source.id}>{source.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select value={screenResolution} onValueChange={setScreenResolution}>
-                <SelectTrigger size="sm" className="h-7 w-20 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="854x480">480p</SelectItem>
-                  <SelectItem value="1280x720">720p</SelectItem>
-                  <SelectItem value="1600x900">900p</SelectItem>
-                  <SelectItem value="1920x1080">1080p</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={String(screenFps)} onValueChange={(v) => setScreenFps(Number(v))}>
-                <SelectTrigger size="sm" className="h-7 w-20 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10 FPS</SelectItem>
-                  <SelectItem value="15">15 FPS</SelectItem>
-                  <SelectItem value="24">24 FPS</SelectItem>
-                  <SelectItem value="30">30 FPS</SelectItem>
-                  <SelectItem value="60">60 FPS</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={String(screenBitrateKbps)} onValueChange={(v) => setScreenBitrateKbps(Number(v))}>
-                <SelectTrigger size="sm" className="h-7 w-24 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1200">1.2 Mbps</SelectItem>
-                  <SelectItem value="2000">2.0 Mbps</SelectItem>
-                  <SelectItem value="3500">3.5 Mbps</SelectItem>
-                  <SelectItem value="5000">5.0 Mbps</SelectItem>
-                  <SelectItem value="8000">8.0 Mbps</SelectItem>
-                </SelectContent>
-              </Select>
-
-              <Separator orientation="vertical" className="h-5" />
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={isScreenSharing ? "destructive" : "outline"}
-                    size="sm"
-                    onClick={() => void handleScreenShareToggle()}
-                    disabled={!isInVoice || !hasDesktopBridge}
-                    className="h-7 gap-1 text-xs"
-                  >
-                    {isScreenSharing ? <MonitorOff className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
-                    {isScreenSharing ? "Stop" : "Share"}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{isScreenSharing ? "Stop Screen Share" : "Start Screen Share"}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={toggleStreamWindow}
-                    disabled={!activeScreenSharerName && !screenImageUrl && !screenVideoUrl && !isScreenSharing}
-                    className="h-7 gap-1 text-xs"
-                  >
-                    {showingStreamWindow ? <EyeOff className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
-                    {showingStreamWindow ? "Close" : "Pop-out"}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{showingStreamWindow ? "Close Stream Window" : "Open Stream Window"}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={showMemberList ? "secondary" : "ghost"}
-                    size="icon-sm"
-                    className="h-7 w-7"
-                    onClick={() => setShowMemberList(!showMemberList)}
-                  >
-                    <Users className="h-3.5 w-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{showMemberList ? "Hide Members" : "Show Members"}</TooltipContent>
-              </Tooltip>
-            </div>
-          </div>
-
-          {/* Voice channel body */}
-          <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6">
-            {error && (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-sm text-destructive">
-                {error}
-              </div>
-            )}
-            {activeScreenSharerName ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <ScreenShare className="h-4 w-4 text-accent" />
-                <span><span className="font-medium text-foreground">{activeScreenSharerName}</span> is sharing their screen</span>
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground">No active screen share</div>
-            )}
-            {activeScreenSharerName && (
-              <div className="text-xs text-muted-foreground">
-                Watching: {(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"}
-              </div>
-            )}
-            {isScreenSharing ? (
-              <video ref={localPreviewVideoRef} autoPlay muted playsInline className="max-h-[70vh] w-auto rounded-xl border border-border shadow-lg" />
-            ) : screenVideoUrl || screenImageUrl ? (
-              <video
-                ref={remoteStreamVideoRef}
-                src={screenVideoUrl ?? screenImageUrl ?? undefined}
-                autoPlay
-                muted
-                playsInline
-                controls
-                className="max-h-[70vh] w-auto rounded-xl border border-border shadow-lg"
-              />
-            ) : (
-              <div className="flex flex-col items-center gap-3 text-center">
-                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
-                  <ScreenShare className="h-8 w-8 text-muted-foreground" />
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Voice channel selected. Share your screen or wait for someone to start streaming.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-      <ChatArea
-        channelName={activeChannel?.name || "general"}
-        channelType={activeChannel?.type || "text"}
-        messages={messages}
-        onSendMessage={handleSendMessage}
-          onUploadAttachment={handleUploadAttachment}
-          canSend={Boolean(activeServerId && activeChannelId && isTextChannel)}
-        showMemberList={showMemberList}
-        onToggleMemberList={() => setShowMemberList(!showMemberList)}
-      />
-      )}
-
-      {showMemberList && activeServerId && (
-        <MemberList members={members} roles={[]} />
-      )}
-    </main>
+    </>
   )
 }

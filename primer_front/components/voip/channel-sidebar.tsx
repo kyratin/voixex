@@ -1,13 +1,15 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Monitor, Eye } from "lucide-react"
+import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Monitor, Eye, LogOut } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
+import { useI18n } from "@/lib/i18n/provider"
 
 export interface Channel {
   id: string
@@ -37,9 +39,13 @@ export interface VoiceUser {
 
 interface ChannelSidebarProps {
   serverName: string
+  serverBannerUrl?: string | null
   categories: ChannelCategory[]
   activeChannelId: string
+  currentVoiceChannelId?: string
+  isInVoice?: boolean
   onChannelSelect: (channelId: string) => void
+  onLeaveVoice?: () => void
   voiceUsers?: Record<string, VoiceUser[]>
   /** When set, voice rows can open per-user output volume (desktop UDP mixer on server). */
   selfClientId?: string | null
@@ -49,16 +55,21 @@ interface ChannelSidebarProps {
 }
 
 export function ChannelSidebar({ 
-  serverName, 
+  serverName,
+  serverBannerUrl,
   categories, 
-  activeChannelId, 
+  activeChannelId,
+  currentVoiceChannelId = "",
+  isInVoice = false,
   onChannelSelect,
+  onLeaveVoice,
   voiceUsers = {},
   selfClientId = null,
   peerVolumePct = {},
   onPeerVolumeChange,
   enablePeerVolume = false
 }: ChannelSidebarProps) {
+  const { t } = useI18n()
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
 
   const toggleCategory = (categoryId: string) => {
@@ -74,12 +85,34 @@ export function ChannelSidebar({
   }
 
   return (
-    <div className="flex h-full w-60 flex-col bg-card">
-      <div className="flex h-12 shrink-0 items-center border-b border-border px-4">
-        <span className="truncate text-sm font-semibold text-foreground">{serverName}</span>
-      </div>
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-card">
+      {serverBannerUrl ? (
+        <div className="relative h-16 shrink-0 overflow-hidden border-b border-border">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={serverBannerUrl} alt="" className="h-full w-full object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-card via-card/30 to-transparent" />
+          <div className="absolute bottom-0 left-0 right-0 truncate px-4 pb-1.5 text-sm font-semibold text-foreground">
+            {serverName}
+          </div>
+        </div>
+      ) : (
+        <div className="flex h-12 shrink-0 items-center border-b border-border px-4">
+          <span className="truncate text-sm font-semibold text-foreground">{serverName}</span>
+        </div>
+      )}
 
-      <ScrollArea className="flex-1">
+      {isInVoice && currentVoiceChannelId && onLeaveVoice ? (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-accent/5 px-3 py-2">
+          <Volume2 className="h-3.5 w-3.5 shrink-0 text-accent" />
+          <span className="min-w-0 flex-1 truncate text-xs text-foreground">{t("sidebar.inVoiceChannel")}</span>
+          <Button variant="ghost" size="sm" className="h-7 shrink-0 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={onLeaveVoice}>
+            <LogOut className="h-3.5 w-3.5" />
+            {t("common.leave")}
+          </Button>
+        </div>
+      ) : null}
+
+      <ScrollArea className="min-h-0 flex-1">
         <div className="p-2">
           {categories.map((category) => (
             <div key={category.id} className="mb-1">
@@ -107,6 +140,7 @@ export function ChannelSidebar({
                           className={cn(
                             "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
                             activeChannelId === channel.id && "bg-muted text-foreground",
+                            isInVoice && currentVoiceChannelId === channel.id && "text-accent",
                             channel.unread && "font-medium text-foreground"
                           )}
                         >
@@ -171,6 +205,7 @@ function VoiceChannelUserRow({
   enablePeerVolume: boolean
   onPeerVolumeChange?: (roomId: string, targetClientId: string, targetName: string, volumePct: number) => void
 }) {
+  const { t } = useI18n()
   const showVol = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
   return (
     <div className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground">
@@ -204,7 +239,7 @@ function VoiceChannelUserRow({
             <PopoverContent className="w-56 p-3" align="end" onOpenAutoFocus={(e) => e.preventDefault()}>
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
-                  <Label className="text-xs">Their volume</Label>
+                  <Label className="text-xs">{t("sidebar.theirVolume")}</Label>
                   <span className="text-[11px] text-muted-foreground tabular-nums">{volumePct}%</span>
                 </div>
                 <Slider
@@ -217,7 +252,7 @@ function VoiceChannelUserRow({
                     onPeerVolumeChange(roomId, user.id, user.name, next)
                   }}
                 />
-                <p className="text-[10px] text-muted-foreground">100% = default. Saved for this server.</p>
+                <p className="text-[10px] text-muted-foreground">{t("sidebar.volumeDefaultHint")}</p>
               </div>
             </PopoverContent>
           </Popover>

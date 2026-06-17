@@ -14,3 +14,21 @@ export async function createSpeexNoiseWorklet(ctx: AudioContext): Promise<SpeexW
   await ctx.audioWorklet.addModule(workletUrl)
   return new SpeexCtor(ctx, { maxChannels: 1, wasmBinary })
 }
+
+/** MediaStreamDestination defaults to stereo; duplicate mono to L+R so playback is centered. */
+export type MonoMediaStreamTap = {
+  destination: MediaStreamAudioDestinationNode
+  merger: ChannelMergerNode
+}
+
+export function createMonoMediaStreamTap(ctx: AudioContext): MonoMediaStreamTap {
+  const destination = ctx.createMediaStreamDestination()
+  const merger = ctx.createChannelMerger(2)
+  merger.connect(destination)
+  return { destination, merger }
+}
+
+export function connectMonoSourceToTap(source: AudioNode, tap: MonoMediaStreamTap) {
+  source.connect(tap.merger, 0, 0)
+  source.connect(tap.merger, 0, 1)
+}

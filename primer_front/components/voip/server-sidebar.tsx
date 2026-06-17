@@ -11,6 +11,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger
 } from "@/components/ui/context-menu"
+import { useI18n } from "@/lib/i18n/provider"
 
 interface Server {
   id: string
@@ -37,8 +38,10 @@ export function ServerSidebar({
   onAddServer,
   onOpenSettings
 }: ServerSidebarProps) {
+  const { t } = useI18n()
+
   return (
-    <div className="flex h-full w-[72px] flex-col items-center bg-sidebar py-3 gap-2">
+    <div className="flex h-full w-[72px] shrink-0 flex-col items-center bg-sidebar py-3 gap-2">
       <ScrollArea className="flex-1 w-full">
         <div className="flex flex-col items-center gap-2 px-3">
           {servers.map((server) => {
@@ -84,11 +87,11 @@ export function ServerSidebar({
                     </TooltipTrigger>
                     <TooltipContent side="right" sideOffset={8}>
                       {server.name}
-                      <span className="block text-xs text-muted-foreground">Right-click to remove</span>
+                      <span className="block text-xs text-muted-foreground">{t("sidebar.rightClickRemove")}</span>
                     </TooltipContent>
                   </Tooltip>
                   <ContextMenuContent className="w-48">
-                    <ContextMenuItem onClick={() => onServerSelect(server.id)}>Switch to server</ContextMenuItem>
+                    <ContextMenuItem onClick={() => onServerSelect(server.id)}>{t("sidebar.switchServer")}</ContextMenuItem>
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       variant="destructive"
@@ -96,7 +99,7 @@ export function ServerSidebar({
                       className="gap-2"
                     >
                       <Trash2 className="h-4 w-4" />
-                      Remove from list
+                      {t("sidebar.removeServer")}
                     </ContextMenuItem>
                   </ContextMenuContent>
                 </ContextMenu>
@@ -126,7 +129,7 @@ export function ServerSidebar({
             </button>
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={8}>
-            Add Server
+            {t("sidebar.addServer")}
           </TooltipContent>
         </Tooltip>
         <Tooltip>
@@ -139,7 +142,7 @@ export function ServerSidebar({
             </button>
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={8}>
-            Settings
+            {t("sidebar.appSettings")}
           </TooltipContent>
         </Tooltip>
       </div>

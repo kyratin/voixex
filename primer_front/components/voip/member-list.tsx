@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useI18n } from "@/lib/i18n/provider"
 
 export interface Member {
   id: string
@@ -28,6 +29,7 @@ const statusColors: Record<string, string> = {
 }
 
 export function MemberList({ members, roles = [] }: MemberListProps) {
+  const { t } = useI18n()
   const statusOrder: Record<string, number> = { online: 0, idle: 1, dnd: 2, offline: 3 }
   const sortByStatusThenName = (a: Member, b: Member) => {
     const byStatus = statusOrder[a.status] - statusOrder[b.status]
@@ -58,9 +60,9 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
   })
 
   return (
-    <div className="flex h-full w-56 flex-col bg-card">
+    <div className="flex h-full w-56 shrink-0 flex-col border-l border-border bg-card">
       <div className="flex h-12 shrink-0 items-center border-b border-border px-4">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Members</span>
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("members.title")}</span>
       </div>
       
       <ScrollArea className="flex-1">
@@ -89,7 +91,7 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
           {noRoleMembers.length > 0 && (
             <div className="mb-4">
               <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Online — {noRoleMembers.length}
+                {t("members.online")} — {noRoleMembers.length}
               </div>
               <div className="space-y-0.5">
                 {noRoleMembers.map(member => (
@@ -102,7 +104,7 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
           {sortedOfflineMembers.length > 0 && (
             <div>
               <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Offline — {sortedOfflineMembers.length}
+                {t("members.offline")} — {sortedOfflineMembers.length}
               </div>
               <div className="space-y-0.5">
                 {sortedOfflineMembers.map(member => (

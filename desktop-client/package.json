@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.2.37",
+  "version": "0.2.55",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -15,7 +15,8 @@
     "prepare:ui": "node ./scripts/sync-ui.mjs",
     "start": "electron ./dist/main.js",
     "pack": "electron-builder --dir",
-    "dist": "npm run prepare:ui && electron-builder --publish never",
+    "dist": "bash ./scripts/dist-release.sh",
+    "dist:current": "npm run prepare:ui && electron-builder --publish never",
     "dist:win": "npm run prepare:ui && electron-builder --win nsis --x64 --publish never",
     "dist:win:only": "electron-builder --win nsis --x64 --publish never",
     "dist:linux": "npm run prepare:ui && electron-builder --linux AppImage deb --publish never",
@@ -49,6 +50,20 @@
       "node_modules/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/icons/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "build/icons/icon.icns",
+        "to": "icon.icns"
+      },
+      {
+        "from": "build/icons/icon-512.png",
+        "to": "icon-512.png"
+      }
+    ],
     "linux": {
       "maintainer": "kyratin <kyratin@example.com>",
       "target": [
@@ -60,7 +75,6 @@
     },
     "win": {
       "icon": "build/icons/icon.ico",
-      "signAndEditExecutable": false,
       "target": [
         "nsis"
       ]

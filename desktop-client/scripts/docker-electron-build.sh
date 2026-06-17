@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Build Voixex desktop artifacts:
-#   - macOS arm64 .zip + Linux AppImage/deb via electronuserland/builder:wine (Docker)
-#   - Windows NSIS .exe: on macOS host (native rcedit); in Docker only on native linux/amd64
+# Build Voixex desktop artifacts (legacy Docker path for Linux CI).
+# Default local release on macOS: npm run dist --prefix desktop-client
+#   → Voixex-*-win-x64.exe + Voixex-*-mac-arm64.dmg
 #
-# DMG: npm run dist:mac on macOS (dmgbuilder unstable in Linux container).
+# This script: mac zip + linux in Docker, Windows on macOS host, optional chown fix.
 # Prereq: docker pull electronuserland/builder:wine
-#
-#   npm run dist:docker --prefix desktop-client
 #
 # Опции:
 #   --skip-prepare   Пропустить voice + desktop build + prepare:ui на хосте.
@@ -130,6 +128,8 @@ fi
 # electron-builder uses native app-builder rcedit on darwin — build Windows on the host.
 if [[ "$(uname -s)" == "Darwin" ]]; then
   build_win_on_host
+  echo "==> macOS DMG на хосте…"
+  (cd "$DESKTOP_ROOT" && npx electron-builder --mac dmg --arm64 --publish never)
 else
   build_win_in_docker
 fi

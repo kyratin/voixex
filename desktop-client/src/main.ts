@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, Menu, session, systemPreferences } from "electron"
+import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, Menu, nativeImage, session, systemPreferences } from "electron"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { join } from "node:path"
@@ -10,7 +10,21 @@ let preferredScreenSourceId: string | null = null
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
 const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000"
 const bundledUiPath = join(__dirname, "../ui/index.html")
-const runtimeIconPath = join(__dirname, "../build/icons/icon-512.png")
+
+function resolveRuntimeIconPath(): string | undefined {
+  const iconsDir = app.isPackaged ? process.resourcesPath : join(__dirname, "../build/icons")
+  const candidates =
+    process.platform === "win32"
+      ? ["icon.ico"]
+      : process.platform === "darwin"
+        ? ["icon.icns", "icon-512.png"]
+        : ["icon-512.png", "icon.png"]
+  for (const name of candidates) {
+    const iconPath = join(iconsDir, name)
+    if (existsSync(iconPath)) return iconPath
+  }
+  return undefined
+}
 type HotkeyAction = "toggle_mute" | "toggle_deafen" | "push_to_talk"
 type KeybindConfig = { toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }
 let keybinds: KeybindConfig = {
@@ -74,12 +88,13 @@ function loadFallbackErrorPage(win: BrowserWindow, error: string, target: string
 }
 
 function createWindow() {
+  const iconPath = resolveRuntimeIconPath()
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
     backgroundColor: "#111111",
     show: false,
-    icon: existsSync(runtimeIconPath) ? runtimeIconPath : undefined,
+    icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload.cjs"),
       contextIsolation: true,
@@ -103,15 +118,27 @@ function createWindow() {
 
 app.whenReady().then(() => {
   if (process.platform === "win32") {
+    app.setAppUserModelId("com.voixex.desktop")
     // Keep Windows title bar clean like on macOS build.
     Menu.setApplicationMenu(null)
   }
   session.defaultSession.setDisplayMediaRequestHandler(
-    async (_request, callback) => {
+    async (request, callback) => {
       const sources = await desktopCapturer.getSources({ types: ["screen", "window"] })
       const preferred =
         (preferredScreenSourceId && sources.find((s) => s.id === preferredScreenSourceId)) || sources[0]
-      callback({ video: preferred })
+      if (!preferred) {
+        callback({})
+        return
+      }
+      if (request.audioRequested) {
+        callback({
+          video: preferred,
+          audio: process.platform === "darwin" || process.platform === "win32" ? "loopback" : undefined
+        })
+      } else {
+        callback({ video: preferred })
+      }
     },
     { useSystemPicker: true }
   )
