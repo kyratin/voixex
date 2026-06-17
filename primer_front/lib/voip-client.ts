@@ -7,6 +7,7 @@ const DEFAULT_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:1
 export type JoinResult = {
   serverId: string
   serverName?: string
+  bannerUrl?: string | null
   authToken: string
   mediaToken: string
   profile: { clientId: string; displayName: string }
@@ -40,6 +41,7 @@ export type RealtimeState = {
   lobby: RosterMember[]
   messagesByChannel: Record<string, ChatMessage[]>
   activeScreenShareByRoom: Record<string, string | null>
+  serverBannerUrl: string | null
   me: {
     clientId: string
     displayName: string
@@ -122,6 +124,7 @@ export class VoipClient {
     lobby: [],
     messagesByChannel: {},
     activeScreenShareByRoom: {},
+    serverBannerUrl: null,
     me: null,
     connection: { wsConnected: false, reconnecting: false }
   }
@@ -177,6 +180,9 @@ export class VoipClient {
     this.mediaToken = out.mediaToken
     this.currentServerId = out.serverId
     this.state.me = out.profile
+    if (out.bannerUrl !== undefined) {
+      this.state.serverBannerUrl = out.bannerUrl?.trim() || null
+    }
     let apiHostname = "localhost"
     try {
       apiHostname = new URL(this.apiBase).hostname
@@ -231,6 +237,34 @@ export class VoipClient {
       throw new Error(details)
     }
     return res.json() as Promise<SfuTokenResult>
+  }
+
+  async getServer(serverId: string) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}`, {
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!res.ok) throw new Error("server load failed")
+    const body = (await res.json()) as { id: string; name: string; bannerUrl?: string | null }
+    if (body.bannerUrl !== undefined) {
+      this.state.serverBannerUrl = body.bannerUrl?.trim() || null
+      this.emit()
+    }
+    return body
+  }
+
+  async updateServerBanner(serverId: string, bannerUrl: string | null) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${this.authToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ bannerUrl })
+    })
+    if (!res.ok) throw new Error("server banner update failed")
+    const body = (await res.json()) as { bannerUrl: string | null }
+    this.state.serverBannerUrl = body.bannerUrl?.trim() || null
+    this.emit()
+    return body
   }
 
   async getMe(serverId: string) {
@@ -327,6 +361,7 @@ export class VoipClient {
       lobby: [],
       messagesByChannel: {},
       activeScreenShareByRoom: {},
+      serverBannerUrl: null,
       me: null,
       connection: { wsConnected: false, reconnecting: false }
     }
@@ -395,7 +430,8 @@ export class VoipClient {
         return
       }
       const typed = data as
-        | { type: "hello"; clientId: string; serverId: string; serverGeneration?: number }
+        | { type: "hello"; clientId: string; serverId: string; serverGeneration?: number; bannerUrl?: string | null }
+        | { type: "server_appearance_updated"; bannerUrl: string | null }
         | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
@@ -415,6 +451,11 @@ export class VoipClient {
         if (typeof typed.serverGeneration === "number") {
           this.lastServerGeneration = typed.serverGeneration
         }
+        if (typed.bannerUrl !== undefined) {
+          this.state.serverBannerUrl = typed.bannerUrl?.trim() || null
+        }
+      } else if (typed.type === "server_appearance_updated") {
+        this.state.serverBannerUrl = typed.bannerUrl?.trim() || null
       } else if (typed.type === "rooms_snapshot") {
         this.state.rooms = typed.rooms
       } else if (typed.type === "rooms_updated") {

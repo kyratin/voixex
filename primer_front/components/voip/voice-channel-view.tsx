@@ -66,6 +66,9 @@ type VoiceChannelViewProps = {
   onToggleStreamFullscreen: () => void
   onToggleMemberList: () => void
   onStreamVolumeChange: (pct: number) => void
+  streamHiddenByUser?: boolean
+  onHideStream?: () => void
+  onShowStream?: () => void
   onJoinVoice?: () => void
   onLeaveVoice?: () => void
 }
@@ -108,13 +111,17 @@ export function VoiceChannelView({
   onToggleStreamFullscreen,
   onToggleMemberList,
   onStreamVolumeChange,
+  streamHiddenByUser = false,
+  onHideStream,
+  onShowStream,
   onJoinVoice,
   onLeaveVoice
 }: VoiceChannelViewProps) {
   const { t } = useI18n()
-  const hasStream = viewingLegacyStream || viewingWebRtcStream
+  const hasStream = (viewingLegacyStream || viewingWebRtcStream) && !streamHiddenByUser
   const canPopOut = Boolean(activeScreenSharerName || hasStream || isScreenSharing)
-  const expectingStream = Boolean(activeScreenSharerName && isInVoice && !isScreenSharing && !hasStream)
+  const expectingStream = Boolean(activeScreenSharerName && isInVoice && !isScreenSharing && !hasStream && !streamHiddenByUser)
+  const canHideStream = Boolean(isInVoice && !isScreenSharing && activeScreenSharerName && !streamHiddenByUser)
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
@@ -264,13 +271,25 @@ export function VoiceChannelView({
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onToggleStreamWindow} disabled={!canPopOut}>
+              <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onToggleStreamWindow} disabled={!canPopOut || streamHiddenByUser}>
                 {showingStreamWindow ? <EyeOff className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
                 <span className="hidden lg:inline">{showingStreamWindow ? t("voice.closePopOut") : t("voice.popOut")}</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>{t("voice.popOutTooltip")}</TooltipContent>
           </Tooltip>
+
+          {canHideStream && onHideStream ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onHideStream}>
+                  <EyeOff className="h-3.5 w-3.5" />
+                  <span className="hidden lg:inline">{t("voice.hideStream")}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t("voice.hideStreamTooltip")}</TooltipContent>
+            </Tooltip>
+          ) : null}
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -323,6 +342,23 @@ export function VoiceChannelView({
               playsInline
               className="max-h-full max-w-full rounded-xl border border-border object-contain shadow-lg"
             />
+          ) : streamHiddenByUser && activeScreenSharerName ? (
+            <div className="flex max-w-md flex-col items-center gap-4 px-4 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+                <EyeOff className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">{t("voice.streamHiddenTitle")}</p>
+                <p className="text-sm text-muted-foreground">{t("voice.isSharing", { name: activeScreenSharerName })}</p>
+                <p className="text-xs text-muted-foreground">{t("voice.streamHiddenHint")}</p>
+              </div>
+              {onShowStream ? (
+                <Button variant="default" size="sm" className="gap-1.5" onClick={onShowStream}>
+                  <ScreenShare className="h-3.5 w-3.5" />
+                  {t("voice.showStream")}
+                </Button>
+              ) : null}
+            </div>
           ) : hasStream || expectingStream ? (
             <div className="flex max-h-full w-full max-w-5xl flex-col items-center gap-3">
               <div className="relative flex w-full items-center justify-center">
@@ -365,6 +401,12 @@ export function VoiceChannelView({
                   {showingStreamWindow ? <EyeOff className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
                   {showingStreamWindow ? t("voice.closePopOutBtn") : t("voice.popOut")}
                 </Button>
+                {onHideStream ? (
+                  <Button variant="outline" size="sm" className="h-8 gap-1 text-xs" onClick={onHideStream}>
+                    <EyeOff className="h-3.5 w-3.5" />
+                    {t("voice.hideStream")}
+                  </Button>
+                ) : null}
               </div>
             </div>
           ) : (

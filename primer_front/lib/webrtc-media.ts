@@ -42,6 +42,7 @@ export class WebRtcMediaSession {
   private screenAudioElements = new Set<HTMLMediaElement>()
   private remoteScreenTrack: RemoteTrack | null = null
   private remoteScreenVideoEl: HTMLVideoElement | null = null
+  private remoteScreenPopupEl: HTMLVideoElement | null = null
   private screenAudioContainer: HTMLElement | null = null
   private playRemoteVoice: boolean
   private deafened = false
@@ -101,6 +102,61 @@ export class WebRtcMediaSession {
       el.muted = true
       void el.play().catch(() => {})
     }
+  }
+
+  /** Re-attach an existing remote screen track (e.g. after rejoin or video element remount). */
+  rebindRemoteScreenVideo(el: HTMLVideoElement | null) {
+    if (el) this.remoteScreenVideoEl = el
+    const target = this.remoteScreenVideoEl
+    if (!target) return
+    if (this.remoteScreenTrack) {
+      this.remoteScreenTrack.detach(target)
+      this.remoteScreenTrack.attach(target)
+      target.muted = true
+      void target.play().catch(() => {})
+      this.syncPopupScreenVideo()
+      return
+    }
+    if (this.room) this.syncExistingRemoteTracks(this.room)
+  }
+
+  bindPopupScreenVideo(el: HTMLVideoElement | null) {
+    this.remoteScreenPopupEl = el
+    this.syncPopupScreenVideo()
+  }
+
+  unbindPopupScreenVideo() {
+    const el = this.remoteScreenPopupEl
+    if (el) {
+      const stream = el.srcObject
+      if (stream instanceof MediaStream) {
+        for (const track of stream.getTracks()) track.stop()
+      }
+      el.srcObject = null
+    }
+    this.remoteScreenPopupEl = null
+  }
+
+  private syncPopupScreenVideo() {
+    const el = this.remoteScreenPopupEl
+    if (!el) return
+    if (!this.remoteScreenTrack) {
+      el.srcObject = null
+      return
+    }
+    const mt = this.remoteScreenTrack.mediaStreamTrack
+    if (!mt || mt.readyState === "ended") {
+      el.srcObject = null
+      return
+    }
+    const prev = el.srcObject
+    if (prev instanceof MediaStream) {
+      for (const track of prev.getTracks()) track.stop()
+    }
+    const cloned = mt.clone()
+    el.srcObject = new MediaStream([cloned])
+    el.muted = true
+    void el.play().catch(() => {})
   }
 
   relocateScreenAudio(container: HTMLElement | null) {
@@ -327,6 +383,7 @@ export class WebRtcMediaSession {
       this.remoteScreenVideoEl.muted = true
       void this.remoteScreenVideoEl.play().catch(() => {})
     }
+    this.syncPopupScreenVideo()
   }
 
   private detachRemoteTrack(track: RemoteTrack, publication: RemoteTrackPublication, participantIdentity: string) {
@@ -343,6 +400,7 @@ export class WebRtcMediaSession {
     if (track.kind === Track.Kind.Video && publication.source === Track.Source.ScreenShare) {
       if (this.remoteScreenTrack === track) {
         if (this.remoteScreenVideoEl) track.detach(this.remoteScreenVideoEl)
+        this.unbindPopupScreenVideo()
         this.remoteScreenTrack = null
       }
       this.opts.onWatchingScreenChange?.(false)
@@ -354,6 +412,7 @@ export class WebRtcMediaSession {
     if (this.remoteScreenTrack && this.remoteScreenVideoEl) {
       this.remoteScreenTrack.detach(this.remoteScreenVideoEl)
     }
+    this.unbindPopupScreenVideo()
     this.remoteScreenTrack = null
     this.remoteScreenVideoEl = null
     this.clearVoiceAudioElements()

@@ -105,6 +105,68 @@ function saveServerAppearance(serverId: string, appearance: ServerAppearance) {
   localStorage.setItem(`voixex-server-appearance-${serverId}`, JSON.stringify(appearance))
 }
 
+type ConnectionPrefs = {
+  mediaEngine?: "legacy" | "webrtc"
+  voiceTransport?: "udp" | "tcp"
+  apiUseHttps?: boolean
+  udpPortOverride?: string
+}
+
+const CONNECTION_PREFS_KEY = "voixex-connection-prefs"
+
+function loadGlobalConnectionPrefs(): ConnectionPrefs {
+  try {
+    const raw = localStorage.getItem(CONNECTION_PREFS_KEY)
+    if (!raw) return {}
+    return JSON.parse(raw) as ConnectionPrefs
+  } catch {
+    return {}
+  }
+}
+
+function saveGlobalConnectionPrefs(prefs: ConnectionPrefs) {
+  localStorage.setItem(CONNECTION_PREFS_KEY, JSON.stringify(prefs))
+}
+
+function normalizeMediaEngine(value: unknown): "legacy" | "webrtc" {
+  return value === "webrtc" ? "webrtc" : "legacy"
+}
+
+function normalizeVoiceTransport(value: unknown): "udp" | "tcp" {
+  return value === "tcp" ? "tcp" : "udp"
+}
+
+function applyConnectionPrefsToState(
+  prefs: {
+    mediaEngine?: unknown
+    voiceTransport?: unknown
+    apiUseHttps?: boolean
+    udpPortOverride?: string
+  },
+  setters: {
+    setMediaEngine: (v: "legacy" | "webrtc") => void
+    setVoiceTransport: (v: "udp" | "tcp") => void
+    setApiUseHttps: (v: boolean) => void
+    setUdpPortOverride: (v: string) => void
+    mediaEngineRef: { current: "legacy" | "webrtc" }
+  }
+) {
+  if (prefs.mediaEngine !== undefined) {
+    const engine = normalizeMediaEngine(prefs.mediaEngine)
+    setters.mediaEngineRef.current = engine
+    setters.setMediaEngine(engine)
+  }
+  if (prefs.voiceTransport !== undefined) {
+    setters.setVoiceTransport(normalizeVoiceTransport(prefs.voiceTransport))
+  }
+  if (typeof prefs.apiUseHttps === "boolean") {
+    setters.setApiUseHttps(prefs.apiUseHttps)
+  }
+  if (prefs.udpPortOverride !== undefined) {
+    setters.setUdpPortOverride(prefs.udpPortOverride)
+  }
+}
+
 const CONNECTION_DEFAULTS = getBuildTimeConnectionDefaults()
 const VOICE_TRACE = process.env.NEXT_PUBLIC_VOICE_TRACE === "1"
 
@@ -125,6 +187,8 @@ export default function VoIPApp() {
     udpPortOverride?: string
     /** Voice transport used by desktop media bridge. */
     voiceTransport?: "udp" | "tcp"
+    /** Voice/screen media path (legacy UDP chunks vs WebRTC/LiveKit). */
+    mediaEngine?: "legacy" | "webrtc"
   }
   type VoiceRuntimeStats = {
     connected?: boolean
@@ -292,6 +356,10 @@ export default function VoIPApp() {
   const [savedServers, setSavedServers] = useState<SavedServerProfile[]>([])
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [activeScreenSharerName, setActiveScreenSharerName] = useState("")
+  const [activeScreenSharerId, setActiveScreenSharerId] = useState<string | null>(null)
+  const [streamHiddenByUser, setStreamHiddenByUser] = useState(false)
+  const streamHiddenByUserRef = useRef(false)
+  const prevActiveScreenSharerIdRef = useRef<string | null>(null)
   const [screenImageUrl, setScreenImageUrl] = useState<string | null>(null)
   const [screenVideoUrl, setScreenVideoUrl] = useState<string | null>(null)
   const [hasRemoteWebRtcVideo, setHasRemoteWebRtcVideo] = useState(false)
@@ -307,6 +375,7 @@ export default function VoIPApp() {
   const [streamVideoFullscreen, setStreamVideoFullscreen] = useState(false)
   const [streamVolumePct, setStreamVolumePct] = useState(100)
   const [streamLoading, setStreamLoading] = useState(false)
+  const [legacyStreamBuffered, setLegacyStreamBuffered] = useState(false)
   const [serverAppearance, setServerAppearance] = useState<ServerAppearance>({})
   const [serverBannerDraft, setServerBannerDraft] = useState("")
   const [channelBannerChannelId, setChannelBannerChannelId] = useState("")
@@ -327,6 +396,7 @@ export default function VoIPApp() {
   const streamWindowRef = useRef<Window | null>(null)
   /** Tracks from captureStream() fed to the popup; must be stopped when switching modes or closing. */
   const popupMirrorStreamRef = useRef<MediaStream | null>(null)
+  const popupMirrorRetryRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastPopupMirrorVideoUrlRef = useRef<string | null>(null)
   const renderStreamWindowRef = useRef<() => void>(() => {})
   const currentVoiceChannelRef = useRef("")
@@ -348,6 +418,7 @@ export default function VoIPApp() {
   /** Server where the user is in a voice channel; empty when not in voice. */
   const [voiceServerId, setVoiceServerId] = useState("")
   const activeServerIdRef = useRef("")
+  const activeChannelIdRef = useRef(activeChannelId)
   const voiceServerIdRef = useRef("")
   const latestUiStateRef = useRef<RealtimeState | null>(null)
   const latestVoiceStateRef = useRef<RealtimeState | null>(null)
@@ -522,6 +593,17 @@ export default function VoIPApp() {
       }
       setCanManageServer(Boolean(u.me?.permissions?.manage_server))
 
+      if (u.serverBannerUrl !== undefined) {
+        const bannerUrl = u.serverBannerUrl?.trim() || undefined
+        setServerAppearance((prev) => {
+          if ((prev.serverBannerUrl ?? undefined) === bannerUrl) return prev
+          const next = { ...prev }
+          if (bannerUrl) next.serverBannerUrl = bannerUrl
+          else delete next.serverBannerUrl
+          return next
+        })
+      }
+
       const onlineByClientId = new Map<string, { clientId: string; displayName: string }>()
       for (const member of u.lobby) {
         onlineByClientId.set(member.clientId, { clientId: member.clientId, displayName: member.displayName })
@@ -559,7 +641,22 @@ export default function VoIPApp() {
       )
 
       const screenState = split && v ? v : u
-      const activeSharerId = currentVoiceChannel ? screenState.activeScreenShareByRoom[currentVoiceChannel] : null
+      const streamRoomId =
+        currentVoiceChannelRef.current ||
+        (() => {
+          const chId = activeChannelIdRef.current
+          if (!chId) return null
+          return u.rooms.some((room) => room.id === chId && room.kind === "voice") ? chId : null
+        })()
+      const activeSharerId = streamRoomId ? screenState.activeScreenShareByRoom[streamRoomId] : null
+      if (activeSharerId !== prevActiveScreenSharerIdRef.current) {
+        prevActiveScreenSharerIdRef.current = activeSharerId ?? null
+        if (streamHiddenByUserRef.current) {
+          streamHiddenByUserRef.current = false
+          setStreamHiddenByUser(false)
+        }
+      }
+      setActiveScreenSharerId(activeSharerId ?? null)
       if (activeSharerId) {
         const inLobby = screenState.lobby.find((x) => x.clientId === activeSharerId)
         if (inLobby) {
@@ -588,6 +685,7 @@ export default function VoIPApp() {
       latestVoiceStateRef.current = state
       applyMerged()
     })
+    applyMerged()
     return () => {
       unsubUi()
       unsubVoice()
@@ -597,6 +695,10 @@ export default function VoIPApp() {
   useEffect(() => {
     currentVoiceChannelRef.current = currentVoiceChannel
   }, [currentVoiceChannel])
+
+  useEffect(() => {
+    activeChannelIdRef.current = activeChannelId
+  }, [activeChannelId])
 
   useEffect(() => {
     isScreenSharingRef.current = isScreenSharing
@@ -639,10 +741,16 @@ export default function VoIPApp() {
 
   useEffect(() => {
     const watching = Boolean(
-      isInVoice &&
+      !streamHiddenByUser &&
+        isInVoice &&
         currentVoiceChannel &&
         !isScreenSharing &&
-        (screenVideoUrl || screenImageUrl || hasRemoteWebRtcVideo || (showingStreamWindow && activeScreenSharerName))
+        (activeScreenSharerName ||
+          screenVideoUrl ||
+          screenImageUrl ||
+          hasRemoteWebRtcVideo ||
+          streamLoading ||
+          showingStreamWindow)
     )
     isWatchingScreenRef.current = watching
     if (!wsForVoiceJoin || !currentVoiceChannel) return
@@ -657,6 +765,8 @@ export default function VoIPApp() {
     hasRemoteWebRtcVideo,
     showingStreamWindow,
     activeScreenSharerName,
+    streamLoading,
+    streamHiddenByUser,
     uiClient,
     voiceClient
   ])
@@ -681,13 +791,21 @@ export default function VoIPApp() {
       setServers(valid.map((s) => ({ id: s.serverId, name: s.serverName, icon: s.serverName.slice(0, 1).toUpperCase() || "S" })))
       const lastServerId = localStorage.getItem("voixex-last-server-id")
       const preferred = valid.find((s) => s.serverId === lastServerId) ?? valid[0]
+      const globalPrefs = loadGlobalConnectionPrefs()
       setActiveServerId(preferred.serverId)
       setApiHost(preferred.apiHost)
       setApiPort(preferred.apiPort)
       setServerPassword(preferred.serverPassword)
-      setApiUseHttps(typeof preferred.apiUseHttps === "boolean" ? preferred.apiUseHttps : false)
-      setUdpPortOverride(typeof preferred.udpPortOverride === "string" ? preferred.udpPortOverride : "")
-      setVoiceTransport(preferred.voiceTransport === "tcp" ? "tcp" : "udp")
+      applyConnectionPrefsToState(
+        {
+          apiUseHttps: typeof preferred.apiUseHttps === "boolean" ? preferred.apiUseHttps : globalPrefs.apiUseHttps,
+          udpPortOverride:
+            typeof preferred.udpPortOverride === "string" ? preferred.udpPortOverride : (globalPrefs.udpPortOverride ?? ""),
+          voiceTransport: preferred.voiceTransport ?? globalPrefs.voiceTransport,
+          mediaEngine: preferred.mediaEngine ?? globalPrefs.mediaEngine
+        },
+        { setMediaEngine, setVoiceTransport, setApiUseHttps, setUdpPortOverride, mediaEngineRef }
+      )
       setDisplayNameInput(preferred.displayName)
       setProfileDisplayName(preferred.displayName)
       setSuperuserPasswordInput(preferred.superuserPassword ?? "")
@@ -1024,14 +1142,25 @@ export default function VoIPApp() {
 
   const applyRemoteWebRtcVideo = (active: boolean, participantIdentity: string | null) => {
     const roomId = currentVoiceChannelRef.current
+    if (streamHiddenByUserRef.current) {
+      if (roomId) getVoiceWsClientRef.current().setWatchingScreen(false, roomId)
+      return
+    }
     if (roomId) getVoiceWsClientRef.current().setWatchingScreen(active, roomId)
     if (active && participantIdentity) {
       setHasRemoteWebRtcVideo(true)
       setActiveScreenSharerName(resolveRosterDisplayName(participantIdentity))
       const legacyActive = legacyStreamHasBufferedRef.current
+      if (!legacyActive && screenVideoUrlRef.current) {
+        resetLegacyStreamPlayback()
+      }
       if (!legacyActive) {
-        webRtcSessionRef.current?.bindRemoteScreenVideo(remoteStreamVideoRef.current)
-        if (streamWindowRef.current && !streamWindowRef.current.closed) renderStreamWindowRef.current()
+        webRtcSessionRef.current?.rebindRemoteScreenVideo(remoteStreamVideoRef.current)
+        if (streamWindowRef.current && !streamWindowRef.current.closed) {
+          const popupEl = streamWindowRef.current.document.getElementById("voixex-stream-video") as HTMLVideoElement | null
+          webRtcSessionRef.current?.bindPopupScreenVideo(popupEl)
+          renderStreamWindowRef.current()
+        }
         setStreamLoading(false)
       }
       return
@@ -1047,7 +1176,7 @@ export default function VoIPApp() {
   }
 
   const requestViewerStreamResync = (roomId: string, force = false) => {
-    if (!roomId || !hasDesktopBridge) return
+    if (!roomId || !hasDesktopBridge || streamHiddenByUserRef.current) return
     const now = Date.now()
     const prev = lastViewerScreenResyncReqRef.current
     if (!force && prev && prev.room === roomId && now - prev.at < 2500) return
@@ -1055,6 +1184,38 @@ export default function VoIPApp() {
     pendingLegacyStreamResyncRef.current = true
     setStreamLoading(true)
     getVoiceWsClientRef.current().requestScreenResync(roomId)
+  }
+
+  const getStreamRoomSharerId = (roomId: string) => {
+    const state = latestVoiceStateRef.current ?? latestUiStateRef.current
+    if (!state) return null
+    return state.activeScreenShareByRoom[roomId] ?? null
+  }
+
+  const rebindViewerStreamElements = () => {
+    webRtcSessionRef.current?.rebindRemoteScreenVideo(remoteStreamVideoRef.current)
+    const v = remoteStreamVideoRef.current
+    if (legacyStreamHasBufferedRef.current && screenVideoUrlRef.current && v) {
+      void v.play().catch(() => {})
+    }
+    if (streamWindowRef.current && !streamWindowRef.current.closed) {
+      renderStreamWindowRef.current()
+    }
+  }
+
+  const catchUpViewerStreamAfterJoin = async (serverId: string, roomId: string) => {
+    if (streamHiddenByUserRef.current) return
+    await ensureLiveKitForVoiceRoom(serverId, roomId)
+    if (getStreamRoomSharerId(roomId)) {
+      isWatchingScreenRef.current = true
+      getVoiceWsClientRef.current().setWatchingScreen(true, roomId)
+      requestViewerStreamResync(roomId, true)
+    }
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        rebindViewerStreamElements()
+      })
+    })
   }
 
   const startWebRtcSession = async (serverId: string, roomId: string) => {
@@ -1152,6 +1313,11 @@ export default function VoIPApp() {
   }
 
   const stopPopupMirrorTracks = useCallback(() => {
+    if (popupMirrorRetryRef.current) {
+      clearInterval(popupMirrorRetryRef.current)
+      popupMirrorRetryRef.current = null
+    }
+    webRtcSessionRef.current?.unbindPopupScreenVideo()
     const s = popupMirrorStreamRef.current
     if (s) {
       s.getTracks().forEach((t) => t.stop())
@@ -1160,9 +1326,55 @@ export default function VoIPApp() {
     lastPopupMirrorVideoUrlRef.current = null
   }, [])
 
+  const schedulePopupMirrorRetry = useCallback(() => {
+    if (popupMirrorRetryRef.current) return
+    if (!streamWindowRef.current || streamWindowRef.current.closed) return
+    let attempts = 0
+    popupMirrorRetryRef.current = window.setInterval(() => {
+      attempts += 1
+      renderStreamWindowRef.current()
+      if (attempts >= 48) {
+        if (popupMirrorRetryRef.current) {
+          clearInterval(popupMirrorRetryRef.current)
+          popupMirrorRetryRef.current = null
+        }
+      }
+    }, 250)
+  }, [])
+
+  const mirrorLegacyVideoToPopup = (srcVideo: HTMLVideoElement, imageEl: HTMLVideoElement, key: string) => {
+    if (srcVideo.videoWidth === 0 || srcVideo.readyState < 2) return false
+    const needNewMirror =
+      lastPopupMirrorVideoUrlRef.current !== key || imageEl.srcObject !== popupMirrorStreamRef.current
+    if (!needNewMirror) {
+      void imageEl.play().catch(() => {})
+      return true
+    }
+    const prevMirror = popupMirrorStreamRef.current
+    if (prevMirror) {
+      prevMirror.getTracks().forEach((t) => t.stop())
+      popupMirrorStreamRef.current = null
+    }
+    webRtcSessionRef.current?.unbindPopupScreenVideo()
+    try {
+      const cap = (srcVideo as HTMLVideoElement & { captureStream?: (frameRate?: number) => MediaStream }).captureStream?.()
+      if (!cap || cap.getVideoTracks().length === 0) return false
+      popupMirrorStreamRef.current = cap
+      lastPopupMirrorVideoUrlRef.current = key
+      imageEl.srcObject = cap
+      imageEl.removeAttribute("src")
+      void imageEl.play().catch(() => {})
+      return true
+    } catch {
+      lastPopupMirrorVideoUrlRef.current = null
+      return false
+    }
+  }
+
   const resetLegacyStreamPlayback = () => {
     remoteAppendQueueRef.current = []
     legacyStreamHasBufferedRef.current = false
+    setLegacyStreamBuffered(false)
     const sb = remoteSourceBufferRef.current
     if (sb && remoteMseUpdateEndRef.current) {
       try {
@@ -1201,13 +1413,21 @@ export default function VoIPApp() {
   }
   resetRemoteStreamPlaybackRef.current = resetRemoteStreamPlayback
 
+  const prevVoiceChannelForStreamRef = useRef("")
+
   useEffect(() => {
-    if (!currentVoiceChannel || isScreenSharing) return
+    if (!currentVoiceChannel) {
+      prevVoiceChannelForStreamRef.current = ""
+      return
+    }
+    if (prevVoiceChannelForStreamRef.current === currentVoiceChannel) return
+    prevVoiceChannelForStreamRef.current = currentVoiceChannel
     resetRemoteStreamPlaybackRef.current()
     setStreamLoading(false)
-  }, [currentVoiceChannel, isScreenSharing])
+  }, [currentVoiceChannel])
 
   const pushRemoteVideoChunk = (chunk: Uint8Array) => {
+    if (streamHiddenByUserRef.current) return
     const buf =
       chunk.buffer instanceof ArrayBuffer && chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
         ? chunk.buffer
@@ -1258,8 +1478,10 @@ export default function VoIPApp() {
       const sbuf = remoteSourceBufferRef.current
       if (sbuf && sbuf.buffered.length > 0) {
         legacyStreamHasBufferedRef.current = true
+        setLegacyStreamBuffered(true)
         setStreamLoading(false)
         void remoteStreamVideoRef.current?.play().catch(() => {})
+        if (streamWindowRef.current && !streamWindowRef.current.closed) renderStreamWindowRef.current()
       }
       drainRemoteMse()
     }
@@ -1938,7 +2160,7 @@ export default function VoIPApp() {
     screenVideoUrlRef.current = screenVideoUrl
   }, [screenVideoUrl])
 
-  const viewingLegacyStream = Boolean(screenVideoUrl || screenImageUrl)
+  const viewingLegacyStream = Boolean((screenVideoUrl || screenImageUrl) && legacyStreamBuffered)
   const viewingWebRtcStream = hasRemoteWebRtcVideo && !viewingLegacyStream
   const streamPathLabel = viewingLegacyStream ? "Legacy" : viewingWebRtcStream ? "WebRTC" : ""
   const activeChannelBannerUrl =
@@ -1946,16 +2168,25 @@ export default function VoIPApp() {
       ? serverAppearance.channelBanners[activeChannelId]
       : null
 
-  const saveServerBanner = () => {
+  const saveServerBanner = async () => {
     if (!activeServerId) return
-    const next: ServerAppearance = {
-      ...serverAppearance,
-      serverBannerUrl: serverBannerDraft.trim() || undefined
+    const url = serverBannerDraft.trim() || null
+    try {
+      await uiClient.updateServerBanner(activeServerId, url)
+      const next: ServerAppearance = { ...serverAppearance }
+      if (url) next.serverBannerUrl = url
+      else delete next.serverBannerUrl
+      saveServerAppearance(activeServerId, next)
+      setServerAppearance(next)
+      toast.success(t("settings.serverBannerSaved"))
+    } catch {
+      const next: ServerAppearance = { ...serverAppearance }
+      if (url) next.serverBannerUrl = url
+      else delete next.serverBannerUrl
+      saveServerAppearance(activeServerId, next)
+      setServerAppearance(next)
+      toast.warning(t("settings.serverBannerSavedLocalOnly"))
     }
-    if (!next.serverBannerUrl) delete next.serverBannerUrl
-    saveServerAppearance(activeServerId, next)
-    setServerAppearance(next)
-    toast.success("Server banner saved")
   }
 
   const saveChannelBanner = () => {
@@ -1972,11 +2203,11 @@ export default function VoIPApp() {
 
   useEffect(() => {
     if (viewingWebRtcStream) {
-      webRtcSessionRef.current?.bindRemoteScreenVideo(remoteStreamVideoRef.current)
+      webRtcSessionRef.current?.rebindRemoteScreenVideo(remoteStreamVideoRef.current)
     } else {
       webRtcSessionRef.current?.bindRemoteScreenVideo(null)
     }
-  }, [viewingWebRtcStream, hasRemoteWebRtcVideo, screenVideoUrl])
+  }, [viewingWebRtcStream, hasRemoteWebRtcVideo, screenVideoUrl, legacyStreamBuffered])
 
   useEffect(() => {
     void webRtcSessionRef.current?.setDeafened(isDeafened)
@@ -2018,7 +2249,11 @@ export default function VoIPApp() {
     activeScreenSharerName,
     currentVoiceChannel,
     voiceUsers,
-    isScreenSharing
+    isScreenSharing,
+    showingStreamWindow,
+    hasRemoteWebRtcVideo,
+    legacyStreamBuffered,
+    isDeafened
   ])
 
   useEffect(() => {
@@ -2040,12 +2275,12 @@ export default function VoIPApp() {
       v.removeEventListener("playing", sync)
       v.removeEventListener("loadeddata", sync)
     }
-  }, [showingStreamWindow, screenVideoUrl, hasRemoteWebRtcVideo])
+  }, [showingStreamWindow, screenVideoUrl, hasRemoteWebRtcVideo, legacyStreamBuffered])
 
   useEffect(() => {
     if (!showingStreamWindow) return
     renderStreamWindowRef.current()
-  }, [showingStreamWindow, hasRemoteWebRtcVideo, screenVideoUrl, screenImageUrl, isDeafened, activeScreenSharerName])
+  }, [showingStreamWindow, hasRemoteWebRtcVideo, screenVideoUrl, screenImageUrl, isDeafened, activeScreenSharerName, legacyStreamBuffered])
 
   useEffect(() => {
     if (!localPreviewVideoRef.current) return
@@ -2231,20 +2466,20 @@ export default function VoIPApp() {
   }, [hasDesktopBridge, isScreenSharing, isVoiceSplit, uiClient, voiceClient, resyncScreenForLateViewers])
 
   useEffect(() => {
-    if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName || !isInVoice) return
+    if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName || !isInVoice || streamHiddenByUser) return
     setStreamLoading(true)
     const room = currentVoiceChannel
     const timer = window.setTimeout(() => requestViewerStreamResync(room, true), 350)
     return () => clearTimeout(timer)
-  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, isInVoice])
+  }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, isInVoice, streamHiddenByUser])
 
   useEffect(() => {
-    if (!activeScreenSharerName || !isInVoice || isScreenSharing) {
+    if (streamHiddenByUser || !activeScreenSharerName || !isInVoice || isScreenSharing) {
       setStreamLoading(false)
       return
     }
-    const hasLegacy = Boolean(screenVideoUrl && legacyStreamHasBufferedRef.current)
-    const hasWebRtc = hasRemoteWebRtcVideo && !screenVideoUrl
+    const hasLegacy = legacyStreamBuffered
+    const hasWebRtc = hasRemoteWebRtcVideo && !legacyStreamBuffered
     if (hasLegacy || hasWebRtc) {
       setStreamLoading(false)
       return
@@ -2259,9 +2494,10 @@ export default function VoIPApp() {
     const fallbackTimer = window.setTimeout(() => {
       if (!isLegacyStreamBuffered() && hasRemoteWebRtcVideo) {
         resetLegacyStreamPlayback()
-        webRtcSessionRef.current?.bindRemoteScreenVideo(remoteStreamVideoRef.current)
+        webRtcSessionRef.current?.rebindRemoteScreenVideo(remoteStreamVideoRef.current)
         setStreamLoading(false)
       } else if (!isLegacyStreamBuffered() && !hasRemoteWebRtcVideo) {
+        if (screenVideoUrl) resetLegacyStreamPlayback()
         setStreamLoading(false)
       }
     }, 12000)
@@ -2269,7 +2505,33 @@ export default function VoIPApp() {
       clearTimeout(retryTimer)
       clearTimeout(fallbackTimer)
     }
-  }, [activeScreenSharerName, isInVoice, isScreenSharing, screenVideoUrl, hasRemoteWebRtcVideo])
+  }, [activeScreenSharerName, isInVoice, isScreenSharing, screenVideoUrl, hasRemoteWebRtcVideo, legacyStreamBuffered, streamHiddenByUser])
+
+  const handleHideStream = () => {
+    streamHiddenByUserRef.current = true
+    setStreamHiddenByUser(true)
+    resetRemoteStreamPlayback()
+    setStreamLoading(false)
+    isWatchingScreenRef.current = false
+    const room = currentVoiceChannelRef.current
+    if (room) getVoiceWsClientRef.current().setWatchingScreen(false, room)
+    if (streamWindowRef.current && !streamWindowRef.current.closed) {
+      toggleStreamWindow()
+    }
+  }
+
+  const handleShowStream = () => {
+    streamHiddenByUserRef.current = false
+    setStreamHiddenByUser(false)
+    const room = currentVoiceChannelRef.current
+    const serverId = activeServerId
+    if (room && serverId && activeScreenSharerName) {
+      void ensureLiveKitForVoiceRoom(serverId, room).then(() => {
+        requestViewerStreamResync(room, true)
+        window.requestAnimationFrame(() => rebindViewerStreamElements())
+      })
+    }
+  }
 
   useEffect(() => {
     streamVolumePctRef.current = streamVolumePct
@@ -2316,7 +2578,7 @@ export default function VoIPApp() {
     const title = activeScreenSharerName ? `Voixex Stream - ${activeScreenSharerName}` : "Voixex Stream"
     streamWindowRef.current.document.title = title
     const viewers = (voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"
-    const previewUrl = screenVideoUrl ?? screenImageUrl ?? localScreenPreviewUrl
+    const imagePreviewUrl = screenImageUrl ?? localScreenPreviewUrl
     const localCapture = isScreenSharing ? screenCaptureStreamRef.current : null
     const doc = streamWindowRef.current.document
     if (!doc.getElementById("voixex-stream-root")) {
@@ -2325,7 +2587,7 @@ export default function VoIPApp() {
           <div id="voixex-streaming" style="margin-bottom:8px"></div>
           <div id="voixex-viewers" style="margin-bottom:8px"></div>
           <div id="voixex-stream-audio-host" style="display:none"></div>
-          <video id="voixex-stream-video" autoplay playsinline controls style="display:none;max-width:100%;max-height:85vh;border:1px solid #444;border-radius:6px"></video>
+          <video id="voixex-stream-video" autoplay playsinline controls style="display:none;max-width:100%;max-height:85vh;background:#000;border:1px solid #444;border-radius:6px"></video>
           <div id="voixex-stream-placeholder" style="color:#999">No active stream frame.</div>
         </div>
       `
@@ -2338,8 +2600,9 @@ export default function VoIPApp() {
     if (viewersEl) viewersEl.textContent = `Viewers: ${viewers}`
     if (imageEl && placeholderEl) {
       if (localCapture) {
-        imageEl.muted = true
         stopPopupMirrorTracks()
+        webRtcSessionRef.current?.unbindPopupScreenVideo()
+        imageEl.muted = true
         if (imageEl.src) imageEl.removeAttribute("src")
         if (imageEl.srcObject !== localCapture) {
           imageEl.srcObject = localCapture
@@ -2347,64 +2610,37 @@ export default function VoIPApp() {
         }
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
-      } else if (viewingWebRtcStream && remoteStreamVideoRef.current) {
-        imageEl.muted = true
-        const srcVideo = remoteStreamVideoRef.current
-        const mirrorFps = Math.min(60, Math.max(8, screenFps))
+      } else if (hasRemoteWebRtcVideo && webRtcSessionRef.current) {
         stopPopupMirrorTracks()
-        try {
-          const cap = (srcVideo as HTMLVideoElement & { captureStream?: (frameRate?: number) => MediaStream }).captureStream?.(mirrorFps)
-          if (!cap) throw new Error("captureStream unavailable")
-          popupMirrorStreamRef.current = cap
-          lastPopupMirrorVideoUrlRef.current = "__webrtc__"
-          imageEl.srcObject = cap
-          imageEl.removeAttribute("src")
-          imageEl.muted = true
-          void imageEl.play().catch(() => {})
-          imageEl.style.display = "block"
-          placeholderEl.style.display = "none"
-        } catch {
-          imageEl.style.display = "none"
-          placeholderEl.style.display = "block"
-        }
-        syncStreamPopupAudio()
-      } else if (screenVideoUrl && remoteStreamVideoRef.current) {
-        imageEl.muted = deafenedRef.current
-        // Blob URLs tied to MediaSource in the opener do not reliably play in a second window
-        // (Steam overlay / pop-out). Mirror decoded output via captureStream from the main <video>.
-        const srcVideo = remoteStreamVideoRef.current
-        const mirrorFps = Math.min(60, Math.max(8, screenFps))
-        const needNewMirror =
-          lastPopupMirrorVideoUrlRef.current !== screenVideoUrl || imageEl.srcObject !== popupMirrorStreamRef.current
-        if (needNewMirror) {
-          stopPopupMirrorTracks()
-          try {
-            const cap = (srcVideo as HTMLVideoElement & { captureStream?: (frameRate?: number) => MediaStream }).captureStream?.(mirrorFps)
-            if (!cap) throw new Error("captureStream unavailable")
-            popupMirrorStreamRef.current = cap
-            lastPopupMirrorVideoUrlRef.current = screenVideoUrl
-            imageEl.srcObject = cap
-            imageEl.removeAttribute("src")
-            void imageEl.play().catch(() => {})
-          } catch {
-            lastPopupMirrorVideoUrlRef.current = null
-            if (imageEl.srcObject) imageEl.srcObject = null
-            if (previewUrl && imageEl.src !== previewUrl) {
-              imageEl.src = previewUrl
-              void imageEl.play().catch(() => {})
-            }
-          }
-        } else {
-          void imageEl.play().catch(() => {})
-        }
+        imageEl.muted = true
+        webRtcSessionRef.current.bindPopupScreenVideo(imageEl)
+        void imageEl.play().catch(() => {})
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
-      } else if (previewUrl) {
+        syncStreamPopupAudio()
+      } else if (legacyStreamBuffered && screenVideoUrl && remoteStreamVideoRef.current) {
         imageEl.muted = deafenedRef.current
+        const srcVideo = remoteStreamVideoRef.current
+        const mirrored = mirrorLegacyVideoToPopup(srcVideo, imageEl, screenVideoUrl)
+        if (mirrored) {
+          imageEl.style.display = "block"
+          placeholderEl.style.display = "none"
+        } else {
+          imageEl.style.display = "none"
+          placeholderEl.style.display = "block"
+          const onReady = () => renderStreamWindowRef.current()
+          srcVideo.addEventListener("loadeddata", onReady, { once: true })
+          srcVideo.addEventListener("playing", onReady, { once: true })
+          srcVideo.addEventListener("resize", onReady, { once: true })
+          schedulePopupMirrorRetry()
+        }
+      } else if (imagePreviewUrl) {
         stopPopupMirrorTracks()
+        webRtcSessionRef.current?.unbindPopupScreenVideo()
+        imageEl.muted = deafenedRef.current
         if (imageEl.srcObject) imageEl.srcObject = null
-        if (imageEl.src !== previewUrl) {
-          imageEl.src = previewUrl
+        if (imageEl.src !== imagePreviewUrl) {
+          imageEl.src = imagePreviewUrl
           void imageEl.play().catch(() => {})
         }
         imageEl.style.display = "block"
@@ -2444,6 +2680,8 @@ export default function VoIPApp() {
     streamWindowRef.current = popup
     setShowingStreamWindow(true)
     renderStreamWindow()
+    window.setTimeout(() => renderStreamWindowRef.current(), 400)
+    window.setTimeout(() => renderStreamWindowRef.current(), 1500)
   }
 
   const toggleStreamVideoFullscreen = async () => {
@@ -2609,7 +2847,7 @@ export default function VoIPApp() {
         await window.electronVoice.joinRoom(channelId)
         await ensureLiveKitForVoiceRoom(activeServerId, channelId)
         lastViewerScreenResyncReqRef.current = null
-        if (activeScreenSharerName) requestViewerStreamResync(channelId, true)
+        void catchUpViewerStreamAfterJoin(activeServerId, channelId)
         setStatus(`In room: ${channel.name}`)
         return
       }
@@ -2622,9 +2860,7 @@ export default function VoIPApp() {
       void window.electronVoice?.joinRoom(channelId)
       applyVoiceEnginePresenceFlags()
       lastViewerScreenResyncReqRef.current = null
-      void ensureLiveKitForVoiceRoom(activeServerId, channelId).then(() => {
-        if (activeScreenSharerName) requestViewerStreamResync(channelId, true)
-      })
+      void catchUpViewerStreamAfterJoin(activeServerId, channelId)
       setStatus(`In room: ${channel.name}`)
     } else if (channel?.type === "text" && activeServerId) {
       setStatus(`Text channel: ${channel.name}`)
@@ -2643,6 +2879,12 @@ export default function VoIPApp() {
     voiceServerIdRef.current = ""
     lastViewerScreenResyncReqRef.current = null
     pendingLegacyStreamResyncRef.current = false
+    isWatchingScreenRef.current = false
+    streamHiddenByUserRef.current = false
+    setStreamHiddenByUser(false)
+    prevActiveScreenSharerIdRef.current = null
+    setActiveScreenSharerId(null)
+    prevVoiceChannelForStreamRef.current = ""
     setStreamLoading(false)
     resetRemoteStreamPlayback()
     stopVoicePipeline()
@@ -2739,6 +2981,51 @@ export default function VoIPApp() {
     return `Ping1% ${voiceStats.ping1PctMs ?? 0}ms | Loss ${voiceStats.packetLossPct ?? 0}% | Jitter1% ${voiceStats.jitter1PctMs ?? 0}ms`
   }, [isInVoice, voiceStats])
 
+  const persistConnectionSettings = (patch: Partial<SavedServerProfile>) => {
+    const globalPatch: ConnectionPrefs = {}
+    if (patch.mediaEngine) globalPatch.mediaEngine = patch.mediaEngine
+    if (patch.voiceTransport) globalPatch.voiceTransport = patch.voiceTransport
+    if (typeof patch.apiUseHttps === "boolean") globalPatch.apiUseHttps = patch.apiUseHttps
+    if (patch.udpPortOverride !== undefined) globalPatch.udpPortOverride = patch.udpPortOverride
+    if (Object.keys(globalPatch).length > 0) {
+      saveGlobalConnectionPrefs({ ...loadGlobalConnectionPrefs(), ...globalPatch })
+    }
+    const host = apiHost.trim()
+    const port = apiPort.trim()
+    const match = savedServers.find((s) => s.apiHost === host && s.apiPort === port)
+    const serverId = patch.serverId ?? match?.serverId ?? activeServerIdRef.current
+    if (!serverId) return
+    setSavedServers((prev) => {
+      const idx = prev.findIndex((s) => s.serverId === serverId)
+      if (idx < 0) return prev
+      const next = [...prev]
+      next[idx] = { ...next[idx], ...patch }
+      localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
+      return next
+    })
+  }
+
+  const handleMediaEngineChange = (value: "legacy" | "webrtc") => {
+    mediaEngineRef.current = value
+    setMediaEngine(value)
+    persistConnectionSettings({ mediaEngine: value })
+  }
+
+  const handleVoiceTransportChange = (value: "udp" | "tcp") => {
+    setVoiceTransport(value)
+    persistConnectionSettings({ voiceTransport: value })
+  }
+
+  const handleApiUseHttpsChange = (value: boolean) => {
+    setApiUseHttps(value)
+    persistConnectionSettings({ apiUseHttps: value })
+  }
+
+  const handleUdpPortOverrideChange = (value: string) => {
+    setUdpPortOverride(value)
+    persistConnectionSettings({ udpPortOverride: value })
+  }
+
   const connectAndJoin = async (preset?: SavedServerProfile) => {
     try {
       setJoining(true)
@@ -2752,20 +3039,43 @@ export default function VoIPApp() {
       const password = preset?.serverPassword ?? serverPassword
       const superPassword = preset?.superuserPassword ?? superuserPasswordInput
       const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
-      const resolvedUseHttps = typeof preset?.apiUseHttps === "boolean" ? preset.apiUseHttps : apiUseHttps
-      const resolvedUdpOverride = preset?.udpPortOverride !== undefined ? preset.udpPortOverride : udpPortOverride
-      const resolvedVoiceTransport: "udp" | "tcp" =
-        preset?.voiceTransport === "tcp" || preset?.voiceTransport === "udp" ? preset.voiceTransport : voiceTransport
+      const globalPrefs = loadGlobalConnectionPrefs()
+      const matchByHost = savedServers.find((s) => s.apiHost === host && s.apiPort === port)
+      const resolvedUseHttps =
+        typeof preset?.apiUseHttps === "boolean"
+          ? preset.apiUseHttps
+          : typeof matchByHost?.apiUseHttps === "boolean"
+            ? matchByHost.apiUseHttps
+            : typeof globalPrefs.apiUseHttps === "boolean"
+              ? globalPrefs.apiUseHttps
+              : apiUseHttps
+      const resolvedUdpOverride =
+        preset?.udpPortOverride !== undefined
+          ? preset.udpPortOverride
+          : matchByHost?.udpPortOverride !== undefined
+            ? matchByHost.udpPortOverride
+            : globalPrefs.udpPortOverride !== undefined
+              ? globalPrefs.udpPortOverride
+              : udpPortOverride
+      const resolvedVoiceTransport = normalizeVoiceTransport(
+        preset?.voiceTransport ?? matchByHost?.voiceTransport ?? globalPrefs.voiceTransport ?? voiceTransport
+      )
+      const resolvedMediaEngine = normalizeMediaEngine(
+        preset?.mediaEngine ?? matchByHost?.mediaEngine ?? globalPrefs.mediaEngine ?? mediaEngine
+      )
       let effectiveVoiceTransport: "udp" | "tcp" = resolvedVoiceTransport
+      let effectiveMediaEngine: "legacy" | "webrtc" = resolvedMediaEngine
+      mediaEngineRef.current = resolvedMediaEngine
+      setMediaEngine(resolvedMediaEngine)
+      setVoiceTransport(resolvedVoiceTransport)
+      setApiUseHttps(resolvedUseHttps)
+      setUdpPortOverride(resolvedUdpOverride)
       if (preset) {
         setApiHost(host)
         setApiPort(port)
         setServerPassword(password)
         setSuperuserPasswordInput(superPassword)
         setConnectServerListName(preset.serverName)
-        if (typeof preset.apiUseHttps === "boolean") setApiUseHttps(preset.apiUseHttps)
-        if (preset.udpPortOverride !== undefined) setUdpPortOverride(preset.udpPortOverride)
-        if (preset.voiceTransport) setVoiceTransport(preset.voiceTransport)
       }
       if (!preset) {
         const earlyLabel = connectServerListName.trim()
@@ -2845,6 +3155,7 @@ export default function VoIPApp() {
                 fallbackOk = true
                 effectiveVoiceTransport = fallbackTransport
                 setVoiceTransport(fallbackTransport)
+                persistConnectionSettings({ voiceTransport: fallbackTransport })
                 if (resolvedVoiceTransport === "tcp") {
                   toast.warning(`TCP voice failed; using UDP. ${firstHint}`)
                 } else {
@@ -2873,6 +3184,7 @@ export default function VoIPApp() {
       uiClient.connectWs()
       const rooms = await uiClient.getRooms(joinedServerId)
       await uiClient.getMe(joinedServerId)
+      void uiClient.getServer(joinedServerId).catch(() => {})
       setActiveServerId(joinedServerId)
       const updatedProfile: SavedServerProfile = {
         serverId: joinedServerId,
@@ -2882,10 +3194,17 @@ export default function VoIPApp() {
         apiUseHttps: resolvedUseHttps,
         serverPassword: password,
         displayName: join.profile.displayName,
-        ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
+        mediaEngine: effectiveMediaEngine,
         voiceTransport: effectiveVoiceTransport,
+        ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
         ...(superPassword ? { superuserPassword: superPassword } : {})
       }
+      saveGlobalConnectionPrefs({
+        mediaEngine: effectiveMediaEngine,
+        voiceTransport: effectiveVoiceTransport,
+        apiUseHttps: resolvedUseHttps,
+        udpPortOverride: resolvedUdpOverride.trim() || undefined
+      })
       const nextSaved = [updatedProfile, ...withoutSameHostForName]
       setSavedServers(nextSaved)
       localStorage.setItem("voixex-saved-servers", JSON.stringify(nextSaved))
@@ -3051,9 +3370,15 @@ export default function VoIPApp() {
         setApiHost(saved.apiHost)
         setApiPort(saved.apiPort)
         setServerPassword(saved.serverPassword)
-        setApiUseHttps(typeof saved.apiUseHttps === "boolean" ? saved.apiUseHttps : false)
-        setUdpPortOverride(typeof saved.udpPortOverride === "string" ? saved.udpPortOverride : "")
-        setVoiceTransport(saved.voiceTransport === "tcp" ? "tcp" : "udp")
+        applyConnectionPrefsToState(
+          {
+            apiUseHttps: saved.apiUseHttps,
+            udpPortOverride: saved.udpPortOverride ?? "",
+            voiceTransport: saved.voiceTransport,
+            mediaEngine: saved.mediaEngine
+          },
+          { setMediaEngine, setVoiceTransport, setApiUseHttps, setUdpPortOverride, mediaEngineRef }
+        )
         setDisplayNameInput(saved.displayName)
         setSuperuserPasswordInput(saved.superuserPassword ?? "")
 
@@ -3212,6 +3537,9 @@ export default function VoIPApp() {
             onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
             onToggleMemberList={() => setShowMemberList((v) => !v)}
             onStreamVolumeChange={setStreamVolumePct}
+            streamHiddenByUser={streamHiddenByUser}
+            onHideStream={handleHideStream}
+            onShowStream={handleShowStream}
             onJoinVoice={() => void handleChannelSelect(activeChannelId)}
             onLeaveVoice={handleDisconnect}
           />
@@ -3241,13 +3569,13 @@ export default function VoIPApp() {
         apiPort={apiPort}
         onApiPortChange={setApiPort}
         apiUseHttps={apiUseHttps}
-        onApiUseHttpsChange={setApiUseHttps}
+        onApiUseHttpsChange={handleApiUseHttpsChange}
         udpPortOverride={udpPortOverride}
-        onUdpPortOverrideChange={setUdpPortOverride}
+        onUdpPortOverrideChange={handleUdpPortOverrideChange}
         mediaEngine={mediaEngine}
-        onMediaEngineChange={setMediaEngine}
+        onMediaEngineChange={handleMediaEngineChange}
         voiceTransport={voiceTransport}
-        onVoiceTransportChange={setVoiceTransport}
+        onVoiceTransportChange={handleVoiceTransportChange}
         serverPassword={serverPassword}
         onServerPasswordChange={setServerPassword}
         displayNameInput={displayNameInput}

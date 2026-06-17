@@ -1,15 +1,77 @@
-import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, Menu, nativeImage, session, systemPreferences } from "electron"
+import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, Menu, nativeImage, net, protocol, session, systemPreferences } from "electron"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
-import { join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join, normalize, relative } from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { VoiceService } from "./voice-service.js"
 
 const voice = new VoiceService()
 let preferredScreenSourceId: string | null = null
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
-const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000"
-const bundledUiPath = join(__dirname, "../ui/index.html")
+const BUNDLED_UI_SCHEME = "app"
+const BUNDLED_UI_HOST = "bundle"
+
+function normalizeFrontendUrl(raw: string | undefined): string {
+  const trimmed = (raw ?? "http://localhost:3000").trim()
+  if (!trimmed) return "http://localhost:3000"
+  // Misconfigured env on Windows (e.g. FRONTEND_URL=K:) becomes file:///K:/ and breaks load.
+  if (/^[a-zA-Z]:\\?$/.test(trimmed) || /^file:\/\/[a-zA-Z]:\/?$/i.test(trimmed)) {
+    return "http://localhost:3000"
+  }
+  return trimmed
+}
+
+const frontendUrl = normalizeFrontendUrl(process.env.FRONTEND_URL)
+const bundledUiRoot = join(__dirname, "../ui")
+const bundledUiPath = join(bundledUiRoot, "index.html")
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: BUNDLED_UI_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true
+    }
+  }
+])
+
+function getBundledUiEntryUrl(): string | null {
+  if (!existsSync(bundledUiPath)) return null
+  return `${BUNDLED_UI_SCHEME}://${BUNDLED_UI_HOST}/index.html`
+}
+
+function resolveBundledUiRequestPath(uiRoot: string, pathname: string): string | null {
+  let p = decodeURIComponent(pathname)
+  if (p === "/" || p === "") p = "/index.html"
+  else if (p.endsWith("/")) p += "index.html"
+
+  const segments = p.split("/").filter(Boolean)
+  const filePath = normalize(join(uiRoot, ...segments))
+  const rel = relative(normalize(uiRoot), filePath)
+  if (rel.startsWith("..")) return null
+  if (existsSync(filePath)) return filePath
+
+  const fallback = join(uiRoot, "index.html")
+  return existsSync(fallback) ? fallback : null
+}
+
+async function registerBundledUiProtocol(): Promise<void> {
+  if (!existsSync(bundledUiPath)) return
+  await protocol.handle(BUNDLED_UI_SCHEME, (request) => {
+    try {
+      const url = new URL(request.url)
+      if (url.host !== BUNDLED_UI_HOST) return new Response("Not found", { status: 404 })
+      const filePath = resolveBundledUiRequestPath(bundledUiRoot, url.pathname)
+      if (!filePath) return new Response("Not found", { status: 404 })
+      return net.fetch(pathToFileURL(filePath).href)
+    } catch (err) {
+      console.error("bundled UI protocol error", err)
+      return new Response("Internal error", { status: 500 })
+    }
+  })
+}
 
 function resolveRuntimeIconPath(): string | undefined {
   const iconsDir = app.isPackaged ? process.resourcesPath : join(__dirname, "../build/icons")
@@ -103,20 +165,27 @@ function createWindow() {
     }
   })
   win.once("ready-to-show", () => win.show())
-  win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl) => {
-    loadFallbackErrorPage(win, `did-fail-load: ${errorCode} ${errorDescription} (${validatedUrl})`, validatedUrl || frontendUrl)
+  const bundledEntry = getBundledUiEntryUrl()
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+    if (!isMainFrame) return
+    loadFallbackErrorPage(
+      win,
+      `did-fail-load: ${errorCode} ${errorDescription} (${validatedUrl})`,
+      bundledEntry ?? frontendUrl
+    )
   })
   win.webContents.on("render-process-gone", (_event, details) => {
-    loadFallbackErrorPage(win, `render-process-gone: ${details.reason}`, existsSync(bundledUiPath) ? bundledUiPath : frontendUrl)
+    loadFallbackErrorPage(win, `render-process-gone: ${details.reason}`, bundledEntry ?? bundledUiPath)
   })
-  if (existsSync(bundledUiPath)) {
-    void win.loadFile(bundledUiPath)
+  if (bundledEntry) {
+    void win.loadURL(bundledEntry)
   } else {
     void win.loadURL(frontendUrl)
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await registerBundledUiProtocol()
   if (process.platform === "win32") {
     app.setAppUserModelId("com.voixex.desktop")
     // Keep Windows title bar clean like on macOS build.
