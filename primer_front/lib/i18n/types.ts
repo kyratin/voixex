@@ -2,7 +2,14 @@ import type { en } from "./locales/en"
 
 export type Locale = "en" | "ru" | "es" | "pt"
 
-export type TranslationDict = typeof en
+/** Same keys as `en`, but any string values — `en` is `as const`, so its literal types would reject translations. */
+type Widen<T> = T extends string
+  ? string
+  : T extends readonly (infer U)[]
+    ? readonly Widen<U>[]
+    : { readonly [K in keyof T]: Widen<T[K]> }
+
+export type TranslationDict = Widen<typeof en>
 
 export type LanguageOption = {
   locale: Locale

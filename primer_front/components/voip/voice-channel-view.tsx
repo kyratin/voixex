@@ -22,7 +22,7 @@ import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
-import { Slider } from "@/components/ui/slider"
+import { StreamVolumeControl } from "@/components/voip/stream-volume-control"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useI18n } from "@/lib/i18n/provider"
 
@@ -48,6 +48,7 @@ type VoiceChannelViewProps = {
   isInVoice: boolean
   hasDesktopBridge: boolean
   isDeafened: boolean
+  canStartScreenShare?: boolean
   screenShareWithAudio: boolean
   screenSources: ScreenSource[]
   selectedScreenSourceId: string | null
@@ -65,7 +66,8 @@ type VoiceChannelViewProps = {
   onToggleStreamWindow: () => void
   onToggleStreamFullscreen: () => void
   onToggleMemberList: () => void
-  onStreamVolumeChange: (pct: number) => void
+  onStreamVolumeLiveChange: (pct: number) => void
+  onStreamVolumeCommit: (pct: number) => void
   streamHiddenByUser?: boolean
   onHideStream?: () => void
   onShowStream?: () => void
@@ -93,6 +95,7 @@ export function VoiceChannelView({
   isInVoice,
   hasDesktopBridge,
   isDeafened,
+  canStartScreenShare = true,
   screenShareWithAudio,
   screenSources,
   selectedScreenSourceId,
@@ -110,7 +113,8 @@ export function VoiceChannelView({
   onToggleStreamWindow,
   onToggleStreamFullscreen,
   onToggleMemberList,
-  onStreamVolumeChange,
+  onStreamVolumeLiveChange,
+  onStreamVolumeCommit,
   streamHiddenByUser = false,
   onHideStream,
   onShowStream,
@@ -124,19 +128,19 @@ export function VoiceChannelView({
   const canHideStream = Boolean(isInVoice && !isScreenSharing && activeScreenSharerName && !streamHiddenByUser)
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-stage">
       {channelBannerUrl ? (
-        <div className="relative h-24 shrink-0 overflow-hidden border-b border-border sm:h-28">
+        <div className="relative h-24 shrink-0 overflow-hidden sm:h-28">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={channelBannerUrl} alt="" className="h-full w-full object-cover" />
-          <div className="absolute inset-0 bg-gradient-to-t from-background/90 via-background/20 to-transparent" />
+          <div className="absolute inset-0 bg-gradient-to-t from-stage/90 via-stage/20 to-transparent" />
         </div>
       ) : null}
 
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3 sm:px-4">
+      <header className="flex h-12 shrink-0 items-center gap-3 bg-background px-3 shadow-[0_1px_0_rgba(0,0,0,0.35)] sm:px-4">
         <div className="flex min-w-0 items-center gap-2">
           <ScreenShare className="h-4 w-4 shrink-0 text-primary" />
-          <h1 className="truncate text-sm font-semibold text-foreground">{channelName}</h1>
+          <h1 className="truncate text-[15px] font-semibold text-foreground">{channelName}</h1>
           {isInVoice ? (
             <span className="hidden shrink-0 rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium text-accent sm:inline">
               {t("voice.connected")}
@@ -161,7 +165,7 @@ export function VoiceChannelView({
 
           <Popover>
             <PopoverTrigger asChild>
-              <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1.5 text-xs">
+              <Button variant="secondary" size="sm" className="h-8 shrink-0 gap-1.5 text-xs">
                 <Settings2 className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">{t("voice.stream")}</span>
               </Button>
@@ -240,7 +244,7 @@ export function VoiceChannelView({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                variant={screenShareWithAudio ? "secondary" : "outline"}
+                variant={screenShareWithAudio ? "secondary" : "ghost"}
                 size="sm"
                 className="h-8 shrink-0 gap-1 text-xs"
                 onClick={onScreenShareWithAudioToggle}
@@ -260,18 +264,20 @@ export function VoiceChannelView({
                 size="sm"
                 className="h-8 shrink-0 gap-1 text-xs"
                 onClick={onScreenShareToggle}
-                disabled={!isInVoice || !hasDesktopBridge}
+                disabled={!isInVoice || !hasDesktopBridge || (!isScreenSharing && !canStartScreenShare)}
               >
                 {isScreenSharing ? <MonitorOff className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
                 {isScreenSharing ? t("voice.stopShare") : t("voice.share")}
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{isScreenSharing ? t("voice.stopSharingTooltip") : t("voice.shareScreenTooltip")}</TooltipContent>
+            <TooltipContent>
+              {!isScreenSharing && !canStartScreenShare ? t("voice.streamBusyTooltip") : isScreenSharing ? t("voice.stopSharingTooltip") : t("voice.shareScreenTooltip")}
+            </TooltipContent>
           </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onToggleStreamWindow} disabled={!canPopOut || streamHiddenByUser}>
+              <Button variant="secondary" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onToggleStreamWindow} disabled={!canPopOut || streamHiddenByUser}>
                 {showingStreamWindow ? <EyeOff className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
                 <span className="hidden lg:inline">{showingStreamWindow ? t("voice.closePopOut") : t("voice.popOut")}</span>
               </Button>
@@ -282,7 +288,7 @@ export function VoiceChannelView({
           {canHideStream && onHideStream ? (
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onHideStream}>
+                <Button variant="secondary" size="sm" className="h-8 shrink-0 gap-1 text-xs" onClick={onHideStream}>
                   <EyeOff className="h-3.5 w-3.5" />
                   <span className="hidden lg:inline">{t("voice.hideStream")}</span>
                 </Button>
@@ -340,7 +346,7 @@ export function VoiceChannelView({
               autoPlay
               muted
               playsInline
-              className="max-h-full max-w-full rounded-xl border border-border object-contain shadow-lg"
+              className="max-h-full max-w-full rounded-2xl bg-black object-contain shadow-2xl"
             />
           ) : streamHiddenByUser && activeScreenSharerName ? (
             <div className="flex max-w-md flex-col items-center gap-4 px-4 text-center">
@@ -363,7 +369,7 @@ export function VoiceChannelView({
             <div className="flex max-h-full w-full max-w-5xl flex-col items-center gap-3">
               <div className="relative flex w-full items-center justify-center">
                 {(streamLoading || expectingStream) && !hasStream ? (
-                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-xl bg-muted/40">
+                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-2xl bg-card/60">
                     <Loader2 className="h-8 w-8 animate-spin text-primary" />
                     <p className="text-xs text-muted-foreground">{t("voice.loadingStream")}</p>
                   </div>
@@ -374,35 +380,25 @@ export function VoiceChannelView({
                   autoPlay
                   muted={viewingWebRtcStream ? true : isDeafened}
                   playsInline
-                  controls={viewingLegacyStream}
-                  className="max-h-[min(70vh,calc(100dvh-14rem))] w-full max-w-full rounded-xl border border-border object-contain shadow-lg"
+                  className="max-h-[min(70vh,calc(100dvh-14rem))] w-full max-w-full rounded-2xl bg-black object-contain shadow-2xl"
                 />
               </div>
-              <div className="flex w-full max-w-md shrink-0 flex-col gap-2 px-2">
-                <div className="flex items-center gap-3">
-                  <Volume2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <Slider
-                    value={[streamVolumePct]}
-                    min={0}
-                    max={200}
-                    step={1}
-                    className="flex-1"
-                    onValueChange={([v]) => onStreamVolumeChange(Number.isFinite(v) ? Math.round(v) : 100)}
-                  />
-                  <span className="w-10 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{streamVolumePct}%</span>
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-wrap justify-center gap-2">
-                <Button variant="outline" size="sm" className="h-8 gap-1 text-xs" onClick={onToggleStreamFullscreen}>
+              <StreamVolumeControl
+                value={streamVolumePct}
+                onLiveChange={onStreamVolumeLiveChange}
+                onCommit={onStreamVolumeCommit}
+              />
+              <div className="flex shrink-0 flex-wrap justify-center gap-1.5 rounded-2xl bg-card p-1.5 shadow-xl">
+                <Button variant="secondary" size="sm" className="h-8 gap-1 text-xs" onClick={onToggleStreamFullscreen}>
                   {streamVideoFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
                   {streamVideoFullscreen ? t("voice.exitFullscreen") : t("voice.fullscreen")}
                 </Button>
-                <Button variant="outline" size="sm" className="h-8 gap-1 text-xs" onClick={onToggleStreamWindow}>
+                <Button variant="secondary" size="sm" className="h-8 gap-1 text-xs" onClick={onToggleStreamWindow}>
                   {showingStreamWindow ? <EyeOff className="h-3.5 w-3.5" /> : <ExternalLink className="h-3.5 w-3.5" />}
                   {showingStreamWindow ? t("voice.closePopOutBtn") : t("voice.popOut")}
                 </Button>
                 {onHideStream ? (
-                  <Button variant="outline" size="sm" className="h-8 gap-1 text-xs" onClick={onHideStream}>
+                  <Button variant="secondary" size="sm" className="h-8 gap-1 text-xs" onClick={onHideStream}>
                     <EyeOff className="h-3.5 w-3.5" />
                     {t("voice.hideStream")}
                   </Button>

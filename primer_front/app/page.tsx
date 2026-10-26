@@ -7,7 +7,7 @@ import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
-import { VoipClient, type RealtimeState } from "@/lib/voip-client"
+import { ApiError, VoipClient, type RealtimeState } from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
@@ -172,6 +172,8 @@ const VOICE_TRACE = process.env.NEXT_PUBLIC_VOICE_TRACE === "1"
 
 export default function VoIPApp() {
   const { t } = useI18n()
+  const errorText = (e: unknown, fallbackKey: string) =>
+    e instanceof ApiError ? t(`notices.${e.code}`) : e instanceof Error ? e.message : t(fallbackKey)
   type AppSettingsTab = "language" | "voice" | "keybinds" | "server_general" | "server_channels" | "server_roles"
   type SavedServerProfile = {
     serverId: string
@@ -381,6 +383,10 @@ export default function VoIPApp() {
   const [channelBannerChannelId, setChannelBannerChannelId] = useState("")
   const [channelBannerDraft, setChannelBannerDraft] = useState("")
   const streamVolumePctRef = useRef(streamVolumePct)
+  const channelNameByIdRef = useRef<Record<string, string>>({})
+  const channelTypeByIdRef = useRef<Record<string, "voice" | "text">>({})
+  const lastSeenMessageIdByChannelRef = useRef<Record<string, string>>({})
+  const messageNotificationsReadyRef = useRef(false)
   const screenShareTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const screenCaptureStreamRef = useRef<MediaStream | null>(null)
   const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -396,7 +402,7 @@ export default function VoIPApp() {
   const streamWindowRef = useRef<Window | null>(null)
   /** Tracks from captureStream() fed to the popup; must be stopped when switching modes or closing. */
   const popupMirrorStreamRef = useRef<MediaStream | null>(null)
-  const popupMirrorRetryRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const popupMirrorRetryRef = useRef<number | null>(null)
   const lastPopupMirrorVideoUrlRef = useRef<string | null>(null)
   const renderStreamWindowRef = useRef<() => void>(() => {})
   const currentVoiceChannelRef = useRef("")
@@ -479,6 +485,14 @@ export default function VoIPApp() {
   const getVoiceWsClientRef = useRef(getVoiceWsClient)
   getVoiceWsClientRef.current = getVoiceWsClient
 
+  const canStartScreenShare = useMemo(() => {
+    if (isScreenSharing) return true
+    if (!activeScreenSharerId) return true
+    const meId = getVoiceWsClientRef.current().getMeState()?.clientId
+    if (!meId) return false
+    return activeScreenSharerId === meId
+  }, [isScreenSharing, activeScreenSharerId])
+
   const peerVolTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   const peerVolServerId = voiceServerId || activeServerId
@@ -552,7 +566,18 @@ export default function VoIPApp() {
         Boolean(voiceServerIdRef.current && activeServerIdRef.current && voiceServerIdRef.current !== activeServerIdRef.current)
       const v = latestVoiceStateRef.current
 
-      setCategories(uiClient.toSidebarCategories())
+      const sidebarCategories = uiClient.toSidebarCategories()
+      setCategories(sidebarCategories)
+      const channelNames: Record<string, string> = {}
+      const channelTypes: Record<string, "voice" | "text"> = {}
+      for (const category of sidebarCategories) {
+        for (const channel of category.channels) {
+          channelNames[channel.id] = channel.name
+          channelTypes[channel.id] = channel.type
+        }
+      }
+      channelNameByIdRef.current = channelNames
+      channelTypeByIdRef.current = channelTypes
       const uVu = uiClient.toVoiceUsers()
       const vVu = split && v ? voiceClient.toVoiceUsers() : {}
       setVoiceUsers({ ...uVu, ...vVu })
@@ -640,6 +665,23 @@ export default function VoIPApp() {
         }))
       )
 
+      const meClientId = u.me?.clientId
+      for (const [channelId, items] of Object.entries(u.messagesByChannel)) {
+        const latest = items[items.length - 1]
+        if (!latest) continue
+        const prev = lastSeenMessageIdByChannelRef.current[channelId]
+        lastSeenMessageIdByChannelRef.current[channelId] = latest.id
+        if (!messageNotificationsReadyRef.current) continue
+        if (!prev || prev === latest.id) continue
+        if (channelId === activeChannelIdRef.current) continue
+        if (channelTypeByIdRef.current[channelId] !== "text") continue
+        if (meClientId && latest.author.clientId === meClientId) continue
+        const channelName = channelNameByIdRef.current[channelId] ?? channelId
+        const preview = latest.body.trim() ? latest.body.trim() : "[attachment]"
+        const shortPreview = preview.length > 90 ? `${preview.slice(0, 90)}...` : preview
+        toast(`${latest.author.displayName} -> #${channelName}`, { description: shortPreview })
+      }
+
       const screenState = split && v ? v : u
       const streamRoomId =
         currentVoiceChannelRef.current ||
@@ -686,6 +728,7 @@ export default function VoIPApp() {
       applyMerged()
     })
     applyMerged()
+    messageNotificationsReadyRef.current = true
     return () => {
       unsubUi()
       unsubVoice()
@@ -1731,8 +1774,7 @@ export default function VoIPApp() {
         if (window.electronVoice?.requestMicrophoneAccess) {
           const micAccess = await window.electronVoice.requestMicrophoneAccess()
           if (!micAccess.granted) {
-            const msg =
-              "Microphone access was denied. Allow Voixex in System Settings → Privacy & Security → Microphone."
+            const msg = t("notices.micDenied")
             setDeviceError(msg)
             toast.error(msg)
             return
@@ -1785,9 +1827,9 @@ export default function VoIPApp() {
             if (preferredInputId) {
               void window.electronVoice?.setAudioDevices({ inputId: null, outputId: selected?.outputId ?? null })
               setSelectedDevices((prev) => ({ ...prev, inputId: null }))
-              setDeviceError("Selected input device is unavailable. Switched to default input.")
+              setDeviceError(t("notices.inputDeviceUnavailable"))
             } else if (!speexActive && noiseSuppressionEnabled) {
-              setDeviceError("Noise suppression constraints are not supported on this device. Running without DSP constraints.")
+              setDeviceError(t("notices.noiseSuppressionUnsupported"))
             }
           }
         }
@@ -1805,7 +1847,7 @@ export default function VoIPApp() {
             // Keep pipeline alive on stale output device IDs.
             void window.electronVoice?.setAudioDevices({ inputId: selected?.inputId ?? null, outputId: null })
             setSelectedDevices((prev) => ({ ...prev, outputId: null }))
-            setDeviceError("Selected output device is unavailable. Switched to system default output.")
+            setDeviceError(t("notices.outputDeviceUnavailable"))
           }
         }
 
@@ -1923,11 +1965,11 @@ export default function VoIPApp() {
             try { enc.encoderCTL(4016, 0) } catch { /* OPUS_SET_DTX → off for stable speech continuity */ }
             opusEncoder = enc
           } catch {
-            setDeviceError("Opus encoder failed to load in renderer; falling back to PCM uplink.")
+            setDeviceError(t("notices.opusFailed"))
             opusEncoder = null
           }
         } else if (voiceTransport === "tcp") {
-          setDeviceError("TCP mode: using PCM uplink for cleaner voice (Opus disabled).")
+          setDeviceError(t("notices.tcpPcmUplink"))
         }
         let lastMeterEmitAt = 0
         captureNode.onaudioprocess = (ev) => {
@@ -2090,7 +2132,7 @@ export default function VoIPApp() {
           return prev.includes("In room:") ? `${prev} | Voice I/O active` : "Voice I/O active"
         })
       } catch (e) {
-        setDeviceError(e instanceof Error ? e.message : "Failed to start audio pipeline")
+        setDeviceError(errorText(e, "notices.audioStartFailed"))
       }
     }
 
@@ -2198,7 +2240,7 @@ export default function VoIPApp() {
     const next: ServerAppearance = { ...serverAppearance, channelBanners: banners }
     saveServerAppearance(activeServerId, next)
     setServerAppearance(next)
-    toast.success("Channel banner saved")
+    toast.success(t("notices.channelBannerSaved"))
   }
 
   useEffect(() => {
@@ -2352,7 +2394,7 @@ export default function VoIPApp() {
   const handleSendMessage = (content: string) => {
     if (!activeServerId || !activeChannelId) return
     void uiClient.sendMessage(activeServerId, activeChannelId, content).catch((e) => {
-      toast.error(e instanceof Error ? e.message : "Failed to send message")
+      toast.error(errorText(e, "notices.sendMessageFailed"))
     })
   }
 
@@ -2363,9 +2405,9 @@ export default function VoIPApp() {
     try {
       const uploaded = await uiClient.uploadAttachment(activeServerId, activeChannelId, file)
       await uiClient.sendMessage(activeServerId, activeChannelId, "", [uploaded.attachment.id])
-      toast.success("File uploaded")
+      toast.success(t("notices.fileUploaded"))
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Upload failed")
+      toast.error(errorText(e, "notices.uploadFailed"))
     }
   }
 
@@ -2533,25 +2575,50 @@ export default function VoIPApp() {
     }
   }
 
-  useEffect(() => {
-    streamVolumePctRef.current = streamVolumePct
-    const vol = Math.max(0, Math.min(2, streamVolumePct / 100))
+  const applyStreamVolumeLive = useCallback((pct: number) => {
+    const next = Math.max(0, Math.min(200, Math.round(pct)))
+    streamVolumePctRef.current = next
+    const vol = Math.max(0, Math.min(1, next / 100))
     const v = remoteStreamVideoRef.current
-    if (v && screenVideoUrl) v.volume = vol
-    webRtcSessionRef.current?.setScreenAudioVolume(streamVolumePct)
-  }, [streamVolumePct, screenVideoUrl])
+    if (v && screenVideoUrlRef.current) {
+      try {
+        v.volume = vol
+      } catch {
+        /* ignore invalid media element state */
+      }
+    }
+    try {
+      webRtcSessionRef.current?.setScreenAudioVolume(next)
+    } catch {
+      /* ignore detached stream audio elements */
+    }
+  }, [])
+
+  const handleStreamVolumeCommit = useCallback(
+    (pct: number) => {
+      applyStreamVolumeLive(pct)
+      const next = streamVolumePctRef.current
+      setStreamVolumePct(next)
+      localStorage.setItem("voixex-stream-volume-pct", String(next))
+    },
+    [applyStreamVolumeLive]
+  )
+
+  useEffect(() => {
+    applyStreamVolumeLive(streamVolumePctRef.current)
+  }, [screenVideoUrl, hasRemoteWebRtcVideo, legacyStreamBuffered, applyStreamVolumeLive])
 
   useEffect(() => {
     const saved = localStorage.getItem("voixex-stream-volume-pct")
     if (saved) {
       const n = Number.parseInt(saved, 10)
-      if (Number.isFinite(n)) setStreamVolumePct(Math.max(0, Math.min(200, n)))
+      if (Number.isFinite(n)) {
+        const next = Math.max(0, Math.min(200, n))
+        streamVolumePctRef.current = next
+        setStreamVolumePct(next)
+      }
     }
   }, [])
-
-  useEffect(() => {
-    localStorage.setItem("voixex-stream-volume-pct", String(streamVolumePct))
-  }, [streamVolumePct])
 
   useEffect(() => {
     if (!activeServerId) {
@@ -2577,7 +2644,7 @@ export default function VoIPApp() {
     if (!streamWindowRef.current || streamWindowRef.current.closed) return
     const title = activeScreenSharerName ? `Voixex Stream - ${activeScreenSharerName}` : "Voixex Stream"
     streamWindowRef.current.document.title = title
-    const viewers = (voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"
+    const viewers = (voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || t("common.none")
     const imagePreviewUrl = screenImageUrl ?? localScreenPreviewUrl
     const localCapture = isScreenSharing ? screenCaptureStreamRef.current : null
     const doc = streamWindowRef.current.document
@@ -2588,7 +2655,7 @@ export default function VoIPApp() {
           <div id="voixex-viewers" style="margin-bottom:8px"></div>
           <div id="voixex-stream-audio-host" style="display:none"></div>
           <video id="voixex-stream-video" autoplay playsinline controls style="display:none;max-width:100%;max-height:85vh;background:#000;border:1px solid #444;border-radius:6px"></video>
-          <div id="voixex-stream-placeholder" style="color:#999">No active stream frame.</div>
+          <div id="voixex-stream-placeholder" style="color:#999">${t("voice.popupNoFrame")}</div>
         </div>
       `
     }
@@ -2596,8 +2663,8 @@ export default function VoIPApp() {
     const viewersEl = doc.getElementById("voixex-viewers")
     const imageEl = doc.getElementById("voixex-stream-video") as HTMLVideoElement | null
     const placeholderEl = doc.getElementById("voixex-stream-placeholder")
-    if (streamingEl) streamingEl.textContent = `Streaming: ${activeScreenSharerName || "none"}`
-    if (viewersEl) viewersEl.textContent = `Viewers: ${viewers}`
+    if (streamingEl) streamingEl.textContent = t("voice.popupStreaming", { name: activeScreenSharerName || t("common.none") })
+    if (viewersEl) viewersEl.textContent = t("voice.popupViewers", { names: viewers })
     if (imageEl && placeholderEl) {
       if (localCapture) {
         stopPopupMirrorTracks()
@@ -2672,9 +2739,9 @@ export default function VoIPApp() {
       setShowingStreamWindow(false)
       return
     }
-    const popup = window.open("", "voixex-stream-window", "width=1280,height=760")
+    const popup = window.open("about:blank", "voixex-stream-window", "width=1280,height=760")
     if (!popup) {
-      setError("Unable to open stream window. Allow popups for Voixex.")
+      setError(t("notices.popupBlocked"))
       return
     }
     streamWindowRef.current = popup
@@ -2696,7 +2763,7 @@ export default function VoIPApp() {
         setStreamVideoFullscreen(true)
       }
     } catch {
-      setError("Fullscreen is not available for this stream.")
+      setError(t("notices.fullscreenUnavailable"))
     }
   }
 
@@ -2710,15 +2777,19 @@ export default function VoIPApp() {
 
   const startScreenShare = async () => {
     if (!hasDesktopBridge || !window.electronVoice) {
-      throw new Error("Screen share is available only in the desktop client.")
+      throw new Error(t("notices.screenShareDesktopOnly"))
     }
     if (!isInVoice || !currentVoiceChannel) {
-      throw new Error("Join a voice channel first.")
+      throw new Error(t("notices.joinVoiceFirst"))
     }
     if (!navigator.mediaDevices?.getDisplayMedia) {
-      throw new Error("Screen capture API is not available in this runtime.")
+      throw new Error(t("notices.screenCaptureUnavailable"))
     }
     if (isScreenSharing) return
+    const meId = getVoiceWsClientRef.current().getMeState()?.clientId
+    if (activeScreenSharerId && (!meId || activeScreenSharerId !== meId)) {
+      throw new Error(t("notices.anotherStreaming"))
+    }
 
     const fps = Math.max(8, Math.min(60, screenFps))
     const [targetWidthRaw, targetHeightRaw] = screenResolution.split("x").map((v) => Number(v))
@@ -2802,10 +2873,14 @@ export default function VoIPApp() {
         await stopScreenShare()
         setStatus("Screen share stopped")
       } else {
+        if (!canStartScreenShare) {
+          toast.error(t("notices.anotherStreaming"))
+          return
+        }
         await startScreenShare()
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to toggle screen share")
+      setError(errorText(e, "notices.toggleScreenShareFailed"))
     }
   }
 
@@ -2817,13 +2892,13 @@ export default function VoIPApp() {
         await stopScreenShare()
       }
       if (!activeServerId) {
-        toast.error("Connect to a server before joining voice.")
+        toast.error(t("notices.connectBeforeVoice"))
         return
       }
       if (isInVoice && voiceServerId && activeServerId && voiceServerId !== activeServerId) {
         const vopts = uiClient.getElectronVoiceConnectParams()
         if (!window.electronVoice || !vopts) {
-          toast.error("Cannot join voice on this server from the current setup.")
+          toast.error(t("notices.cannotJoinVoiceHere"))
           return
         }
         voiceClient.leaveRoom()
@@ -2921,9 +2996,7 @@ export default function VoIPApp() {
     const entry = savedServers.find((s) => s.serverId === serverId)
     if (!entry) return
     if (
-      !window.confirm(
-        `Remove "${entry.serverName}" from your list? You can connect again later with the same host and password.`
-      )
+      !window.confirm(t("notices.confirmRemoveServer", { name: entry.serverName }))
     ) {
       return
     }
@@ -2946,8 +3019,15 @@ export default function VoIPApp() {
       autoConnectAttemptedRef.current = false
       localStorage.removeItem("voixex-last-server-id")
       setActiveServerId("")
+      // Don't leave the removed profile's credentials in the connect form.
+      setApiHost(CONNECTION_DEFAULTS.host)
+      setApiPort(CONNECTION_DEFAULTS.port)
+      setServerPassword(CONNECTION_DEFAULTS.password)
+      setSuperuserPasswordInput("")
+      setConnectServerListName("")
+      setError("")
       setShowConnectPanel(true)
-      toast.success("Server removed")
+      toast.success(t("notices.serverRemoved"))
       return
     }
     if (activeServerId === serverId) {
@@ -2961,7 +3041,7 @@ export default function VoIPApp() {
       setSuperuserPasswordInput(pick.superuserPassword ?? "")
       setProfileDisplayName(pick.displayName)
     }
-    toast.success("Server removed from list")
+    toast.success(t("notices.serverRemoved"))
   }
 
   const activeChannel = categories.flatMap((c) => c.channels).find((c) => c.id === activeChannelId)
@@ -3082,7 +3162,7 @@ export default function VoIPApp() {
         if (earlyLabel) {
           const others = savedServers.filter((s) => !(s.apiHost === host && s.apiPort === port))
           if (others.some((s) => s.serverName.trim().toLowerCase() === earlyLabel.toLowerCase())) {
-            toast.error("A server with this name already exists in your list.")
+            toast.error(t("notices.duplicateServerName"))
             setJoining(false)
             return
           }
@@ -3094,7 +3174,7 @@ export default function VoIPApp() {
       setError("")
       setStatus(`Connecting API: ${host}:${port}`)
       const health = await uiClient.healthcheck()
-      if (!health.ok) throw new Error("server is not healthy")
+      if (!health.ok) throw new Error(t("notices.serverNotHealthy"))
       setConnectedToApi(true)
       setStatus("Joining server...")
       const clientId = localStorage.getItem("voip-client-id") || crypto.randomUUID()
@@ -3110,9 +3190,7 @@ export default function VoIPApp() {
           (s) => s.serverName.trim().toLowerCase() === effectiveListName.toLowerCase()
         )
       ) {
-        toast.error(
-          "A server with this name already exists in your list. Pick another name and connect again."
-        )
+        toast.error(t("notices.duplicateServerNamePick"))
         uiClient.disconnect()
         setConnectedToApi(false)
         setJoining(false)
@@ -3124,7 +3202,7 @@ export default function VoIPApp() {
       setProfileDisplayName(join.profile.displayName)
       if (join.mediaToken) {
         if (!window.electronVoice) {
-          throw new Error("Desktop voice bridge not available. Run inside voip-desktop-client.")
+          throw new Error(t("notices.desktopBridgeMissing"))
         }
         setStatus("Connecting voice transport...")
         const vopts = uiClient.getElectronVoiceConnectParams()
@@ -3157,25 +3235,32 @@ export default function VoIPApp() {
                 setVoiceTransport(fallbackTransport)
                 persistConnectionSettings({ voiceTransport: fallbackTransport })
                 if (resolvedVoiceTransport === "tcp") {
-                  toast.warning(`TCP voice failed; using UDP. ${firstHint}`)
+                  toast.warning(t("notices.tcpFailedUsingUdp", { hint: firstHint }))
                 } else {
                   toast.success(
-                    `Voice switched to ${fallbackTransport.toUpperCase()} (fallback after ${resolvedVoiceTransport.toUpperCase()} failed).`
+                    t("notices.voiceSwitchedFallback", {
+                      to: fallbackTransport.toUpperCase(),
+                      from: resolvedVoiceTransport.toUpperCase()
+                    })
                   )
                 }
               } catch (fallbackErr) {
                 const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
                 toast.error(
-                  `Voice failed on ${resolvedVoiceTransport.toUpperCase()} and ${fallbackTransport.toUpperCase()}: ${fallbackMsg}. Connected without voice.`
+                  t("notices.voiceFailedBoth", {
+                    from: resolvedVoiceTransport.toUpperCase(),
+                    to: fallbackTransport.toUpperCase(),
+                    error: fallbackMsg
+                  })
                 )
               }
             }
             if (!fallbackOk) {
               if (window.electronVoice?.disconnect) await window.electronVoice.disconnect()
               if (!/hello|timeout|tcp|udp|connect|ECONNREFUSED|socket closed/i.test(firstMsg)) {
-                toast.error(`Voice error: ${firstHint}. Connected without voice.`)
+                toast.error(t("notices.voiceError", { hint: firstHint }))
               } else if (resolvedVoiceTransport === "tcp") {
-                toast.error(`TCP voice failed: ${firstHint}. Connected without voice.`)
+                toast.error(t("notices.tcpVoiceFailed", { hint: firstHint }))
               }
             }
           }
@@ -3229,7 +3314,7 @@ export default function VoIPApp() {
       setStatus("Connected to server")
     } catch (e) {
       setConnectedToApi(false)
-      setError(e instanceof Error ? e.message : "join server failed")
+      setError(errorText(e, "notices.joinServerFailed"))
     } finally {
       setJoining(false)
     }
@@ -3248,7 +3333,7 @@ export default function VoIPApp() {
         const probe = await navigator.mediaDevices.getUserMedia({ audio: true })
         probe.getTracks().forEach((t) => t.stop())
       } catch {
-        setDeviceError("No permission to access microphone/headphones. Allow audio permissions in desktop client.")
+        setDeviceError(t("notices.noAudioPermission"))
       }
       try {
         const devices = await navigator.mediaDevices.enumerateDevices()
@@ -3320,7 +3405,7 @@ export default function VoIPApp() {
       localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
       return next
     })
-    toast.success("Profile updated")
+    toast.success(t("notices.profileUpdated"))
     setStatus("Profile updated")
   }
 
@@ -3328,7 +3413,7 @@ export default function VoIPApp() {
     if (!activeServerId || !canManageServer || creatingChannel) return
     const name = roomNameInput.trim()
     if (!name) {
-      setError("Channel name is required")
+      setError(t("notices.channelNameRequired"))
       return
     }
     try {
@@ -3336,11 +3421,11 @@ export default function VoIPApp() {
       setError("")
       await uiClient.createRoom(activeServerId, name, roomKindInput)
       await uiClient.getRooms(activeServerId)
-      toast.success(`Channel "${name}" created`)
+      toast.success(t("notices.channelCreated", { name }))
       setStatus(`Channel created: ${name}`)
       setRoomNameInput("")
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to create channel")
+      toast.error(errorText(e, "notices.createChannelFailed"))
     } finally {
       setCreatingChannel(false)
     }
@@ -3355,9 +3440,7 @@ export default function VoIPApp() {
       currentVoiceChannelRef.current &&
       serverId !== activeServerIdRef.current
     ) {
-      const ok = window.confirm(
-        "Вы в голосовом канале. Переход на другой сервер разорвёт голосовое соединение и выполнит полное переподключение к выбранному серверу. Продолжить?"
-      )
+      const ok = window.confirm(t("notices.confirmSwitchServer"))
       if (!ok) return
     }
 
@@ -3417,7 +3500,7 @@ export default function VoIPApp() {
       })
       .catch((err) => {
         console.error(err)
-        toast.error(err instanceof Error ? err.message : "Server switch failed")
+        toast.error(errorText(err, "notices.serverSwitchFailed"))
       })
 
     void serverSwitchChainRef.current
@@ -3444,9 +3527,9 @@ export default function VoIPApp() {
         />
 
         {activeServerId ? (
-          <aside className="flex h-full min-h-0 w-60 shrink-0 flex-col border-r border-border bg-card">
+          <aside className="flex h-full min-h-0 w-60 shrink-0 flex-col bg-card">
             <ChannelSidebar
-              serverName={servers.find((s) => s.id === activeServerId)?.name || "No Server"}
+              serverName={servers.find((s) => s.id === activeServerId)?.name || t("common.noServer")}
               serverBannerUrl={serverAppearance.serverBannerUrl}
               categories={categories}
               activeChannelId={activeChannelId}
@@ -3504,7 +3587,7 @@ export default function VoIPApp() {
             channelBannerUrl={activeChannelBannerUrl}
             error={error}
             activeScreenSharerName={activeScreenSharerName}
-            watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || "none"}
+            watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || t("common.none")}
             isScreenSharing={isScreenSharing}
             viewingLegacyStream={viewingLegacyStream}
             viewingWebRtcStream={viewingWebRtcStream}
@@ -3519,6 +3602,7 @@ export default function VoIPApp() {
             isInVoice={isInVoice}
             hasDesktopBridge={hasDesktopBridge}
             isDeafened={isDeafened}
+            canStartScreenShare={canStartScreenShare}
             screenShareWithAudio={screenShareWithAudio}
             screenSources={screenSources}
             selectedScreenSourceId={selectedScreenSourceId}
@@ -3536,7 +3620,8 @@ export default function VoIPApp() {
             onToggleStreamWindow={toggleStreamWindow}
             onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
             onToggleMemberList={() => setShowMemberList((v) => !v)}
-            onStreamVolumeChange={setStreamVolumePct}
+            onStreamVolumeLiveChange={applyStreamVolumeLive}
+            onStreamVolumeCommit={handleStreamVolumeCommit}
             streamHiddenByUser={streamHiddenByUser}
             onHideStream={handleHideStream}
             onShowStream={handleShowStream}
@@ -3594,6 +3679,7 @@ export default function VoIPApp() {
         wsConnected={wsConnected}
         wsReconnecting={wsReconnecting}
         hasDesktopBridge={hasDesktopBridge}
+        hasSavedServers={savedServers.length > 0}
         error={error}
       />
       <Dialog open={showAppSettings} onOpenChange={setShowAppSettings}>
@@ -3661,7 +3747,7 @@ export default function VoIPApp() {
                   value={selectedDevices.outputId ?? ""}
                   onChange={(e) => setSelectedDevices((prev) => ({ ...prev, outputId: e.target.value || null }))}
                 >
-                  <option value="">Default</option>
+                  <option value="">{t("common.default")}</option>
                   {audioDevices.output.map((d) => (
                     <option key={d.id} value={d.id}>{d.label}</option>
                   ))}
@@ -3818,7 +3904,7 @@ export default function VoIPApp() {
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label className="text-sm">Release</Label>
+                    <Label className="text-sm">{t("settings.gateRelease")}</Label>
                     <span className="text-xs text-muted-foreground">{gateReleaseMs}ms</span>
                   </div>
                   <Slider value={[gateReleaseMs]} min={80} max={800} step={10} onValueChange={([v]) => setGateReleaseMs(v)} />
@@ -3826,35 +3912,35 @@ export default function VoIPApp() {
               </div>
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div>
-                  <Label>Playback DSP (incoming voice)</Label>
-                  <p className="text-xs text-muted-foreground">Tune this if remote voice sounds robotic, metallic, or too bright. Defaults are OFF for the most natural speech.</p>
+                  <Label>{t("settings.playbackDsp")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.playbackDspHint")}</p>
                 </div>
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm">Playback Gate</Label>
+                  <Label className="text-sm">{t("settings.playbackGate")}</Label>
                   <Switch checked={playbackGateEnabled} onCheckedChange={setPlaybackGateEnabled} />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label className="text-sm">Playback Gate Threshold</Label>
+                    <Label className="text-sm">{t("settings.playbackGateThreshold")}</Label>
                     <span className="text-xs text-muted-foreground">{playbackGateThreshold}</span>
                   </div>
                   <Slider value={[playbackGateThreshold]} min={0} max={2000} step={10} onValueChange={([v]) => setPlaybackGateThreshold(v)} />
                 </div>
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm">High-pass Filter</Label>
+                  <Label className="text-sm">{t("settings.highpassFilter")}</Label>
                   <Switch checked={playbackHighpassEnabled} onCheckedChange={setPlaybackHighpassEnabled} />
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label className="text-sm">High-pass Cutoff</Label>
+                    <Label className="text-sm">{t("settings.highpassCutoff")}</Label>
                     <span className="text-xs text-muted-foreground">{playbackHighpassHz}Hz</span>
                   </div>
                   <Slider value={[playbackHighpassHz]} min={20} max={240} step={5} onValueChange={([v]) => setPlaybackHighpassHz(v)} />
                 </div>
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label className="text-sm">Soft Limiter / Clip Guard</Label>
-                    <p className="text-xs text-muted-foreground">Protects from harsh clipping at high levels.</p>
+                    <Label className="text-sm">{t("settings.softLimiter")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("settings.softLimiterHint")}</p>
                   </div>
                   <Switch checked={playbackLimiterEnabled} onCheckedChange={setPlaybackLimiterEnabled} />
                 </div>
@@ -3890,7 +3976,7 @@ export default function VoIPApp() {
 
             <TabsContent value="server_general" className="mt-0 space-y-4">
               <div className="rounded-lg border border-border p-4 space-y-2">
-                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverLabel")}</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? "Unknown"}</span></div>
+                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverLabel")}</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? t("common.unknown")}</span></div>
                 <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverId")}</span><span className="text-xs font-mono text-muted-foreground">{activeServerId}</span></div>
               </div>
               <div className="space-y-2">

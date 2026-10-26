@@ -166,6 +166,20 @@ function createWindow() {
   })
   win.once("ready-to-show", () => win.show())
   const bundledEntry = getBundledUiEntryUrl()
+  win.webContents.setWindowOpenHandler(() => ({
+    action: "allow",
+    overrideBrowserWindowOptions: {
+      width: 1280,
+      height: 760,
+      backgroundColor: "#111111",
+      autoHideMenuBar: true,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        backgroundThrottling: false
+      }
+    }
+  }))
   win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
     if (!isMainFrame) return
     loadFallbackErrorPage(

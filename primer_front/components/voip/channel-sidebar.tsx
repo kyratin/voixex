@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Monitor, Eye, LogOut } from "lucide-react"
+import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Eye, LogOut } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -10,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
 import { useI18n } from "@/lib/i18n/provider"
+import { avatarGradient } from "@/lib/avatar-colors"
 
 export interface Channel {
   id: string
@@ -87,7 +88,7 @@ export function ChannelSidebar({
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col bg-card">
       {serverBannerUrl ? (
-        <div className="relative h-16 shrink-0 overflow-hidden border-b border-border">
+        <div className="relative h-20 shrink-0 overflow-hidden">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={serverBannerUrl} alt="" className="h-full w-full object-cover" />
           <div className="absolute inset-0 bg-gradient-to-t from-card via-card/30 to-transparent" />
@@ -96,13 +97,13 @@ export function ChannelSidebar({
           </div>
         </div>
       ) : (
-        <div className="flex h-12 shrink-0 items-center border-b border-border px-4">
-          <span className="truncate text-sm font-semibold text-foreground">{serverName}</span>
+        <div className="flex h-12 shrink-0 items-center px-4 shadow-[0_1px_0_rgba(0,0,0,0.35)]">
+          <span className="truncate text-[15px] font-semibold text-foreground">{serverName}</span>
         </div>
       )}
 
       {isInVoice && currentVoiceChannelId && onLeaveVoice ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-accent/5 px-3 py-2">
+        <div className="mx-2 mt-2 flex shrink-0 items-center gap-2 rounded-lg bg-accent/10 px-3 py-1.5">
           <Volume2 className="h-3.5 w-3.5 shrink-0 text-accent" />
           <span className="min-w-0 flex-1 truncate text-xs text-foreground">{t("sidebar.inVoiceChannel")}</span>
           <Button variant="ghost" size="sm" className="h-7 shrink-0 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={onLeaveVoice}>
@@ -118,13 +119,13 @@ export function ChannelSidebar({
             <div key={category.id} className="mb-1">
               <button
                 onClick={() => toggleCategory(category.id)}
-                className="mb-0.5 flex w-full items-center gap-1 rounded-md px-1 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                className="group/cat mb-0.5 mt-3 flex w-full items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
               >
+                <span className="flex-1 truncate text-left">{category.name}</span>
                 <ChevronDown className={cn(
-                  "h-3 w-3 shrink-0 transition-transform duration-200",
+                  "h-3.5 w-3.5 shrink-0 opacity-70 transition-transform duration-200",
                   collapsedCategories.has(category.id) && "-rotate-90"
                 )} />
-                <span className="truncate">{category.name}</span>
               </button>
 
               <div className={cn(
@@ -138,16 +139,16 @@ export function ChannelSidebar({
                         <button
                           onClick={() => onChannelSelect(channel.id)}
                           className={cn(
-                            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-                            activeChannelId === channel.id && "bg-muted text-foreground",
+                            "flex w-full items-center gap-1.5 rounded-md px-2 py-[5px] text-[15px] text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground",
+                            activeChannelId === channel.id && "bg-sidebar-accent text-foreground hover:bg-sidebar-accent",
                             isInVoice && currentVoiceChannelId === channel.id && "text-accent",
                             channel.unread && "font-medium text-foreground"
                           )}
                         >
                           {channel.type === "text" ? (
-                            <Hash className="h-4 w-4 shrink-0 opacity-60" />
+                            <Hash className="h-[18px] w-[18px] shrink-0 opacity-70" />
                           ) : (
-                            <Volume2 className="h-4 w-4 shrink-0 opacity-60" />
+                            <Volume2 className="h-[18px] w-[18px] shrink-0 opacity-70" />
                           )}
                           {channel.isPrivate && (
                             <Lock className="h-3 w-3 shrink-0 opacity-50" />
@@ -163,7 +164,7 @@ export function ChannelSidebar({
                         </button>
 
                         {channel.type === "voice" && voiceUsers[channel.id] && voiceUsers[channel.id].length > 0 && (
-                          <div className="ml-4 border-l-2 border-border/50 py-0.5 pl-3">
+                          <div className="space-y-px py-0.5 pl-5">
                             {voiceUsers[channel.id].map((user) => (
                               <VoiceChannelUserRow
                                 key={user.id}
@@ -208,30 +209,35 @@ function VoiceChannelUserRow({
   const { t } = useI18n()
   const showVol = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
   return (
-    <div className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground">
-      <div className={cn(
-        "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-medium transition-all",
-        user.isSpeaking
-          ? "bg-accent/20 text-accent ring-2 ring-accent"
-          : "bg-muted text-muted-foreground"
-      )}>
+    <div className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm text-muted-foreground hover:bg-sidebar-accent/60">
+      <div
+        className={cn(
+          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white transition-shadow",
+          user.isSpeaking && "ring-2 ring-accent ring-offset-2 ring-offset-card"
+        )}
+        style={{ background: avatarGradient(user.id || user.name) }}
+      >
         {user.avatar.slice(0, 1).toUpperCase()}
       </div>
-      <span className={cn("min-w-0 flex-1 truncate", user.isSpeaking && "text-foreground")}>
+      <span className={cn("min-w-0 flex-1 truncate", user.isSpeaking ? "text-foreground" : "text-foreground/80")}>
         {user.name}
       </span>
-      <div className="flex shrink-0 items-center gap-0.5">
-        {user.isScreenSharing && <Monitor className="h-3 w-3 text-primary/80" aria-label="Screen sharing" />}
-        {user.isWatchingScreen && <Eye className="h-3 w-3 text-muted-foreground" aria-label="Watching stream" />}
-        {user.isMuted && <MicOff className="h-3 w-3 text-destructive/70" />}
-        {user.isDeafened && <Headphones className="h-3 w-3 text-destructive/70" />}
+      <div className="flex shrink-0 items-center gap-1">
+        {user.isScreenSharing && (
+          <span className="rounded bg-destructive px-1 py-px text-[9px] font-bold uppercase leading-none tracking-wide text-white" aria-label={t("sidebar.screenSharing")}>
+            Live
+          </span>
+        )}
+        {user.isWatchingScreen && <Eye className="h-3 w-3 text-muted-foreground" aria-label={t("sidebar.watchingStream")} />}
+        {user.isMuted && <MicOff className="h-3.5 w-3.5 text-muted-foreground" />}
+        {user.isDeafened && <Headphones className="h-3.5 w-3.5 text-destructive/80" />}
         {showVol && (
           <Popover>
             <PopoverTrigger asChild>
               <button
                 type="button"
                 className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                title="Their volume"
+                title={t("sidebar.theirVolume")}
               >
                 <Volume2 className="h-3.5 w-3.5" />
               </button>

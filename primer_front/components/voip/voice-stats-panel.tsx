@@ -2,6 +2,7 @@
 
 import { BarChart3 } from "lucide-react"
 import { Separator } from "@/components/ui/separator"
+import { useI18n } from "@/lib/i18n/provider"
 
 export type VoiceStatsData = {
   connected?: boolean
@@ -33,22 +34,23 @@ type VoiceStatsPanelProps = {
 }
 
 export function VoiceStatsPanel({ voiceStats, audioPipelineDiag, qualityClass, isSpeakingNow }: VoiceStatsPanelProps) {
+  const { t } = useI18n()
   if (!voiceStats) {
-    return <p className="text-sm text-muted-foreground">No stats yet. Join a voice channel.</p>
+    return <p className="text-sm text-muted-foreground">{t("stats.noStats")}</p>
   }
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <BarChart3 className={`h-4 w-4 shrink-0 ${qualityClass}`} />
-        <span className={`text-sm font-semibold ${qualityClass}`}>Voice connection</span>
+        <span className={`text-sm font-semibold ${qualityClass}`}>{t("stats.title")}</span>
       </div>
       <div className="space-y-1.5 text-xs text-muted-foreground">
         <div className="flex justify-between gap-4">
-          <span>Status</span>
+          <span>{t("stats.status")}</span>
           <span className="text-right">
-            {voiceStats.connected ? "Connected" : "Disconnected"}
-            {isSpeakingNow ? " · Speaking" : ""}
+            {voiceStats.connected ? t("stats.connected") : t("stats.disconnected")}
+            {isSpeakingNow ? ` · ${t("stats.speaking")}` : ""}
           </span>
         </div>
         <div className="flex justify-between gap-4">
@@ -56,20 +58,20 @@ export function VoiceStatsPanel({ voiceStats, audioPipelineDiag, qualityClass, i
           <span className="tabular-nums">{voiceStats.txPackets ?? 0} / {voiceStats.rxPackets ?? 0}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span>Loss</span>
+          <span>{t("stats.loss")}</span>
           <span className="tabular-nums">
             {voiceStats.rxLostEstimated ?? 0} ({voiceStats.packetLossPct ?? 0}%)
           </span>
         </div>
         <Separator />
         <div className={`flex justify-between gap-4 ${qualityClass}`}>
-          <span>Ping</span>
+          <span>{t("stats.ping")}</span>
           <span className="text-right tabular-nums">
             {voiceStats.pingNowMs ?? 0}ms · p1 {voiceStats.ping1PctMs ?? 0}ms · p0.1 {voiceStats.ping01PctMs ?? 0}ms
           </span>
         </div>
         <div className={`flex justify-between gap-4 ${qualityClass}`}>
-          <span>Jitter</span>
+          <span>{t("stats.jitter")}</span>
           <span className="text-right tabular-nums">
             {voiceStats.jitterNowMs ?? 0}ms · p1 {voiceStats.jitter1PctMs ?? 0}ms · p0.1 {voiceStats.jitter01PctMs ?? 0}ms
           </span>
@@ -78,25 +80,25 @@ export function VoiceStatsPanel({ voiceStats, audioPipelineDiag, qualityClass, i
           <>
             <Separator />
             <div className="flex justify-between gap-4">
-              <span>Capture SR</span>
+              <span>{t("stats.captureSr")}</span>
               <span className="tabular-nums">{Math.round(audioPipelineDiag.captureSampleRate)} Hz</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span>Playback SR</span>
+              <span>{t("stats.playbackSr")}</span>
               <span className="tabular-nums">{Math.round(audioPipelineDiag.playbackSampleRate)} Hz</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span>Playout buffer</span>
-              <span className="tabular-nums">{audioPipelineDiag.playoutBufferedSamples} samples</span>
+              <span>{t("stats.playoutBuffer")}</span>
+              <span className="tabular-nums">{t("stats.samples", { n: audioPipelineDiag.playoutBufferedSamples })}</span>
             </div>
             <div className="flex justify-between gap-4">
-              <span>Underruns</span>
-              <span className="tabular-nums" title="Empty-buffer events per ~1s">
+              <span>{t("stats.underruns")}</span>
+              <span className="tabular-nums" title={t("stats.underrunsHint")}>
                 {audioPipelineDiag.playoutUnderruns}
               </span>
             </div>
             <div className="flex justify-between gap-4">
-              <span>Overflow drops</span>
+              <span>{t("stats.overflowDrops")}</span>
               <span className="tabular-nums">{audioPipelineDiag.playoutOverflowDrops}</span>
             </div>
           </>

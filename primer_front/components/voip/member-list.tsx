@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useI18n } from "@/lib/i18n/provider"
+import { avatarGradient } from "@/lib/avatar-colors"
 
 export interface Member {
   id: string
@@ -23,7 +24,7 @@ interface MemberListProps {
 
 const statusColors: Record<string, string> = {
   online: "bg-accent",
-  idle: "bg-yellow-500",
+  idle: "bg-amber-400",
   dnd: "bg-destructive",
   offline: "bg-muted-foreground"
 }
@@ -60,13 +61,13 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
   })
 
   return (
-    <div className="flex h-full w-56 shrink-0 flex-col border-l border-border bg-card">
-      <div className="flex h-12 shrink-0 items-center border-b border-border px-4">
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("members.title")}</span>
+    <div className="flex h-full w-60 shrink-0 flex-col bg-card">
+      <div className="flex h-12 shrink-0 items-center px-4 shadow-[0_1px_0_rgba(0,0,0,0.35)]">
+        <span className="text-[15px] font-semibold text-foreground">{t("members.title")}</span>
       </div>
       
       <ScrollArea className="flex-1">
-        <div className="p-2">
+        <div className="px-2 pb-2 pt-4">
           {roles.map(role => {
             const roleMembers = groupedMembers[role.id] || []
             if (roleMembers.length === 0) return null
@@ -74,7 +75,7 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
             return (
               <div key={role.id} className="mb-4">
                 <div
-                  className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+                  className="mb-1 px-2 text-sm font-semibold text-muted-foreground"
                   style={role.color ? { color: role.color } : undefined}
                 >
                   {role.name} — {roleMembers.length}
@@ -90,7 +91,7 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
 
           {noRoleMembers.length > 0 && (
             <div className="mb-4">
-              <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1 px-2 text-sm font-semibold text-muted-foreground">
                 {t("members.online")} — {noRoleMembers.length}
               </div>
               <div className="space-y-0.5">
@@ -103,7 +104,7 @@ export function MemberList({ members, roles = [] }: MemberListProps) {
 
           {sortedOfflineMembers.length > 0 && (
             <div>
-              <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <div className="mb-1 px-2 text-sm font-semibold text-muted-foreground">
                 {t("members.offline")} — {sortedOfflineMembers.length}
               </div>
               <div className="space-y-0.5">
@@ -128,22 +129,27 @@ function MemberItem({ member, isOffline }: MemberItemProps) {
   return (
     <div
       className={cn(
-        "flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-muted/50",
-        isOffline && "opacity-40"
+        "flex items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent/60",
+        isOffline && "opacity-35 hover:opacity-100"
       )}
     >
       <div className="relative shrink-0">
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
+        <div
+          className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold text-white"
+          style={{ background: avatarGradient(member.id || member.name) }}
+        >
           {member.avatar}
         </div>
-        <div className={cn(
-          "absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full ring-2 ring-card",
-          statusColors[member.status]
-        )} />
+        {!isOffline && (
+          <div className={cn(
+            "absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full ring-[3px] ring-card",
+            statusColors[member.status]
+          )} />
+        )}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
-          <span className={cn("truncate text-sm", isOffline ? "text-muted-foreground" : "text-foreground")}>
+          <span className={cn("truncate text-[15px] font-medium", isOffline ? "text-muted-foreground" : "text-foreground")}>
             {member.name}
           </span>
           {member.isOwner && (

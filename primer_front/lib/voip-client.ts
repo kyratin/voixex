@@ -112,6 +112,14 @@ function ensureValidClientId(clientId: string): string {
   }
 }
 
+/** Error with a stable code so the UI can show a translated message instead of `message`. */
+export class ApiError extends Error {
+  constructor(readonly code: "apiUnreachable" | "serverUnavailable", message: string) {
+    super(message)
+    this.name = "ApiError"
+  }
+}
+
 export class VoipClient {
   private apiBase: string = DEFAULT_API_BASE
   private ws: WebSocket | null = null
@@ -660,14 +668,15 @@ export class VoipClient {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (/failed to fetch|networkerror|load failed/i.test(msg)) {
-        throw new Error(
+        throw new ApiError(
+          "apiUnreachable",
           "Cannot reach API. Check host/port (HTTPS often uses 443 or your nginx port, not plain HTTP), firewall, and TLS. " +
             "Self-signed HTTPS: use the latest desktop build (trusts custom certs) or open the API URL in the browser once and accept the certificate."
         )
       }
       throw e
     }
-    if (!res.ok) throw new Error("server unavailable")
+    if (!res.ok) throw new ApiError("serverUnavailable", "server unavailable")
     return res.json() as Promise<{ ok: boolean }>
   }
 

@@ -3,6 +3,7 @@ import { Toaster } from 'sonner'
 import { Analytics } from '@vercel/analytics/next'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { I18nProvider } from '@/lib/i18n/provider'
+import './fonts.css'
 import './globals.css'
 
 export const metadata: Metadata = {

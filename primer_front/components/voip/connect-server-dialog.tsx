@@ -7,7 +7,6 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 
 type ConnectServerDialogProps = {
@@ -45,6 +44,7 @@ type ConnectServerDialogProps = {
   wsConnected: boolean
   wsReconnecting: boolean
   hasDesktopBridge: boolean
+  hasSavedServers: boolean
   error: string
 }
 
@@ -84,6 +84,7 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
     wsConnected,
     wsReconnecting,
     hasDesktopBridge,
+    hasSavedServers,
     error
   } = props
 
@@ -97,10 +98,10 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
             <Server className="h-5 w-5 text-primary" />
             <DialogTitle>{t("connect.title")}</DialogTitle>
           </div>
-          <DialogDescription>{t("connect.description")}</DialogDescription>
+          <DialogDescription>{hasSavedServers ? t("connect.description") : t("connect.descriptionEmpty")}</DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="space-y-4 px-6 py-4">
             <div className="space-y-1.5">
               <Label htmlFor="connect-list-name">{t("connect.nameInList")}</Label>
@@ -194,7 +195,7 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
               </div>
             </div>
 
-            <details className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+            <details className="rounded-lg bg-secondary/50 px-3 py-2">
               <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
                 {t("common.advanced")}
               </summary>
@@ -227,7 +228,7 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
               </div>
             </details>
           </div>
-        </ScrollArea>
+        </div>
 
         <div className="shrink-0 space-y-3 border-t border-border bg-card px-6 py-4">
           <Button className="w-full" onClick={onConnect} disabled={joining}>
@@ -242,10 +243,9 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1">
               {connectedToApi ? <Wifi className="h-3 w-3 text-accent" /> : <WifiOff className="h-3 w-3" />}
-              API {connectedToApi ? t("connect.apiOk") : t("connect.apiOffline")}
+              {connectedToApi ? t("connect.apiOk") : t("connect.apiOffline")}
             </span>
             <span>
-              WS{" "}
               {wsConnected
                 ? t("connect.wsConnected")
                 : wsReconnecting

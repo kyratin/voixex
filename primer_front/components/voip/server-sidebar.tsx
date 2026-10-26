@@ -41,7 +41,7 @@ export function ServerSidebar({
   const { t } = useI18n()
 
   return (
-    <div className="flex h-full w-[72px] shrink-0 flex-col items-center bg-sidebar py-3 gap-2">
+    <div className="flex h-full w-[72px] shrink-0 flex-col items-center gap-2 bg-sidebar py-3">
       <ScrollArea className="flex-1 w-full">
         <div className="flex flex-col items-center gap-2 px-3">
           {servers.map((server) => {
@@ -55,15 +55,15 @@ export function ServerSidebar({
                 <div
                   className={cn(
                     "absolute -left-3 w-1 rounded-r-full bg-foreground transition-all duration-200",
-                    isActive ? "h-10" : "h-0 group-hover:h-5"
+                    isActive ? "h-9" : "h-0 group-hover:h-4"
                   )}
                 />
                 <div
                   className={cn(
-                    "flex h-12 w-12 items-center justify-center text-lg transition-all duration-200",
+                    "flex h-11 w-11 items-center justify-center text-base font-semibold transition-all duration-200",
                     isActive
-                      ? "rounded-2xl bg-primary text-primary-foreground"
-                      : "rounded-3xl bg-muted text-muted-foreground hover:rounded-2xl hover:bg-primary hover:text-primary-foreground"
+                      ? "rounded-xl bg-primary text-primary-foreground"
+                      : "rounded-[22px] bg-secondary text-foreground hover:rounded-xl hover:bg-primary hover:text-primary-foreground"
                   )}
                 >
                   {server.icon}
@@ -72,7 +72,7 @@ export function ServerSidebar({
                   <div className="absolute -left-3 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-foreground" />
                 )}
                 {server.mentions && server.mentions > 0 && (
-                  <div className="absolute -bottom-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground ring-2 ring-sidebar">
+                  <div className="absolute -bottom-1 -right-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground ring-[3px] ring-sidebar">
                     {server.mentions > 9 ? "9+" : server.mentions}
                   </div>
                 )}
@@ -118,12 +118,12 @@ export function ServerSidebar({
       </ScrollArea>
 
       <div className="flex flex-col items-center gap-2 px-3">
-        <div className="h-px w-8 bg-border" />
+        <div className="h-0.5 w-8 rounded-full bg-sidebar-accent" />
         <Tooltip>
           <TooltipTrigger asChild>
             <button
               onClick={onAddServer}
-              className="flex h-12 w-12 items-center justify-center rounded-3xl bg-muted text-accent transition-all duration-200 hover:rounded-2xl hover:bg-accent hover:text-accent-foreground"
+              className="flex h-11 w-11 items-center justify-center rounded-full border border-dashed border-muted-foreground/40 text-muted-foreground transition-all duration-200 hover:border-solid hover:border-transparent hover:bg-accent hover:text-accent-foreground"
             >
               <Plus className="h-5 w-5" />
             </button>
@@ -136,7 +136,7 @@ export function ServerSidebar({
           <TooltipTrigger asChild>
             <button
               onClick={onOpenSettings}
-              className="flex h-12 w-12 items-center justify-center rounded-3xl bg-muted text-muted-foreground transition-all duration-200 hover:rounded-2xl hover:bg-muted hover:text-foreground"
+              className="flex h-11 w-11 items-center justify-center rounded-full border border-dashed border-muted-foreground/40 text-muted-foreground transition-all duration-200 hover:border-solid hover:border-transparent hover:bg-sidebar-accent hover:text-foreground"
             >
               <Settings className="h-5 w-5" />
             </button>

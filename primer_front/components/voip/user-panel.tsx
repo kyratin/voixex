@@ -7,6 +7,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Button } from "@/components/ui/button"
 import { VoiceStatsPanel, type AudioPipelineDiag, type VoiceStatsData } from "@/components/voip/voice-stats-panel"
 import { useI18n } from "@/lib/i18n/provider"
+import { avatarGradient } from "@/lib/avatar-colors"
 
 interface UserPanelProps {
   user: {
@@ -32,7 +33,7 @@ interface UserPanelProps {
 
 const statusColors: Record<string, string> = {
   online: "bg-accent",
-  idle: "bg-yellow-500",
+  idle: "bg-amber-400",
   dnd: "bg-destructive",
   offline: "bg-muted-foreground"
 }
@@ -55,14 +56,14 @@ export function UserPanel({
 }: UserPanelProps) {
   const { t } = useI18n()
   return (
-    <div className="shrink-0 bg-sidebar/80 border-t border-border">
+    <div className="mx-2 mb-2 shrink-0 overflow-hidden rounded-lg bg-sidebar">
       {isInVoice ? (
-        <div className="flex items-center gap-1 border-b border-border px-2 py-1.5">
+        <div className="flex items-center gap-1 border-b border-sidebar-accent px-2 py-1.5">
           <Popover>
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/40"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-sidebar-accent"
               >
                 <Signal className="h-4 w-4 shrink-0 text-accent" />
                 <div className="min-w-0 flex-1">
@@ -102,9 +103,12 @@ export function UserPanel({
         </div>
       ) : null}
 
-      <div className="flex items-center gap-2 px-3 py-2">
+      <div className="flex items-center gap-2 px-2 py-2">
         <div className="relative shrink-0">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
+          <div
+            className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold text-white"
+            style={{ background: avatarGradient(user.id || user.name) }}
+          >
             {user.avatar}
           </div>
           <div
@@ -115,8 +119,11 @@ export function UserPanel({
           />
         </div>
 
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-foreground">{user.name}</div>
+        <div className="min-w-0 flex-1 leading-tight">
+          <div className="truncate text-sm font-semibold text-foreground">{user.name}</div>
+          <div className="truncate text-xs text-muted-foreground">
+            {user.status === "offline" ? t("members.offline") : t("members.online")}
+          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
@@ -142,7 +149,7 @@ export function UserPanel({
                 variant="ghost"
                 size="icon-sm"
                 onClick={onToggleMute}
-                className={cn("text-muted-foreground", isMuted && "text-destructive hover:text-destructive")}
+                className={cn("text-muted-foreground", isMuted && "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive")}
               >
                 {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
               </Button>
@@ -156,7 +163,7 @@ export function UserPanel({
                 variant="ghost"
                 size="icon-sm"
                 onClick={onToggleDeafen}
-                className={cn("text-muted-foreground", isDeafened && "text-destructive hover:text-destructive")}
+                className={cn("text-muted-foreground", isDeafened && "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive")}
               >
                 {isDeafened ? <HeadphoneOff className="h-4 w-4" /> : <Headphones className="h-4 w-4" />}
               </Button>

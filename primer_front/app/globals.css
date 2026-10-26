@@ -37,47 +37,53 @@
   --sidebar-accent-foreground: oklch(0.2 0 0);
   --sidebar-border: oklch(0.8 0 0);
   --sidebar-ring: oklch(0.55 0.14 250);
+  --stage: oklch(0.12 0 0);
 }
 
 .dark {
-  --background: oklch(0.16 0.018 265);
-  --foreground: oklch(0.94 0.012 265);
-  --card: oklch(0.20 0.022 265);
-  --card-foreground: oklch(0.94 0.012 265);
-  --popover: oklch(0.23 0.024 265);
-  --popover-foreground: oklch(0.94 0.012 265);
-  --primary: oklch(0.68 0.17 285);
-  --primary-foreground: oklch(0.98 0.005 285);
-  --secondary: oklch(0.26 0.022 265);
-  --secondary-foreground: oklch(0.88 0.01 265);
-  --muted: oklch(0.24 0.018 265);
-  --muted-foreground: oklch(0.62 0.02 265);
-  --accent: oklch(0.72 0.14 195);
-  --accent-foreground: oklch(0.14 0.02 195);
-  --destructive: oklch(0.62 0.21 25);
-  --destructive-foreground: oklch(0.98 0 0);
-  --border: oklch(0.30 0.022 265);
-  --input: oklch(0.22 0.02 265);
-  --ring: oklch(0.68 0.17 285);
-  --chart-1: oklch(0.68 0.17 285);
-  --chart-2: oklch(0.72 0.14 195);
-  --chart-3: oklch(0.62 0.21 25);
-  --chart-4: oklch(0.70 0.12 55);
-  --chart-5: oklch(0.65 0.15 320);
+  /* Native <select> popups and form controls follow the dark theme. */
+  color-scheme: dark;
+  /* Fluxer-style palette: neutral surfaces stepping up in tone, indigo accent */
+  --background: #1a1a20;
+  --foreground: #e5e5e9;
+  --card: #131319;
+  --card-foreground: #e5e5e9;
+  --popover: #18181d;
+  --popover-foreground: #e5e5e9;
+  --primary: #4641d9;
+  --primary-foreground: #ffffff;
+  --secondary: #212127;
+  --secondary-foreground: #e5e5e9;
+  --muted: #212127;
+  --muted-foreground: #9494a1;
+  --accent: #23a55a;
+  --accent-foreground: #ffffff;
+  --destructive: #e5484d;
+  --destructive-foreground: #ffffff;
+  --border: #2a2a31;
+  --input: #212127;
+  --ring: #6f6bf2;
+  --chart-1: #6f6bf2;
+  --chart-2: #23a55a;
+  --chart-3: #e5484d;
+  --chart-4: #db9639;
+  --chart-5: #b0adff;
   --radius: 0.5rem;
-  --sidebar: oklch(0.13 0.016 265);
-  --sidebar-foreground: oklch(0.90 0.012 265);
-  --sidebar-primary: oklch(0.68 0.17 285);
-  --sidebar-primary-foreground: oklch(0.98 0 0);
-  --sidebar-accent: oklch(0.26 0.028 275);
-  --sidebar-accent-foreground: oklch(0.94 0.012 265);
-  --sidebar-border: oklch(0.28 0.02 265);
-  --sidebar-ring: oklch(0.68 0.17 285);
+  --sidebar: #0f0f14;
+  --sidebar-foreground: #e5e5e9;
+  --sidebar-primary: #4641d9;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #28282e;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #2a2a31;
+  --sidebar-ring: #6f6bf2;
+  --stage: #08080a;
 }
 
 @theme inline {
-  --font-sans: 'Geist', 'Geist Fallback';
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --font-sans: 'Radio Canada Big', 'Noto Sans', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --color-stage: var(--stage);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -136,9 +142,9 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: oklch(0.35 0.005 275);
+  background: #2f3036;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.42 0.005 275);
+  background: #4b4c57;
 }

@@ -208,9 +208,13 @@ export class WebRtcMediaSession {
   }
 
   setScreenAudioVolume(volumePct: number) {
-    const vol = Math.max(0, Math.min(2, volumePct / 100))
+    const vol = Math.max(0, Math.min(1, volumePct / 100))
     for (const element of this.screenAudioElements) {
-      element.volume = Math.min(1, vol)
+      try {
+        element.volume = vol
+      } catch {
+        /* detached or invalid media element */
+      }
     }
   }
 
