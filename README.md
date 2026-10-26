@@ -42,6 +42,25 @@ The server then listens with TLS on the same `PORT` (still `8080` in the contain
 
 Prebuilt images: **`kyratinkokko/voixex`** on Docker Hub — pin a version tag for production.
 
+### WebRTC / LiveKit (built in)
+
+The image bundles a [LiveKit](https://livekit.io) SFU, so voice and screen share in **WebRTC (LiveKit)** mode work without extra services. `docker-entrypoint.sh` starts it next to the backend, generates the API secret once (kept in `/data/livekit-api-secret`) and passes the same key to the backend, which issues the client tokens. If either process exits the container stops, so the orchestrator restarts both.
+
+Open these ports in addition to HTTP and `50000`:
+
+| Port | Purpose |
+|------|---------|
+| `7880/tcp` | LiveKit signalling (ws/http) |
+| `7881/tcp` | WebRTC over TCP (fallback) |
+| `7882/udp` | WebRTC media |
+
+Set these for a real deployment (see [`.env.example`](.env.example)):
+
+- `LIVEKIT_NODE_IP` — public IP announced in ICE candidates. Without it LiveKit uses STUN, which reports the wrong address behind NAT or a load balancer.
+- `LIVEKIT_PUBLIC_URL` — what clients connect to. Browsers and the desktop app on HTTPS need `wss://`, so put a reverse proxy in front: route `/livekit` to port `7880` (strip the prefix) and use `wss://your.domain/livekit`.
+
+To use your own SFU set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`; the embedded one is then not started. `LIVEKIT_EMBEDDED=false` turns it off explicitly.
+
 ## Requirements
 
 - **Node.js** 22+ (for local dev)

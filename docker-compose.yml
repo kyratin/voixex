@@ -9,6 +9,10 @@ services:
     ports:
       - "${HTTP_PORT:-18080}:8080"
       - "${UDP_PORT:-50000}:50000/udp"
+      # Embedded LiveKit SFU: signalling, WebRTC over TCP, WebRTC over UDP.
+      - "${LIVEKIT_PORT:-7880}:7880"
+      - "${LIVEKIT_RTC_TCP_PORT:-7881}:7881/tcp"
+      - "${LIVEKIT_RTC_UDP_PORT:-7882}:7882/udp"
     environment:
       HOST: "0.0.0.0"
       PORT: "8080"
@@ -23,7 +27,10 @@ services:
       TLS_ENABLED: ${TLS_ENABLED:-false}
       TLS_CERT_PATH: ${TLS_CERT_PATH:-}
       TLS_KEY_PATH: ${TLS_KEY_PATH:-}
-      # Optional self-hosted LiveKit SFU (WebRTC media path).
+      # LiveKit SFU (WebRTC voice/screen share) runs inside this image by default.
+      # Set LIVEKIT_URL (+ key/secret) to use an external SFU instead; LIVEKIT_EMBEDDED=false disables it.
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-}
+      LIVEKIT_NODE_IP: ${LIVEKIT_NODE_IP:-}
       LIVEKIT_URL: ${LIVEKIT_URL:-}
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
