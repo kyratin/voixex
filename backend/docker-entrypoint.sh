@@ -64,7 +64,10 @@ export LIVEKIT_API_KEY="$LK_KEY"
 export LIVEKIT_API_SECRET
 export LIVEKIT_URL="${LIVEKIT_PUBLIC_URL:-ws://${PUBLIC_UDP_HOST:-localhost}:${LK_PORT}}"
 
-livekit-server --config "$cfg" &
+# LiveKit also reads UDP_PORT, NODE_IP, REDIS_* ... from the environment, and those override the
+# config file. The backend's own UDP_PORT (voice mixer, 50000) must not leak into the SFU,
+# so it gets a clean environment and only the generated config.
+env -i PATH="$PATH" HOME="${HOME:-/tmp}" livekit-server --config "$cfg" &
 lk_pid=$!
 "$@" &
 app_pid=$!
