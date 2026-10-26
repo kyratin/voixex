@@ -12,6 +12,8 @@ import { Spinner } from "@/components/ui/spinner"
 type ConnectServerDialogProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** True when an already saved server is being edited (not added). */
+  editing: boolean
   connectServerListName: string
   onConnectServerListNameChange: (value: string) => void
   apiHost: string
@@ -52,6 +54,7 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
   const {
     open,
     onOpenChange,
+    editing,
     connectServerListName,
     onConnectServerListNameChange,
     apiHost,
@@ -96,9 +99,15 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
         <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
           <div className="flex items-center gap-2">
             <Server className="h-5 w-5 text-primary" />
-            <DialogTitle>{t("connect.title")}</DialogTitle>
+            <DialogTitle>{editing ? t("connect.editTitle") : t("connect.title")}</DialogTitle>
           </div>
-          <DialogDescription>{hasSavedServers ? t("connect.description") : t("connect.descriptionEmpty")}</DialogDescription>
+          <DialogDescription>
+            {editing
+              ? t("connect.editDescription")
+              : hasSavedServers
+                ? t("connect.description")
+                : t("connect.descriptionEmpty")}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -237,7 +246,7 @@ export function ConnectServerDialog(props: ConnectServerDialogProps) {
                 <Spinner className="mr-2" /> {t("common.connecting")}
               </>
             ) : (
-              t("common.connect")
+              editing ? t("connect.saveAndReconnect") : t("common.connect")
             )}
           </Button>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">

@@ -1,4 +1,5 @@
 import {
+  ConnectionState,
   LocalAudioTrack,
   LocalTrack,
   LocalVideoTrack,
@@ -56,6 +57,12 @@ export class WebRtcMediaSession {
 
   get connected() {
     return Boolean(this.room)
+  }
+
+  /** True while the LiveKit room is usable or recovering by itself; false once it is gone for good. */
+  get live() {
+    const state = this.room?.state
+    return state !== undefined && state !== ConnectionState.Disconnected
   }
 
   async connect(input: WebRtcMediaToken) {
@@ -185,10 +192,15 @@ export class WebRtcMediaSession {
 
   async unpublishMic() {
     const room = this.room
-    if (this.micTrack && room) {
-      await room.localParticipant.unpublishTrack(this.micTrack)
+    try {
+      if (this.micTrack && room) {
+        await room.localParticipant.unpublishTrack(this.micTrack)
+      }
+    } catch {
+      // room already gone
+    } finally {
+      this.micTrack = null
     }
-    this.micTrack = null
   }
 
   async setMuted(muted: boolean) {
@@ -294,17 +306,36 @@ export class WebRtcMediaSession {
   async stopScreenShare() {
     const room = this.room
     for (const track of this.screenTracks) {
-      if (room) await room.localParticipant.unpublishTrack(track)
+      // A dead or kicked room makes unpublishTrack throw; the local track still has to be released.
+      try {
+        if (room) await room.localParticipant.unpublishTrack(track)
+      } catch {
+        // ignore
+      }
+      track.stop()
     }
     this.screenTracks = []
     this.opts.onScreenShareChange?.(false)
   }
 
   async disconnect() {
-    await this.stopScreenShare()
-    await this.unpublishMic()
+    // Each step is independent: a failing unpublish must not leave the room connected.
+    try {
+      await this.stopScreenShare()
+    } catch {
+      // ignore
+    }
+    try {
+      await this.unpublishMic()
+    } catch {
+      // ignore
+    }
     if (this.room) {
-      this.room.disconnect()
+      try {
+        this.room.disconnect()
+      } catch {
+        // ignore
+      }
       this.room = null
     }
     this.cleanupRemoteTracks()

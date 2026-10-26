@@ -30,6 +30,9 @@ export const en = {
     title: "Connect to server",
     description: "Add or switch servers. Saved profiles appear in the left rail.",
     descriptionEmpty: "Enter a server address to connect. Saved servers appear in the left rail.",
+    editTitle: "Edit connection",
+    editDescription: "Change the address, port or passwords of this server. Saving reconnects to it.",
+    saveAndReconnect: "Save and reconnect",
     nameInList: "Name in list",
     namePlaceholder: "Unique sidebar name (optional)",
     nameHint: "Compared case-insensitively. Leave empty to use the API server name.",
@@ -60,9 +63,10 @@ export const en = {
     noDesktopBridge: "Desktop voice bridge not detected."
   },
   sidebar: {
+    editConnection: "Edit connection",
     addServer: "Add server",
     removeServer: "Remove from list",
-    rightClickRemove: "Right-click to remove",
+    rightClickRemove: "Right-click for options",
     switchServer: "Switch to server",
     appSettings: "App settings",
     inVoiceChannel: "In voice channel",

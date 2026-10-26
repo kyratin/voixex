@@ -32,6 +32,9 @@ export const ru: TranslationDict = {
     title: "Подключение к серверу",
     description: "Добавьте или переключите сервер. Сохранённые профили — в левой панели.",
     descriptionEmpty: "Укажите адрес сервера, чтобы подключиться. Сохранённые серверы появятся в левой панели.",
+    editTitle: "Изменить подключение",
+    editDescription: "Измените адрес, порт или пароли этого сервера. После сохранения произойдёт переподключение.",
+    saveAndReconnect: "Сохранить и переподключиться",
     nameInList: "Имя в списке",
     namePlaceholder: "Уникальное имя (необязательно)",
     nameHint: "Без учёта регистра. Пусто — имя с API сервера.",
@@ -62,9 +65,10 @@ export const ru: TranslationDict = {
     noDesktopBridge: "Голосовой мост десктопа не обнаружен."
   },
   sidebar: {
+    editConnection: "Изменить подключение",
     addServer: "Добавить сервер",
     removeServer: "Удалить из списка",
-    rightClickRemove: "ПКМ — удалить",
+    rightClickRemove: "ПКМ — действия",
     switchServer: "Переключиться на сервер",
     appSettings: "Настройки приложения",
     inVoiceChannel: "В голосовом канале",

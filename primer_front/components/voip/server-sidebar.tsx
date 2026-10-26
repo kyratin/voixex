@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Plus, Settings, Trash2 } from "lucide-react"
+import { Pencil, Plus, Settings, Trash2 } from "lucide-react"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -27,6 +27,7 @@ interface ServerSidebarProps {
   onServerSelect: (serverId: string) => void
   onRemoveServer?: (serverId: string) => void
   onAddServer?: () => void
+  onEditServer?: (serverId: string) => void
   onOpenSettings?: () => void
 }
 
@@ -36,6 +37,7 @@ export function ServerSidebar({
   onServerSelect,
   onRemoveServer,
   onAddServer,
+  onEditServer,
   onOpenSettings
 }: ServerSidebarProps) {
   const { t } = useI18n()
@@ -92,6 +94,12 @@ export function ServerSidebar({
                   </Tooltip>
                   <ContextMenuContent className="w-48">
                     <ContextMenuItem onClick={() => onServerSelect(server.id)}>{t("sidebar.switchServer")}</ContextMenuItem>
+                    {onEditServer ? (
+                      <ContextMenuItem onClick={() => onEditServer(server.id)} className="gap-2">
+                        <Pencil className="h-4 w-4" />
+                        {t("sidebar.editConnection")}
+                      </ContextMenuItem>
+                    ) : null}
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       variant="destructive"

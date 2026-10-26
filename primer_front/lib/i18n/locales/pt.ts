@@ -32,6 +32,9 @@ export const pt: TranslationDict = {
     title: "Ligar ao servidor",
     description: "Adicione ou mude servidores. Perfis guardados aparecem na barra esquerda.",
     descriptionEmpty: "Informe o endereço do servidor para conectar. Os servidores salvos aparecerão no painel esquerdo.",
+    editTitle: "Editar ligação",
+    editDescription: "Altere o endereço, a porta ou as palavras-passe deste servidor. Ao guardar, volta a ligar.",
+    saveAndReconnect: "Guardar e religar",
     nameInList: "Nome na lista",
     namePlaceholder: "Nome único (opcional)",
     nameHint: "Sem distinção de maiúsculas. Vazio = nome da API do servidor.",
@@ -62,9 +65,10 @@ export const pt: TranslationDict = {
     noDesktopBridge: "Ponte de voz desktop não detetada."
   },
   sidebar: {
+    editConnection: "Editar ligação",
     addServer: "Adicionar servidor",
     removeServer: "Remover da lista",
-    rightClickRemove: "Clique direito para remover",
+    rightClickRemove: "Clique direito: opções",
     switchServer: "Mudar para servidor",
     appSettings: "Definições da app",
     inVoiceChannel: "No canal de voz",

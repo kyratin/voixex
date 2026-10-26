@@ -113,6 +113,32 @@ function ensureValidClientId(clientId: string): string {
 }
 
 /** Error with a stable code so the UI can show a translated message instead of `message`. */
+const CYRILLIC_TO_LATIN: Record<string, string> = {
+  а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y", к: "k", л: "l",
+  м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "kh", ц: "ts", ч: "ch", ш: "sh",
+  щ: "shch", ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya", і: "i", ї: "yi", є: "ye", ґ: "g"
+}
+
+/**
+ * HTTP header values must be ISO-8859-1, so fetch() throws for names like "Снимок экрана.png".
+ * The server only keeps [a-zA-Z0-9._-] anyway; transliterating first keeps the name readable.
+ */
+export function toHeaderSafeFileName(name: string): string {
+  let out = ""
+  for (const ch of name.normalize("NFC")) {
+    const lower = ch.toLowerCase()
+    const mapped = CYRILLIC_TO_LATIN[lower]
+    if (mapped !== undefined) {
+      out += lower === ch ? mapped : mapped.charAt(0).toUpperCase() + mapped.slice(1)
+    } else if (/^[\x20-\x7e]$/.test(ch)) {
+      out += ch
+    } else {
+      out += "_"
+    }
+  }
+  return out.trim() || "upload.bin"
+}
+
 export class ApiError extends Error {
   constructor(readonly code: "apiUnreachable" | "serverUnavailable", message: string) {
     super(message)
@@ -329,7 +355,7 @@ export class VoipClient {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.authToken}`,
-        "x-file-name": file.name,
+        "x-file-name": toHeaderSafeFileName(file.name),
         "x-file-mime": file.type || "application/octet-stream"
       },
       body: file

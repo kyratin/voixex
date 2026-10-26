@@ -283,6 +283,9 @@ export default function VoIPApp() {
   const [joining, setJoining] = useState(false)
   const [connectedToApi, setConnectedToApi] = useState(false)
   const [showConnectPanel, setShowConnectPanel] = useState(false)
+  /** Saved profile being edited in the connect dialog (null = adding a new server). */
+  const [editingServerId, setEditingServerId] = useState<string | null>(null)
+  const editingServerIdRef = useRef<string | null>(null)
   /** User-defined label in the server list (sidebar). Falls back to API server name if left empty when connecting. */
   const [connectServerListName, setConnectServerListName] = useState("")
   const [roomNameInput, setRoomNameInput] = useState("new-room")
@@ -392,6 +395,12 @@ export default function VoIPApp() {
   const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
   const webRtcAudioSinkRef = useRef<HTMLDivElement | null>(null)
   const webRtcSessionRef = useRef<WebRtcMediaSession | null>(null)
+  /** serverId:roomId the current WebRtcMediaSession belongs to. */
+  const webRtcSessionKeyRef = useRef("")
+  /** In-flight start, shared by concurrent callers so they don't kick each other (DUPLICATE_IDENTITY). */
+  const webRtcStartRef = useRef<{ key: string; promise: Promise<void> } | null>(null)
+  /** Bumped by every start/stop; a start that finds a newer value after an await discards its session. */
+  const webRtcStartSeqRef = useRef(0)
   const localPreviewVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteStreamVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteMediaSourceRef = useRef<MediaSource | null>(null)
@@ -1128,6 +1137,9 @@ export default function VoIPApp() {
   }
 
   const stopWebRtcSession = async () => {
+    webRtcStartSeqRef.current += 1
+    webRtcStartRef.current = null
+    webRtcSessionKeyRef.current = ""
     const session = webRtcSessionRef.current
     webRtcSessionRef.current = null
     if (session) {
@@ -1261,43 +1273,79 @@ export default function VoIPApp() {
     })
   }
 
-  const startWebRtcSession = async (serverId: string, roomId: string) => {
-    const sink = webRtcAudioSinkRef.current
-    if (!sink) throw new Error("WebRTC audio sink is not ready")
-    await stopWebRtcSession()
-    const token = await getVoiceWsClientRef.current().getSfuToken(serverId, roomId)
-    const session = new WebRtcMediaSession({
-      audioSink: sink,
-      playRemoteVoice: mediaEngineRef.current === "webrtc",
-      onStatus: setStatus,
-      onScreenShareChange: () => {
-        /* screen share state is driven by server set_screen_share + local capture */
-      },
-      onWatchingScreenChange: (watching) => {
-        getVoiceWsClientRef.current().setWatchingScreen(watching, roomId)
-      },
-      onRemoteVideo: (active, participantIdentity) => {
-        applyRemoteWebRtcVideo(active, participantIdentity)
+  const startWebRtcSession = (serverId: string, roomId: string): Promise<void> => {
+    const key = `${serverId}:${roomId}`
+    // Already connected to this room: keep it. Re-creating the session drops voice/video for everyone.
+    if (webRtcSessionRef.current?.live && webRtcSessionKeyRef.current === key) return Promise.resolve()
+    const inflight = webRtcStartRef.current
+    if (inflight && inflight.key === key) return inflight.promise
+
+    const seq = ++webRtcStartSeqRef.current
+    const superseded = () => webRtcStartSeqRef.current !== seq
+    const entry = { key, promise: Promise.resolve() }
+    entry.promise = (async () => {
+      const sink = webRtcAudioSinkRef.current
+      if (!sink) throw new Error("WebRTC audio sink is not ready")
+      // Replace a stale/other-room session without announcing "left the room" to the server.
+      const previous = webRtcSessionRef.current
+      webRtcSessionRef.current = null
+      webRtcSessionKeyRef.current = ""
+      if (previous) await previous.disconnect()
+      if (superseded()) return
+      const token = await getVoiceWsClientRef.current().getSfuToken(serverId, roomId)
+      if (superseded()) return
+      const session = new WebRtcMediaSession({
+        audioSink: sink,
+        playRemoteVoice: mediaEngineRef.current === "webrtc",
+        onStatus: setStatus,
+        onScreenShareChange: () => {
+          /* screen share state is driven by server set_screen_share + local capture */
+        },
+        onWatchingScreenChange: (watching) => {
+          getVoiceWsClientRef.current().setWatchingScreen(watching, roomId)
+        },
+        onRemoteVideo: (active, participantIdentity) => {
+          applyRemoteWebRtcVideo(active, participantIdentity)
+        }
+      })
+      try {
+        await session.connect(token)
+        if (superseded()) {
+          await session.disconnect()
+          return
+        }
+        const devices = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
+        await session.setOutputDevice(devices?.outputId ?? null)
+        await session.setDeafened(deafenedRef.current)
+        const mic = getWebRtcMicTrackFromPipeline()
+        if (mic) {
+          await session.publishMicTrack(mic)
+          await session.setMuted(mutedRef.current)
+        }
+        if (superseded()) {
+          await session.disconnect()
+          return
+        }
+      } catch (err) {
+        await session.disconnect()
+        throw err
       }
+      // Report what is really going on: a sharer must stay "sharing" across a session restart.
+      getVoiceWsClientRef.current().syncPresence({
+        roomId,
+        muted: mutedRef.current,
+        deafened: deafenedRef.current,
+        screenSharing: isScreenSharingRef.current,
+        watchingScreen: isWatchingScreenRef.current,
+        mediaEngine: mediaEngineRef.current
+      })
+      webRtcSessionRef.current = session
+      webRtcSessionKeyRef.current = key
+    })().finally(() => {
+      if (webRtcStartRef.current === entry) webRtcStartRef.current = null
     })
-    await session.connect(token)
-    const devices = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
-    await session.setOutputDevice(devices?.outputId ?? null)
-    await session.setDeafened(deafenedRef.current)
-    const mic = getWebRtcMicTrackFromPipeline()
-    if (mic) {
-      await session.publishMicTrack(mic)
-      await session.setMuted(mutedRef.current)
-    }
-    getVoiceWsClientRef.current().syncPresence({
-      roomId,
-      muted: mutedRef.current,
-      deafened: deafenedRef.current,
-      screenSharing: false,
-      watchingScreen: false,
-      mediaEngine: mediaEngineRef.current
-    })
-    webRtcSessionRef.current = session
+    webRtcStartRef.current = entry
+    return entry.promise
   }
 
   const ensureLiveKitForVoiceRoom = async (serverId: string, roomId: string) => {
@@ -2412,7 +2460,11 @@ export default function VoIPApp() {
   }
 
   const stopScreenShare = async () => {
-    await webRtcSessionRef.current?.stopScreenShare()
+    try {
+      await webRtcSessionRef.current?.stopScreenShare()
+    } catch {
+      // A dead LiveKit room must not keep the stream "on": the steps below tell the server it stopped.
+    }
     if (screenShareTimerRef.current) {
       clearInterval(screenShareTimerRef.current)
       screenShareTimerRef.current = null
@@ -3073,7 +3125,7 @@ export default function VoIPApp() {
     const host = apiHost.trim()
     const port = apiPort.trim()
     const match = savedServers.find((s) => s.apiHost === host && s.apiPort === port)
-    const serverId = patch.serverId ?? match?.serverId ?? activeServerIdRef.current
+    const serverId = patch.serverId ?? match?.serverId ?? editingServerIdRef.current ?? activeServerIdRef.current
     if (!serverId) return
     setSavedServers((prev) => {
       const idx = prev.findIndex((s) => s.serverId === serverId)
@@ -3120,7 +3172,11 @@ export default function VoIPApp() {
       const superPassword = preset?.superuserPassword ?? superuserPasswordInput
       const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
       const globalPrefs = loadGlobalConnectionPrefs()
-      const matchByHost = savedServers.find((s) => s.apiHost === host && s.apiPort === port)
+      const editingId = editingServerIdRef.current
+      // When the port/host was edited there is no host match; fall back to the profile being edited.
+      const matchByHost =
+        savedServers.find((s) => s.apiHost === host && s.apiPort === port) ??
+        (editingId ? savedServers.find((s) => s.serverId === editingId) : undefined)
       const resolvedUseHttps =
         typeof preset?.apiUseHttps === "boolean"
           ? preset.apiUseHttps
@@ -3160,7 +3216,9 @@ export default function VoIPApp() {
       if (!preset) {
         const earlyLabel = connectServerListName.trim()
         if (earlyLabel) {
-          const others = savedServers.filter((s) => !(s.apiHost === host && s.apiPort === port))
+          const others = savedServers.filter(
+            (s) => !(s.apiHost === host && s.apiPort === port) && s.serverId !== editingId
+          )
           if (others.some((s) => s.serverName.trim().toLowerCase() === earlyLabel.toLowerCase())) {
             toast.error(t("notices.duplicateServerName"))
             setJoining(false)
@@ -3184,7 +3242,12 @@ export default function VoIPApp() {
       const effectiveListName = (
         preset?.serverName ?? (connectServerListName.trim() || joinedServerName)
       ).trim() || "Server"
-      const withoutSameHostForName = savedServers.filter((s) => !(s.apiHost === host && s.apiPort === port))
+      // Drop the old entry for this server (same host:port, same server id, or the profile being edited)
+      // so changing the port or password replaces the profile instead of adding a duplicate.
+      const withoutSameHostForName = savedServers.filter(
+        (s) =>
+          !(s.apiHost === host && s.apiPort === port) && s.serverId !== joinedServerId && s.serverId !== editingId
+      )
       if (
         withoutSameHostForName.some(
           (s) => s.serverName.trim().toLowerCase() === effectiveListName.toLowerCase()
@@ -3312,6 +3375,11 @@ export default function VoIPApp() {
       setVoiceServerId("")
       voiceServerIdRef.current = ""
       setStatus("Connected to server")
+      if (editingId) {
+        setEditingServerId(null)
+        editingServerIdRef.current = null
+        setShowConnectPanel(false)
+      }
     } catch (e) {
       setConnectedToApi(false)
       setError(errorText(e, "notices.joinServerFailed"))
@@ -3431,6 +3499,51 @@ export default function VoIPApp() {
     }
   }
 
+  const loadProfileIntoForm = (saved: SavedServerProfile) => {
+    setConnectServerListName(saved.serverName)
+    setApiHost(saved.apiHost)
+    setApiPort(saved.apiPort)
+    setServerPassword(saved.serverPassword)
+    applyConnectionPrefsToState(
+      {
+        apiUseHttps: saved.apiUseHttps,
+        udpPortOverride: saved.udpPortOverride ?? "",
+        voiceTransport: saved.voiceTransport,
+        mediaEngine: saved.mediaEngine
+      },
+      { setMediaEngine, setVoiceTransport, setApiUseHttps, setUdpPortOverride, mediaEngineRef }
+    )
+    setDisplayNameInput(saved.displayName)
+    setSuperuserPasswordInput(saved.superuserPassword ?? "")
+  }
+
+  const handleEditServer = (serverId: string) => {
+    const saved = savedServers.find((s) => s.serverId === serverId)
+    if (!saved) return
+    setEditingServerId(serverId)
+    editingServerIdRef.current = serverId
+    setError("")
+    loadProfileIntoForm(saved)
+    setShowConnectPanel(true)
+  }
+
+  const handleAddServer = () => {
+    setEditingServerId(null)
+    editingServerIdRef.current = null
+    setConnectServerListName("")
+    setShowConnectPanel(true)
+  }
+
+  const handleConnectPanelOpenChange = (open: boolean) => {
+    setShowConnectPanel(open)
+    if (open || !editingServerIdRef.current) return
+    // Edit cancelled: put the form back to the active server instead of leaving half-edited values.
+    setEditingServerId(null)
+    editingServerIdRef.current = null
+    const active = savedServers.find((s) => s.serverId === activeServerIdRef.current)
+    if (active) loadProfileIntoForm(active)
+  }
+
   const handleServerSelect = (serverId: string) => {
     const saved = savedServers.find((s) => s.serverId === serverId)
     if (!saved) return
@@ -3516,10 +3629,8 @@ export default function VoIPApp() {
           activeServerId={activeServerId}
           onServerSelect={handleServerSelect}
           onRemoveServer={handleRemoveSavedServer}
-          onAddServer={() => {
-            setConnectServerListName("")
-            setShowConnectPanel(true)
-          }}
+          onAddServer={handleAddServer}
+          onEditServer={handleEditServer}
           onOpenSettings={() => {
             const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
             void openAppSettings(initialTab)
@@ -3646,7 +3757,8 @@ export default function VoIPApp() {
 
       <ConnectServerDialog
         open={showConnectPanel}
-        onOpenChange={setShowConnectPanel}
+        onOpenChange={handleConnectPanelOpenChange}
+        editing={editingServerId !== null}
         connectServerListName={connectServerListName}
         onConnectServerListNameChange={setConnectServerListName}
         apiHost={apiHost}
