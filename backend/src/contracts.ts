@@ -36,12 +36,14 @@ export type WsClientEvent =
   /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
   | { type: "screen_chunk"; chunkBase64: string }
   /** Viewer asks server to nudge the active sharer (fresh WebM header for MSE). */
-  | { type: "request_screen_resync"; roomId: string }
+  /** fallback: the viewer needs the WebSocket stream (no LiveKit video); old clients omit it. */
+  | { type: "request_screen_resync"; roomId: string; fallback?: boolean }
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
   | { type: "hello"; clientId: string; serverId: string; serverGeneration: number; bannerUrl?: string | null }
   | { type: "server_appearance_updated"; bannerUrl: string | null }
+  | { type: "members_changed"; clientId?: string }
   | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
@@ -93,7 +95,11 @@ export type WsServerEvent =
     }
   | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
   /** Tells the active sharer to restart encoding so late joiners get a fresh WebM header (MSE). */
-  | { type: "screen_share_resync_request"; roomId: string }
+  /**
+   * fallback=false: someone joined (refresh the WebM header if the WS stream runs);
+   * fallback=true: a viewer cannot get LiveKit video, so the WS stream must run.
+   */
+  | { type: "screen_share_resync_request"; roomId: string; fallback: boolean }
   | { type: "screen_chunk"; fromClientId: string; chunkBase64: string }
   | { type: "pong"; ts: number }
   | { type: "error"; message: string }

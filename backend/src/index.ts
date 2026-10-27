@@ -14,7 +14,6 @@ import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent, RosterMember } from "./contracts.js"
 import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
-import { createMediaTcpServer } from "./media-tcp.js"
 import {
   AttemptLimiter,
   ChallengeStore,
@@ -80,8 +79,21 @@ const clients = new Map<string, Set<WebSocket>>()
 /** Map WebSocket → client for targeted broadcast (screen chunks). */
 const wsClientMeta = new Map<
   WebSocket,
-  { serverId: string; clientId: string; certId?: string; screenRelayOff?: boolean }
+  {
+    serverId: string
+    clientId: string
+    certId?: string
+    screenRelayOff?: boolean
+    /** Viewer's socket could not keep up; chunks were skipped and it waits for a fresh WebM header. */
+    screenLagging?: boolean
+  }
 >()
+/**
+ * Queued bytes on a viewer's socket above which screen chunks are skipped for it. Without a cap a
+ * slow viewer's backlog (and its delay behind the live picture) grows without bound.
+ */
+const SCREEN_WS_LAG_BYTES = 2 * 1024 * 1024
+const lastLagResyncAtByRoom = new Map<string, number>()
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
 /** Viewer IDs temporarily forced into WS screen relay after join/resync. */
 const forceScreenRelayByRoom = new Map<string, Map<string, number>>()
@@ -315,6 +327,23 @@ function broadcastScreenChunkWs(app: FastifyInstance, serverId: string, roomId: 
       }
     }
     if (!allowed) continue
+    if (ws.bufferedAmount > SCREEN_WS_LAG_BYTES) {
+      if (!meta.screenLagging) {
+        meta.screenLagging = true
+        app.log.info({ serverId, roomId, clientId: meta.clientId, bufferedBytes: ws.bufferedAmount }, "screen viewer lagging; skipping chunks")
+      }
+      continue
+    }
+    if (meta.screenLagging) {
+      // Skipped chunks broke this viewer's WebM stream: once its socket has drained, ask the
+      // sharer for a fresh header (throttled per room) and resume from there.
+      if (ws.bufferedAmount > SCREEN_WS_LAG_BYTES / 4) continue
+      meta.screenLagging = false
+      if (now - (lastLagResyncAtByRoom.get(roomId) ?? 0) > 3000) {
+        lastLagResyncAtByRoom.set(roomId, now)
+        notifyActiveScreenSharerToResync(serverId, roomId, meta.clientId, true)
+      }
+    }
     ws.send(payload)
     sent++
   }
@@ -360,13 +389,13 @@ function findOpenSocketForClient(serverId: string, clientId: string): WebSocket 
 }
 
 /** New viewer joined a voice room: ask active sharer(s) to restart MediaRecorder so WebM init is sent again. */
-function notifyActiveScreenSharerToResync(serverId: string, joinedRoomId: string, joinedClientId: string) {
+function notifyActiveScreenSharerToResync(serverId: string, joinedRoomId: string, joinedClientId: string, fallback = false) {
   for (const [sharerId, share] of screenShareStateByClient.entries()) {
     if (sharerId === joinedClientId) continue
     if (share.serverId !== serverId || !share.active || share.roomId !== joinedRoomId) continue
     const ws = findOpenSocketForClient(serverId, sharerId)
     if (!ws) continue
-    ws.send(JSON.stringify({ type: "screen_share_resync_request", roomId: joinedRoomId } satisfies WsServerEvent))
+    ws.send(JSON.stringify({ type: "screen_share_resync_request", roomId: joinedRoomId, fallback } satisfies WsServerEvent))
   }
 }
 
@@ -592,29 +621,6 @@ createMediaServer(app.log, {
     if (snap) emitMemberUpdated(row.server_id, snap)
   }
 })
-createMediaTcpServer(app.log, {
-  onSpeakingChanged: ({ clientId, speaking }) => {
-    const row = db
-      .prepare("SELECT server_id, room_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")
-      .get(clientId) as { server_id: string; room_id: string | null } | undefined
-    if (!row) return
-    db.prepare("UPDATE member_state SET speaking = ? WHERE server_id = ? AND client_id = ?").run(speaking ? 1 : 0, row.server_id, clientId)
-    const snap = getMemberSnapshot(row.server_id, clientId)
-    if (!snap) return
-    emitMemberUpdated(row.server_id, snap)
-  },
-  onSessionStale: ({ clientId }) => {
-    const row = db
-      .prepare("SELECT server_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")
-      .get(clientId) as { server_id: string } | undefined
-    if (!row) return
-    db.prepare("UPDATE member_state SET speaking = 0 WHERE server_id = ? AND client_id = ?").run(row.server_id, clientId)
-    setMemberSpeaking(clientId, false)
-    const snap = getMemberSnapshot(row.server_id, clientId)
-    if (snap) emitMemberUpdated(row.server_id, snap)
-  }
-})
-
 app.get("/health", async () => ({ ok: true }))
 
 function ensureDefaultRooms(serverId: string) {
@@ -1560,6 +1566,99 @@ app.post("/v1/servers/:serverId/roles", async (req, rep) => {
   return rep.send({ id: roleId, key: roleKey, name: body.name, permissions: body.permissions, isSystem: false })
 })
 
+/** Every registered member (online or not) with roles, for the member list and role management. */
+app.get("/v1/servers/:serverId/members", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const rows = db
+    .prepare(
+      `SELECT client_id, display_name, created_at FROM server_members WHERE server_id = ?
+       UNION ALL
+       SELECT mc.client_id, mc.nick, mc.created_at FROM member_credentials mc
+       WHERE mc.server_id = ? AND NOT EXISTS (
+         SELECT 1 FROM server_members sm WHERE sm.server_id = mc.server_id AND sm.client_id = mc.client_id
+       )
+       ORDER BY 2 COLLATE NOCASE ASC`
+    )
+    .all(params.serverId, params.serverId) as Array<{ client_id: string; display_name: string; created_at: string }>
+  const roleRows = db
+    .prepare(
+      `SELECT mr.client_id, r.id, r.role_key, r.name
+       FROM member_roles mr JOIN server_roles r ON r.id = mr.role_id
+       WHERE mr.server_id = ?`
+    )
+    .all(params.serverId) as Array<{ client_id: string; id: string; role_key: string; name: string }>
+  const rolesByClient = new Map<string, Array<{ id: string; key: string; name: string }>>()
+  for (const r of roleRows) {
+    const list = rolesByClient.get(r.client_id) ?? []
+    list.push({ id: r.id, key: r.role_key, name: r.name })
+    rolesByClient.set(r.client_id, list)
+  }
+  return rep.send({
+    members: rows.map((m) => {
+      const roles = rolesByClient.get(m.client_id) ?? []
+      return {
+        clientId: m.client_id,
+        displayName: m.display_name,
+        roles,
+        isAdmin: roles.some((r) => r.key === "admin"),
+        joinedAt: m.created_at
+      }
+    })
+  })
+})
+
+function countAdmins(serverId: string) {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM member_roles mr JOIN server_roles r ON r.id = mr.role_id
+       WHERE mr.server_id = ? AND r.role_key = 'admin'`
+    )
+    .get(serverId) as { n: number }
+  return row.n
+}
+
+/** Grant (PUT) or take away (DELETE) the built-in admin role. The last admin cannot be removed. */
+app.put("/v1/servers/:serverId/members/:clientId/admin", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), clientId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_roles")) return
+  const member = db
+    .prepare(
+      `SELECT client_id FROM server_members WHERE server_id = ? AND client_id = ?
+       UNION SELECT client_id FROM member_credentials WHERE server_id = ? AND client_id = ?`
+    )
+    .get(params.serverId, params.clientId, params.serverId, params.clientId)
+  if (!member) return rep.code(404).send({ code: "unknown_member", message: "member not found" })
+  ensureMemberHasRole(params.serverId, params.clientId, ensureAdminRole(params.serverId))
+  emitToServer(params.serverId, { type: "members_changed", clientId: params.clientId })
+  return rep.send({ ok: true, isAdmin: true })
+})
+
+app.delete("/v1/servers/:serverId/members/:clientId/admin", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), clientId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_roles")) return
+  const adminRoleId = ensureAdminRole(params.serverId)
+  const has = db
+    .prepare("SELECT 1 FROM member_roles WHERE server_id = ? AND client_id = ? AND role_id = ?")
+    .get(params.serverId, params.clientId, adminRoleId)
+  if (!has) return rep.send({ ok: true, isAdmin: false })
+  if (countAdmins(params.serverId) <= 1) {
+    return rep.code(400).send({ code: "last_admin", message: "the server needs at least one admin" })
+  }
+  db.prepare("DELETE FROM member_roles WHERE server_id = ? AND client_id = ? AND role_id = ?").run(
+    params.serverId,
+    params.clientId,
+    adminRoleId
+  )
+  emitToServer(params.serverId, { type: "members_changed", clientId: params.clientId })
+  return rep.send({ ok: true, isAdmin: false })
+})
+
 app.post("/v1/servers/:serverId/members/:clientId/roles/:roleId", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), clientId: z.string().min(1), roleId: z.string().min(1) }).parse(req.params)
   const auth = (req as any).auth as { serverId: string; clientId: string }
@@ -1947,7 +2046,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         if (row?.room_id !== event.roomId) return
         if (!isVoiceRoomId(auth.serverId, event.roomId)) return
         markForceScreenRelay(event.roomId, auth.clientId)
-        notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId)
+        notifyActiveScreenSharerToResync(auth.serverId, event.roomId, auth.clientId, event.fallback ?? true)
       } else if (event.type === "leave_room") {
         const prevRow = db
           .prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ? LIMIT 1")
