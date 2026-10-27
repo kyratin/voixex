@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useI18n } from "@/lib/i18n/provider"
-import { avatarGradient } from "@/lib/avatar-colors"
+import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
 
 export interface Member {
   id: string
@@ -128,15 +128,9 @@ function MemberRow({
       )}
     >
       <div className="relative shrink-0">
-        <div
-          className={cn(
-            "flex size-8 items-center justify-center rounded-full text-xs font-bold text-white transition-shadow",
-            speaking && "ring-2 ring-accent ring-offset-2 ring-offset-card"
-          )}
-          style={{ background: avatarGradient(member.id || member.name) }}
-        >
+        <SpeakingAvatar id={member.id} label={member.name} isSpeaking={speaking} ringScale={0.8} className="size-8 text-xs">
           {member.avatar}
-        </div>
+        </SpeakingAvatar>
         {!offline ? (
           <span className={cn("absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-card", statusColors[member.status])} />
         ) : null}

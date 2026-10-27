@@ -7,7 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useI18n } from "@/lib/i18n/provider"
-import { avatarGradient } from "@/lib/avatar-colors"
+import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
 import { ConnectionSecurityBadge } from "@/components/voip/server-access-dialog"
 
 export interface Channel {
@@ -66,15 +66,10 @@ function VoiceUserStack({ users }: { users: VoiceUser[] }) {
       <TooltipTrigger asChild>
         <span className="ml-auto flex shrink-0 items-center -space-x-1.5">
           {shown.map((u) => (
-            <span
-              key={u.id}
-              className={cn(
-                "flex size-5 items-center justify-center rounded-full text-[9px] font-bold text-white ring-2 ring-card",
-                u.isSpeaking && "ring-accent"
-              )}
-              style={{ background: avatarGradient(u.id || u.name) }}
-            >
-              {u.avatar.slice(0, 1).toUpperCase()}
+            <span key={u.id} className="rounded-full ring-2 ring-card animate-in fade-in zoom-in-50 duration-300">
+              <SpeakingAvatar id={u.id} label={u.name} isSpeaking={u.isSpeaking} ringScale={0.6} className="size-5 text-[9px]">
+                {u.avatar.slice(0, 1).toUpperCase()}
+              </SpeakingAvatar>
             </span>
           ))}
           {extra > 0 ? (

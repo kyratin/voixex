@@ -29,7 +29,7 @@ import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { StreamVolumeControl } from "@/components/voip/stream-volume-control"
 import type { VoiceUser } from "@/components/voip/channel-sidebar"
-import { avatarGradient } from "@/lib/avatar-colors"
+import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
 import { cn } from "@/lib/utils"
 import { useI18n } from "@/lib/i18n/provider"
 
@@ -159,7 +159,7 @@ function ParticipantTile({
   const tile = (
     <div
       className={cn(
-        "relative flex shrink-0 flex-col items-center justify-center gap-2 rounded-xl bg-card/80 transition-colors",
+        "relative flex shrink-0 flex-col items-center justify-center gap-2 rounded-xl bg-card/80 transition-colors animate-in fade-in zoom-in-90 duration-300",
         fill ? "aspect-square w-full" : large ? "h-32 w-40" : "h-28 w-[7.5rem]",
         volume && "cursor-pointer hover:bg-card"
       )}
@@ -167,16 +167,14 @@ function ParticipantTile({
       {user.isScreenSharing ? (
         <span className="absolute left-2 top-2 rounded bg-destructive px-1.5 py-0.5 text-[9px] font-bold uppercase text-white">Live</span>
       ) : null}
-      <div
-        className={cn(
-          "flex items-center justify-center rounded-full font-bold text-white transition-shadow",
-          fill ? "size-20 text-2xl" : large ? "size-14 text-lg" : "size-11 text-base",
-          user.isSpeaking && "ring-2 ring-accent ring-offset-2 ring-offset-card"
-        )}
-        style={{ background: avatarGradient(user.id || user.name) }}
+      <SpeakingAvatar
+        id={user.id}
+        label={user.name}
+        isSpeaking={user.isSpeaking}
+        className={fill ? "size-20 text-2xl" : large ? "size-14 text-lg" : "size-11 text-base"}
       >
         {user.avatar.slice(0, 1).toUpperCase()}
-      </div>
+      </SpeakingAvatar>
       <div className="flex max-w-[90%] items-center gap-1 text-xs font-medium text-foreground">
         <span className="truncate">{user.name}</span>
         {user.isSpeaking ? <span className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
@@ -287,8 +285,13 @@ export function VoiceStage({
       className={cn(
         "flex flex-col overflow-hidden bg-stage",
         fullscreen
-          ? "fixed inset-0 z-50 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]"
-          : cn("relative mx-4 mt-4 shrink-0 rounded-xl transition-[height] duration-200", showsVideo ? "h-[min(58vh,620px)]" : "h-64")
+          ? "fixed inset-0 z-50 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] animate-in fade-in slide-in-from-bottom-8 duration-300"
+          : cn(
+              "relative mx-4 mt-4 shrink-0 rounded-xl animate-in fade-in slide-in-from-top-3 duration-300",
+              // Grows and shrinks smoothly when a stream starts or stops.
+              "transition-[height] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
+              showsVideo ? "h-[min(58vh,620px)]" : "h-64"
+            )
       )}
       aria-label={channelName}
     >
@@ -486,12 +489,12 @@ export function VoiceStage({
             autoPlay
             muted
             playsInline
-            className="max-h-full max-w-full rounded-lg bg-black object-contain shadow-2xl"
+            className="max-h-full max-w-full rounded-lg bg-black object-contain shadow-2xl animate-in fade-in zoom-in-95 duration-500"
           />
         ) : hasStream || expectingStream ? (
-          <div className="relative flex h-full w-full items-center justify-center">
+          <div className="relative flex h-full w-full items-center justify-center animate-in fade-in zoom-in-95 duration-500">
             {(streamLoading || expectingStream) && !hasStream ? (
-              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-card/60">
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-card/60 animate-in fade-in duration-300">
                 <Loader2 className="h-7 w-7 animate-spin text-primary" />
                 <p className="text-xs text-muted-foreground">{t("voice.loadingStream")}</p>
               </div>
@@ -506,7 +509,7 @@ export function VoiceStage({
             />
           </div>
         ) : streamHiddenByUser && activeScreenSharerName ? (
-          <div className="flex flex-col items-center gap-2 text-center">
+          <div className="flex flex-col items-center gap-2 text-center animate-in fade-in zoom-in-95 duration-300">
             <EyeOff className="h-6 w-6 text-muted-foreground" />
             <p className="text-sm font-medium text-foreground">{t("voice.streamHiddenTitle")}</p>
             {onShowStream ? (
@@ -627,7 +630,7 @@ export function VoiceMiniBar({
   const { t } = useI18n()
   const speaking = participants.filter((u) => u.isSpeaking).map((u) => u.name)
   return (
-    <div className="mx-3 mt-3 flex shrink-0 items-center gap-2 rounded-xl bg-stage px-3 py-2">
+    <div className="mx-3 mt-3 flex shrink-0 items-center gap-2 rounded-xl bg-stage px-3 py-2 animate-in fade-in slide-in-from-top-2 duration-300">
       <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <Volume2 className="h-4 w-4 shrink-0 text-accent" />
         <span className="min-w-0">

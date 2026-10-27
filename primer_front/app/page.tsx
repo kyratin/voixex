@@ -4,6 +4,7 @@
 import "@/lib/mobile-bridge"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
+import { useExitSnapshot } from "@/lib/use-exit-snapshot"
 import { Buffer } from "buffer"
 import { ServerHome, type ServerCardInfo } from "@/components/voip/server-home"
 import {
@@ -4392,6 +4393,12 @@ export default function VoIPApp() {
                 />
   )
 
+  // Wide screens: the stage above the chat; phones: the full call screen. Both fade out on leave.
+  const inlineStage = isInVoice && currentVoiceChannel && !isNarrow ? renderVoiceStage(false) : null
+  const inlineStageLeaving = useExitSnapshot(inlineStage, 200)
+  const callScreen = isNarrow && isInVoice && currentVoiceChannel && voiceViewOpen ? renderVoiceStage(true) : null
+  const callScreenLeaving = useExitSnapshot(callScreen, 200)
+
   return (
     <>
       <div className="flex h-dvh flex-col bg-background">
@@ -4523,8 +4530,10 @@ export default function VoIPApp() {
                     />
                   )
                 ) : (
-                  renderVoiceStage(false)
+                  inlineStage
                 )
+              ) : inlineStageLeaving ? (
+                <div className="animate-out fade-out slide-out-to-top-3 duration-200 fill-mode-forwards">{inlineStageLeaving}</div>
               ) : null
             }
           />
@@ -4543,7 +4552,7 @@ export default function VoIPApp() {
         ) : null}
       </main>
       </div>
-      {isNarrow && isInVoice && currentVoiceChannel && voiceViewOpen ? renderVoiceStage(true) : null}
+      {callScreen ?? (callScreenLeaving ? <div className="animate-out fade-out duration-200 fill-mode-forwards">{callScreenLeaving}</div> : null)}
 
       <ConnectServerDialog
         draft={editDraft?.draft ?? null}

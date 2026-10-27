@@ -1,6 +1,7 @@
 "use client"
 
 import type { ChannelCategory, VoiceUser } from "@/components/voip/channel-sidebar"
+import { clearVoiceLevels, setRoomVoiceLevels } from "@/lib/voice-levels"
 
 const DEFAULT_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:18080"
 
@@ -658,6 +659,7 @@ export class VoipClient {
 
   /** Close WebSocket, clear auth, stop auto-reconnect. Call when leaving a server from the client UI. */
   disconnect() {
+    clearVoiceLevels()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -739,6 +741,13 @@ export class VoipClient {
           } catch {
             /* ignore */
           }
+        }
+        return
+      }
+      // ~10 Hz: straight to the level store, without re-rendering everything that watches state.
+      if (data.type === "voice_levels") {
+        if (typeof data.roomId === "string" && data.levels && typeof data.levels === "object") {
+          setRoomVoiceLevels(data.roomId, data.levels as Record<string, number>)
         }
         return
       }
