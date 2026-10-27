@@ -23,6 +23,11 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // LiveKit's audioswitch fork is only published on JitPack; nothing else comes from there.
+        maven {
+            url 'https://jitpack.io'
+            content { includeGroup 'com.github.davidliu' }
+        }
     }
 }
 
