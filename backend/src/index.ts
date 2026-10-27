@@ -1712,6 +1712,9 @@ app.get("/v1/servers/:serverId/rooms", async (req, rep) => {
 
 app.post("/v1/servers/:serverId/rooms/:roomId/sfu-token", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), roomId: z.string().min(1) }).parse(req.params)
+  // purpose=screen: a second, publish-only participant "<clientId>:screen" for screen sharing from
+  // a phone (the Android app publishes natively, next to its WebView voice/LiveKit session).
+  const query = z.object({ purpose: z.enum(["media", "screen"]).default("media") }).parse(req.query ?? {})
   const auth = (req as any).auth as { serverId: string; clientId: string; displayName?: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   if (!config.livekitUrl || !config.livekitApiKey || !config.livekitApiSecret) {
@@ -1725,8 +1728,9 @@ app.post("/v1/servers/:serverId/rooms/:roomId/sfu-token", async (req, rep) => {
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ? LIMIT 1")
     .get(params.serverId, auth.clientId) as { display_name: string } | undefined
   const roomName = `${params.serverId}:${params.roomId}`
+  const screen = query.purpose === "screen"
   const token = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
-    identity: auth.clientId,
+    identity: screen ? `${auth.clientId}:screen` : auth.clientId,
     name: member?.display_name ?? auth.displayName ?? auth.clientId,
     ttl: config.livekitTokenTtlSec
   })
@@ -1734,8 +1738,8 @@ app.post("/v1/servers/:serverId/rooms/:roomId/sfu-token", async (req, rep) => {
     room: roomName,
     roomJoin: true,
     canPublish: true,
-    canSubscribe: true,
-    canPublishData: true
+    canSubscribe: !screen,
+    canPublishData: !screen
   })
   return rep.send({
     enabled: true,
