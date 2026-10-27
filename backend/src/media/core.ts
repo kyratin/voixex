@@ -1,6 +1,5 @@
 import dgram, { type RemoteInfo } from "node:dgram"
 import net, { type Socket } from "node:net"
-import { randomUUID } from "node:crypto"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
 import OpusScript from "opusscript"
 import { config } from "../config.js"
@@ -46,7 +45,8 @@ type Caps = { opus2: boolean }
 type Session = {
   clientId: string
   roomId: string | null
-  transport: "udp" | "tcp"
+  /** tcp and ws (WebSocket, browsers/phones) are reliable streams; both use `tcp` for sending. */
+  transport: "udp" | "tcp" | "ws"
   remote?: { address: string; port: number }
   tcp?: { send: (packet: Buffer) => void; backlog: () => number } | null
   tcpLabel?: string
@@ -215,7 +215,9 @@ function parseHello(text: string): { token: string; caps: Caps } | null {
 
 function acceptHello(
   text: string,
-  transport: { kind: "udp"; remote: { address: string; port: number } } | { kind: "tcp"; tcp: NonNullable<Session["tcp"]>; label: string }
+  transport:
+    | { kind: "udp"; remote: { address: string; port: number } }
+    | { kind: "tcp" | "ws"; tcp: NonNullable<Session["tcp"]>; label: string }
 ): { ok: true; session: Session; ack: Buffer } | { ok: false } {
   const hello = parseHello(text)
   if (!hello) return { ok: false }
@@ -244,8 +246,8 @@ function acceptHello(
     roomId: desiredRoomByClient.get(clientId) ?? null,
     transport: transport.kind,
     remote: transport.kind === "udp" ? transport.remote : undefined,
-    tcp: transport.kind === "tcp" ? transport.tcp : null,
-    tcpLabel: transport.kind === "tcp" ? transport.label : undefined,
+    tcp: transport.kind !== "udp" ? transport.tcp : null,
+    tcpLabel: transport.kind !== "udp" ? transport.label : undefined,
     key: deriveMediaKey(String(payload.mediaSeed)),
     caps: hello.caps,
     replay: new ReplayWindow(),
@@ -268,7 +270,7 @@ function acceptHello(
     legacyNonAudio: 0,
     downlinkBitrate: BITRATE_GOOD,
     // TCP is reliable: redundant copies would only add bytes.
-    redundancy: transport.kind === "tcp" ? 0 : 1,
+    redundancy: transport.kind !== "udp" ? 0 : 1,
     stats: freshStats()
   }
   session.stream = newStream(session)
@@ -286,7 +288,7 @@ const helloAck = (caps: Caps) => Buffer.from(caps.opus2 ? "HELLO_ACK opus2" : "H
 function send(session: Session, kind: number, payload: Buffer, ts = Date.now()) {
   if (!session.roomId && kind !== KIND_PROBE_ACK) return
   const packet = encryptPacket(session.key, session.seqOut++, ts, session.roomId ?? "", payload, kind)
-  if (session.transport === "tcp") {
+  if (session.transport !== "udp") {
     if (!session.tcp) return
     if (kind !== KIND_PROBE_ACK && session.tcp.backlog() > TCP_MAX_BACKLOG_BYTES) {
       session.stats.tcpBacklogDropped += 1
@@ -417,7 +419,7 @@ function adaptDownlink(session: Session) {
   const loss = session.downlink.lossPermille / 10
   const bitrate = loss > 10 ? BITRATE_BAD : loss > 3 ? BITRATE_LOSSY : BITRATE_GOOD
   // TCP is reliable: redundancy would only add bytes.
-  session.redundancy = session.transport === "tcp" ? 0 : loss > 3 ? 2 : 1
+  session.redundancy = session.transport !== "udp" ? 0 : loss > 3 ? 2 : 1
   if (bitrate !== session.downlinkBitrate && session.encoder) {
     session.encoder.setBitrate(bitrate)
     try {
@@ -611,29 +613,69 @@ function startUdp() {
 
 const MAX_TCP_FRAME = 64 * 1024
 
+/**
+ * One reliable media connection (TCP socket or WebSocket): HELLO first, then encrypted packets,
+ * one per message. Framing is the caller's job.
+ */
+function reliableConnection(kind: "tcp" | "ws", label: string, tcp: NonNullable<Session["tcp"]>, destroy: () => void) {
+  let session: Session | null = null
+  return {
+    onPayload(payload: Buffer) {
+      if (payload[0] === 0x48 && payload.subarray(0, 5).toString() === "HELLO") {
+        const res = acceptHello(payload.toString(), { kind, tcp, label })
+        if (!res.ok) {
+          tcp.send(Buffer.from("HELLO_FAIL"))
+          destroy()
+          return
+        }
+        session = res.session
+        tcp.send(res.ack)
+        return
+      }
+      if (!session) {
+        logger.warn({ remote: label, kind }, "media connection: expected HELLO first; closing")
+        destroy()
+        return
+      }
+      const decoded = decryptPacket(session.key, payload)
+      if (!decoded) {
+        session.stats.rxDecryptDropped += 1
+        return
+      }
+      handlePacket(session, decoded, payload.length)
+    },
+    onClose() {
+      if (session && session.tcp === tcp) session.tcp = null
+    }
+  }
+}
+
 function startTcp() {
   const server = net.createServer((socket: Socket) => {
     // Voice packets are tiny and time-critical; Nagle would hold them back for tens of ms.
     socket.setNoDelay(true)
     socket.setKeepAlive(true, 10_000)
     const label = `${socket.remoteAddress ?? "unknown"}:${socket.remotePort ?? "?"}`
-    const connId = randomUUID()
     let buffer: Buffer = Buffer.alloc(0)
-    let session: Session | null = null
-    const tcp: NonNullable<Session["tcp"]> = {
-      send: (packet) => {
-        if (socket.destroyed) return
-        const out = Buffer.allocUnsafe(4 + packet.length)
-        out.writeUInt32BE(packet.length, 0)
-        packet.copy(out, 4)
-        socket.write(out)
+    const conn = reliableConnection(
+      "tcp",
+      label,
+      {
+        send: (packet) => {
+          if (socket.destroyed) return
+          const out = Buffer.allocUnsafe(4 + packet.length)
+          out.writeUInt32BE(packet.length, 0)
+          packet.copy(out, 4)
+          socket.write(out)
+        },
+        backlog: () => socket.writableLength
       },
-      backlog: () => socket.writableLength
-    }
+      () => socket.destroy()
+    )
     socket.on("data", (chunk: Buffer) => {
       buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk])
       let off = 0
-      while (buffer.length - off >= 4) {
+      while (buffer.length - off >= 4 && !socket.destroyed) {
         const n = buffer.readUInt32BE(off)
         if (n <= 0 || n > MAX_TCP_FRAME) {
           logger.warn({ remote: label, bytes: n }, "media tcp invalid frame size; closing")
@@ -641,41 +683,37 @@ function startTcp() {
           return
         }
         if (buffer.length - off < 4 + n) break
-        const payload = buffer.subarray(off + 4, off + 4 + n)
+        conn.onPayload(buffer.subarray(off + 4, off + 4 + n))
         off += 4 + n
-        if (payload[0] === 0x48 && payload.subarray(0, 5).toString() === "HELLO") {
-          const res = acceptHello(payload.toString(), { kind: "tcp", tcp, label })
-          if (!res.ok) {
-            tcp.send(Buffer.from("HELLO_FAIL"))
-            socket.destroy()
-            return
-          }
-          session = res.session
-          tcp.send(res.ack)
-          continue
-        }
-        if (!session) {
-          logger.warn({ remote: label, connId }, "media tcp expected HELLO first; closing")
-          socket.destroy()
-          return
-        }
-        const decoded = decryptPacket(session.key, payload)
-        if (!decoded) {
-          session.stats.rxDecryptDropped += 1
-          continue
-        }
-        handlePacket(session, decoded, payload.length)
       }
       buffer = off === buffer.length ? Buffer.alloc(0) : buffer.subarray(off)
     })
     socket.on("error", (err) => logger.debug({ remote: label, err: String(err) }, "media tcp socket error"))
-    socket.on("close", () => {
-      if (session && session.tcp === tcp) session.tcp = null
-    })
+    socket.on("close", () => conn.onClose())
   })
   server.listen(config.udpPort, config.udpHost, () => {
     logger.info({ host: config.udpHost, port: config.udpPort }, "media TCP server listening")
   })
+}
+
+/**
+ * Media over WebSocket for clients without UDP/TCP sockets (browser, Android WebView). The socket
+ * lives on the main thread (same HTTPS port as the API); messages are relayed to this worker.
+ */
+const wsConnections = new Map<string, ReturnType<typeof reliableConnection>>()
+
+export function wsOpen(connId: string, label: string, send: (packet: Buffer) => void, close: () => void) {
+  // Backpressure is applied on the main thread, which can see the socket's buffered amount.
+  wsConnections.set(connId, reliableConnection("ws", label, { send, backlog: () => 0 }, close))
+}
+
+export function wsData(connId: string, payload: Buffer) {
+  wsConnections.get(connId)?.onPayload(payload)
+}
+
+export function wsClose(connId: string) {
+  wsConnections.get(connId)?.onClose()
+  wsConnections.delete(connId)
 }
 
 function startHousekeeping() {

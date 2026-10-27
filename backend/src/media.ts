@@ -19,6 +19,12 @@ const volumes = new Map<string, Map<string, number>>()
 
 let worker: Worker | null = null
 
+/** WebSocket media connections relayed to the worker. */
+type MediaSocket = { send: (data: Uint8Array) => void; close: () => void; bufferedAmount: () => number }
+const mediaSockets = new Map<string, MediaSocket>()
+/** Above this much unsent data (≈0.5 s of audio) packets are skipped instead of adding delay. */
+const WS_MAX_BACKLOG_BYTES = 24 * 1024
+
 function post(m: HostToWorker) {
   worker?.postMessage(m)
 }
@@ -71,6 +77,11 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       if (m.t === "log") logger[m.level](m.obj, m.msg)
       else if (m.t === "speaking") hooks.onSpeakingChanged?.({ clientId: m.clientId, speaking: m.speaking })
       else if (m.t === "stale") hooks.onSessionStale?.({ clientId: m.clientId })
+      else if (m.t === "wssend") {
+        const sock = mediaSockets.get(m.connId)
+        // Control replies (HELLO_ACK) are tiny; only audio would pile up.
+        if (sock && (sock.bufferedAmount() < WS_MAX_BACKLOG_BYTES || m.data.length < 64)) sock.send(m.data)
+      } else if (m.t === "wsend") mediaSockets.get(m.connId)?.close()
     })
     w.on("error", (err) => logger.error({ err: String(err) }, "media worker crashed"))
     w.on("exit", (code) => {
@@ -79,6 +90,8 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       logger.warn({ code }, "media worker exited; restarting")
       setTimeout(start, 1000).unref()
     })
+    // Media sockets belonged to the old worker's sessions; clients reconnect.
+    for (const sock of mediaSockets.values()) sock.close()
     for (const [clientId, roomId] of roomByClient) w.postMessage({ t: "room", clientId, roomId } satisfies HostToWorker)
     for (const [clientId, f] of flagsByClient) w.postMessage({ t: "flags", clientId, ...f } satisfies HostToWorker)
     for (const [listener, m] of volumes) {
@@ -86,4 +99,19 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
     }
   }
   start()
+}
+
+/** Registers a media WebSocket (binary frames, one encrypted packet or HELLO per frame). */
+export function attachMediaSocket(connId: string, label: string, socket: MediaSocket) {
+  mediaSockets.set(connId, socket)
+  post({ t: "wsopen", connId, label })
+  return {
+    data(frame: Uint8Array) {
+      post({ t: "wsdata", connId, data: frame })
+    },
+    closed() {
+      mediaSockets.delete(connId)
+      post({ t: "wsclose", connId })
+    }
+  }
 }

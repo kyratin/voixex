@@ -1,5 +1,16 @@
 import { parentPort } from "node:worker_threads"
-import { removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume, startMedia, type MediaLogger } from "./core.js"
+import {
+  removeMember,
+  setMemberFlags,
+  setMemberRoom,
+  setMemberSpeaking,
+  setPeerVolume,
+  startMedia,
+  wsClose,
+  wsData,
+  wsOpen,
+  type MediaLogger
+} from "./core.js"
 
 /**
  * Voice media runs in its own thread: the main thread parses multi-megabyte WebSocket screen
@@ -13,11 +24,17 @@ export type HostToWorker =
   | { t: "speaking"; clientId: string; speaking: boolean }
   | { t: "volume"; listener: string; target: string; pct: number }
   | { t: "remove"; clientId: string }
+  /** Media over WebSocket: the socket is on the main thread, packets are relayed. */
+  | { t: "wsopen"; connId: string; label: string }
+  | { t: "wsdata"; connId: string; data: Uint8Array }
+  | { t: "wsclose"; connId: string }
 
 export type WorkerToHost =
   | { t: "log"; level: "info" | "warn" | "debug"; obj: object; msg?: string }
   | { t: "speaking"; clientId: string; speaking: boolean }
   | { t: "stale"; clientId: string }
+  | { t: "wssend"; connId: string; data: Uint8Array }
+  | { t: "wsend"; connId: string }
 
 const port = parentPort
 if (!port) throw new Error("media worker must run in a worker thread")
@@ -41,6 +58,17 @@ port.on("message", (m: HostToWorker) => {
       return setPeerVolume(m.listener, m.target, m.pct)
     case "remove":
       return removeMember(m.clientId)
+    case "wsopen":
+      return wsOpen(
+        m.connId,
+        m.label,
+        (packet) => post({ t: "wssend", connId: m.connId, data: packet }),
+        () => post({ t: "wsend", connId: m.connId })
+      )
+    case "wsdata":
+      return wsData(m.connId, Buffer.from(m.data.buffer, m.data.byteOffset, m.data.byteLength))
+    case "wsclose":
+      return wsClose(m.connId)
   }
 })
 

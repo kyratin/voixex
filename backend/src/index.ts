@@ -13,7 +13,7 @@ import { config } from "./config.js"
 import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent, RosterMember } from "./contracts.js"
-import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
+import { attachMediaSocket, createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 import {
   AttemptLimiter,
   ChallengeStore,
@@ -46,7 +46,7 @@ const app = Fastify({
 })
 await app.register(cors, {
   origin: true,
-  methods: ["GET", "POST", "PATCH", "OPTIONS"],
+  methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-file-name", "x-file-mime", "x-voice-transport"]
 })
 await app.register(websocket, {
@@ -1956,6 +1956,28 @@ app.post("/v1/servers/:serverId/channels/:channelId/messages", async (req, rep) 
   }
   emitToServer(params.serverId, { type: "chat_message", message })
   return rep.send({ message })
+})
+
+/**
+ * Voice media over WebSocket for clients without UDP/TCP (phones, browsers): binary frames, the
+ * first one HELLO2 with the media token, then the same encrypted packets as on UDP/TCP.
+ */
+app.get("/v1/media/ws", { websocket: true }, (socket, req) => {
+  const connId = randomUUID()
+  const label = `ws:${req.headers["x-forwarded-for"] ?? req.ip}`
+  const conn = attachMediaSocket(connId, label, {
+    send: (data) => {
+      if (socket.readyState === socket.OPEN) socket.send(data)
+    },
+    close: () => socket.close(4000, "media session ended"),
+    bufferedAmount: () => socket.bufferedAmount
+  })
+  socket.binaryType = "nodebuffer"
+  socket.on("message", (data: Buffer, isBinary: boolean) => {
+    if (!isBinary || data.length > 64 * 1024) return
+    conn.data(data)
+  })
+  socket.on("close", () => conn.closed())
 })
 
 app.get("/v1/ws", { websocket: true }, (socket, req) => {
