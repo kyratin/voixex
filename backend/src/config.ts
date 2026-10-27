@@ -17,6 +17,14 @@ export const config = {
   publicUdpHost: process.env.PUBLIC_UDP_HOST ?? "localhost",
   tokenSecret: process.env.TOKEN_SECRET ?? "change-me-dev-secret",
   superuserPassword: process.env.SUPERUSER_PASSWORD ?? "change-me-superuser",
+  /**
+   * Password-only /v1/join (clients without certificate login):
+   * "existing" (default) — only members that have not set a password + certificate yet,
+   * "open" — anyone with the server password (old behaviour), "off" — disabled.
+   */
+  legacyJoin: (["existing", "open", "off"].includes(process.env.LEGACY_JOIN ?? "")
+    ? process.env.LEGACY_JOIN
+    : "existing") as "existing" | "open" | "off",
   dbPath: process.env.DB_PATH ?? "./data/voip.sqlite",
   mediaRateLimitPerSec: Number(process.env.MEDIA_RATE_LIMIT_PER_SEC ?? 6000),
   uploadDir: process.env.UPLOAD_DIR ?? "/data/uploads",

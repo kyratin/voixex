@@ -15,6 +15,19 @@ import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent, RosterMember } from "./contracts.js"
 import { createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 import { createMediaTcpServer } from "./media-tcp.js"
+import {
+  AttemptLimiter,
+  ChallengeStore,
+  isValidNick,
+  isValidPassword,
+  loadServerSigningKey,
+  loginSigningInput,
+  nickKey,
+  normalizeNick,
+  parseEd25519PublicKey,
+  signCertificate,
+  verifyEd25519
+} from "./auth.js"
 
 const app = Fastify({
   logger: true,
@@ -29,7 +42,7 @@ const app = Fastify({
 })
 await app.register(cors, {
   origin: true,
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "PATCH", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-file-name", "x-file-mime", "x-voice-transport"]
 })
 await app.register(websocket, {
@@ -52,9 +65,15 @@ const db = initDb(config.dbPath)
     )
   }
 }
+const certSigningKey = loadServerSigningKey(db)
+const loginChallenges = new ChallengeStore()
+/** Failed logins per nick: password guessing needs the certificate too, this caps the rest. */
+const loginFailuresByNick = new AttemptLimiter(10, 10 * 60_000)
+/** Server-password checks on register/claim, for all clients together (they share one proxy IP). */
+const serverPasswordAttempts = new AttemptLimiter(30, 10 * 60_000)
 const clients = new Map<string, Set<WebSocket>>()
 /** Map WebSocket → client for targeted broadcast (screen chunks). */
-const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string }>()
+const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string; certId?: string }>()
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
 /** Viewer IDs temporarily forced into WS screen relay after join/resync. */
 const forceScreenRelayByRoom = new Map<string, Map<string, number>>()
@@ -614,7 +633,13 @@ function ensureDefaultRooms(serverId: string) {
   }
 }
 
-async function issueJoinForServer(input: { serverId: string; clientId: string; displayName: string; superuserPassword?: string }) {
+async function issueJoinForServer(input: {
+  serverId: string
+  clientId: string
+  displayName: string
+  superuserPassword?: string
+  certId?: string
+}) {
   const existingMember = db
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
     .get(input.serverId, input.clientId) as { display_name: string } | undefined
@@ -679,7 +704,13 @@ async function issueJoinForServer(input: { serverId: string; clientId: string; d
 
   const mediaSeed = randomBytes(32).toString("base64")
   const authToken = makeAuthToken(
-    { serverId: input.serverId, clientId: input.clientId, displayName: resolvedName, mediaSeed },
+    {
+      serverId: input.serverId,
+      clientId: input.clientId,
+      displayName: resolvedName,
+      mediaSeed,
+      ...(input.certId ? { certId: input.certId } : {})
+    },
     config.tokenSecret
   )
   const mediaToken = makeMediaToken(
@@ -730,6 +761,8 @@ app.post("/v1/join", async (req, rep) => {
 
   const ok = await bcrypt.compare(body.password, server.access_password_hash)
   if (!ok) return rep.code(401).send({ message: "invalid password" })
+  const legacyError = legacyJoinError(server.id, body.clientId)
+  if (legacyError) return rep.code(403).send(legacyError)
   ensureDefaultRooms(server.id)
   const joined = await issueJoinForServer({
     serverId: server.id,
@@ -756,6 +789,8 @@ app.post("/v1/servers/:serverId/join", async (req, rep) => {
   if (!server) return rep.code(404).send({ message: "server not found" })
   const ok = await bcrypt.compare(body.password, server.access_password_hash)
   if (!ok) return rep.code(401).send({ message: "invalid password" })
+  const legacyError = legacyJoinError(params.serverId, body.clientId)
+  if (legacyError) return rep.code(403).send(legacyError)
   ensureDefaultRooms(params.serverId)
   const joined = await issueJoinForServer({
     serverId: params.serverId,
@@ -764,6 +799,293 @@ app.post("/v1/servers/:serverId/join", async (req, rep) => {
     superuserPassword: body.superuserPassword
   })
   return rep.send({ ...joined, bannerUrl: getServerBannerUrl(params.serverId) })
+})
+
+// ---------------------------------------------------------------------------
+// Member authentication: device certificate + nick + personal password.
+// The shared server password only gates registration and claiming old profiles.
+// ---------------------------------------------------------------------------
+
+type CredentialsRow = { client_id: string; nick: string; nick_key: string; password_hash: string }
+type CertificateRow = {
+  id: string
+  server_id: string
+  client_id: string
+  public_key: string
+  issued_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+  revoked_by: string | null
+}
+
+function getCredentials(serverId: string, clientId: string) {
+  return db
+    .prepare("SELECT client_id, nick, nick_key, password_hash FROM member_credentials WHERE server_id = ? AND client_id = ?")
+    .get(serverId, clientId) as CredentialsRow | undefined
+}
+
+function isCertificateActive(certId: string) {
+  const row = db.prepare("SELECT revoked_at FROM member_certificates WHERE id = ?").get(certId) as
+    | { revoked_at: string | null }
+    | undefined
+  return Boolean(row && !row.revoked_at)
+}
+
+function listCertificates(serverId: string, clientId: string) {
+  const rows = db
+    .prepare(
+      `SELECT id, issued_at, last_used_at, revoked_at, revoked_by FROM member_certificates
+       WHERE server_id = ? AND client_id = ? ORDER BY issued_at DESC`
+    )
+    .all(serverId, clientId) as Array<Pick<CertificateRow, "id" | "issued_at" | "last_used_at" | "revoked_at" | "revoked_by">>
+  return rows.map((r) => ({
+    certId: r.id,
+    issuedAt: r.issued_at,
+    lastUsedAt: r.last_used_at,
+    revokedAt: r.revoked_at,
+    revokedByAdmin: Boolean(r.revoked_at && r.revoked_by && r.revoked_by !== clientId)
+  }))
+}
+
+/** Why a password-only /v1/join is refused, or null when it is allowed. */
+function legacyJoinError(serverId: string, clientId: string) {
+  // Never let the old path open a protected profile: client ids are visible to every member.
+  if (getCredentials(serverId, clientId)) {
+    return { message: "this profile is protected; sign in with your certificate, nick and password", code: "profile_protected" }
+  }
+  if (config.legacyJoin === "open") return null
+  if (config.legacyJoin === "off") {
+    return { message: "password-only join is disabled on this server", code: "legacy_join_disabled" }
+  }
+  const member = db.prepare("SELECT 1 FROM server_members WHERE server_id = ? AND client_id = ?").get(serverId, clientId)
+  if (!member) {
+    return { message: "new members register with a nick, password and certificate; update the client", code: "registration_required" }
+  }
+  return null
+}
+
+function isNickTaken(serverId: string, nick: string, exceptClientId?: string) {
+  const key = nickKey(nick)
+  const cred = db
+    .prepare("SELECT client_id FROM member_credentials WHERE server_id = ? AND nick_key = ?")
+    .get(serverId, key) as { client_id: string } | undefined
+  if (cred && cred.client_id !== exceptClientId) return true
+  // Old (not yet protected) members keep their names, so a newcomer cannot take one.
+  const members = db
+    .prepare("SELECT client_id, display_name FROM server_members WHERE server_id = ?")
+    .all(serverId) as Array<{ client_id: string; display_name: string }>
+  return members.some((m) => m.client_id !== exceptClientId && nickKey(m.display_name) === key)
+}
+
+/** Checks the shared server password; the first registration on an empty instance creates the server. */
+async function checkServerPassword(
+  serverPassword: string,
+  options: { createIfMissing: boolean; serverName?: string }
+): Promise<{ serverId: string } | { status: number; error: { message: string; code: string } }> {
+  if (serverPasswordAttempts.blocked("all")) {
+    return { status: 429, error: { message: "too many attempts, try again later", code: "too_many_attempts" } }
+  }
+  let server = db
+    .prepare("SELECT id, access_password_hash FROM servers ORDER BY created_at DESC LIMIT 1")
+    .get() as { id: string; access_password_hash: string } | undefined
+  if (!server) {
+    if (!options.createIfMissing) return { status: 404, error: { message: "server not found", code: "server_not_found" } }
+    const id = randomUUID()
+    const hash = await bcrypt.hash(serverPassword, 10)
+    db.prepare("INSERT INTO servers(id, name, access_password_hash) VALUES (?, ?, ?)").run(
+      id,
+      options.serverName ?? "Main Server",
+      hash
+    )
+    ensureDefaultRooms(id)
+    server = { id, access_password_hash: hash }
+  }
+  if (!(await bcrypt.compare(serverPassword, server.access_password_hash))) {
+    serverPasswordAttempts.record("all")
+    return { status: 401, error: { message: "invalid server password", code: "invalid_server_password" } }
+  }
+  return { serverId: server.id }
+}
+
+function issueCertificate(serverId: string, clientId: string, publicKey: string) {
+  const certId = randomUUID()
+  const issuedAt = new Date().toISOString()
+  db.prepare("INSERT INTO member_certificates(id, server_id, client_id, public_key, issued_at) VALUES (?, ?, ?, ?, ?)").run(
+    certId,
+    serverId,
+    clientId,
+    publicKey,
+    issuedAt
+  )
+  return signCertificate(certSigningKey, { certId, serverId, clientId, publicKey, issuedAt })
+}
+
+/** Drops live WebSocket sessions opened with a certificate (or every session of the member). */
+function closeSessions(serverId: string, clientId: string, certId?: string) {
+  const sockets = clientSockets.get(clientSocketsKey(serverId, clientId))
+  if (!sockets) return
+  for (const ws of [...sockets]) {
+    const meta = wsClientMeta.get(ws)
+    if (certId && meta?.certId !== certId) continue
+    try {
+      ws.close(4003, "certificate revoked")
+    } catch {
+      // already closing
+    }
+  }
+}
+
+function revokeCertificate(serverId: string, clientId: string, certId: string, revokedBy: string) {
+  const r = db
+    .prepare(
+      `UPDATE member_certificates SET revoked_at = datetime('now'), revoked_by = ?
+       WHERE id = ? AND server_id = ? AND client_id = ? AND revoked_at IS NULL`
+    )
+    .run(revokedBy, certId, serverId, clientId)
+  if (r.changes > 0) closeSessions(serverId, clientId, certId)
+  return r.changes > 0
+}
+
+const nickSchema = z.string().max(64)
+const passwordSchema = z.string().max(256)
+const publicKeySchema = z.string().max(128)
+
+function validateNewIdentity(input: { nick?: string; password: string; publicKey: string }) {
+  if (input.nick !== undefined && !isValidNick(input.nick)) {
+    return { message: "nick must be 2-32 letters, digits, spaces, dots, dashes or underscores", code: "invalid_nick" }
+  }
+  if (!isValidPassword(input.password)) return { message: "password must be at least 8 characters", code: "weak_password" }
+  if (!parseEd25519PublicKey(input.publicKey)) return { message: "invalid public key", code: "invalid_public_key" }
+  return null
+}
+
+app.post("/v1/auth/register", async (req, rep) => {
+  const body = z
+    .object({
+      serverPassword: z.string().min(1).max(256),
+      nick: nickSchema,
+      password: passwordSchema,
+      publicKey: publicKeySchema,
+      serverName: z.string().min(1).max(64).optional()
+    })
+    .parse(req.body)
+  const nick = normalizeNick(body.nick)
+  const invalid = validateNewIdentity({ nick, password: body.password, publicKey: body.publicKey })
+  if (invalid) return rep.code(400).send(invalid)
+  const server = await checkServerPassword(body.serverPassword, { createIfMissing: true, serverName: body.serverName })
+  if ("error" in server) return rep.code(server.status).send(server.error)
+  if (isNickTaken(server.serverId, nick)) return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
+  const clientId = randomUUID()
+  const hash = await bcrypt.hash(body.password, 10)
+  try {
+    db.prepare(
+      "INSERT INTO member_credentials(server_id, client_id, nick, nick_key, password_hash) VALUES (?, ?, ?, ?, ?)"
+    ).run(server.serverId, clientId, nick, nickKey(nick), hash)
+  } catch {
+    return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
+  }
+  const certificate = issueCertificate(server.serverId, clientId, body.publicKey)
+  return rep.code(201).send({ serverId: server.serverId, clientId, nick, certificate })
+})
+
+/** Protects a profile created before certificates existed; keeps its nick, messages and history. */
+app.post("/v1/auth/claim", async (req, rep) => {
+  const body = z
+    .object({
+      serverPassword: z.string().min(1).max(256),
+      clientId: z.string().min(3).max(128),
+      password: passwordSchema,
+      publicKey: publicKeySchema,
+      nick: nickSchema.optional()
+    })
+    .parse(req.body)
+  const server = await checkServerPassword(body.serverPassword, { createIfMissing: false })
+  if ("error" in server) return rep.code(server.status).send(server.error)
+  const member = db
+    .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
+    .get(server.serverId, body.clientId) as { display_name: string } | undefined
+  if (!member) return rep.code(404).send({ message: "profile not found on this server", code: "member_not_found" })
+  if (getCredentials(server.serverId, body.clientId)) {
+    return rep.code(409).send({ message: "this profile is already protected", code: "profile_protected" })
+  }
+  const nick = normalizeNick(body.nick ?? member.display_name)
+  const invalid = validateNewIdentity({ nick, password: body.password, publicKey: body.publicKey })
+  if (invalid) return rep.code(400).send(invalid)
+  if (isNickTaken(server.serverId, nick, body.clientId)) {
+    return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
+  }
+  const hash = await bcrypt.hash(body.password, 10)
+  try {
+    db.prepare(
+      "INSERT INTO member_credentials(server_id, client_id, nick, nick_key, password_hash) VALUES (?, ?, ?, ?, ?)"
+    ).run(server.serverId, body.clientId, nick, nickKey(nick), hash)
+  } catch {
+    return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
+  }
+  db.prepare("UPDATE server_members SET display_name = ?, updated_at = datetime('now') WHERE server_id = ? AND client_id = ?").run(
+    nick,
+    server.serverId,
+    body.clientId
+  )
+  // Client ids were visible to everyone, so whoever claims one must not inherit its roles.
+  // An admin gets the role back by signing in with the superuser password.
+  db.prepare("DELETE FROM member_roles WHERE server_id = ? AND client_id = ?").run(server.serverId, body.clientId)
+  const certificate = issueCertificate(server.serverId, body.clientId, body.publicKey)
+  return rep.code(201).send({ serverId: server.serverId, clientId: body.clientId, nick, certificate })
+})
+
+app.post("/v1/auth/challenge", async (req, rep) => {
+  const body = z.object({ certId: z.string().min(1).max(64) }).parse(req.body)
+  // Issued for any id, so the endpoint does not reveal which certificates exist.
+  return rep.send(loginChallenges.issue(body.certId))
+})
+
+app.post("/v1/auth/login", async (req, rep) => {
+  const body = z
+    .object({
+      certId: z.string().min(1).max(64),
+      nonce: z.string().min(1).max(128),
+      signature: z.string().min(1).max(128),
+      nick: nickSchema,
+      password: passwordSchema,
+      superuserPassword: z.string().min(1).max(256).optional()
+    })
+    .parse(req.body)
+  const invalid = { message: "invalid certificate, nick or password", code: "invalid_credentials" }
+  if (!loginChallenges.consume(body.nonce, body.certId)) {
+    return rep.code(401).send({ message: "login challenge expired, try again", code: "challenge_expired" })
+  }
+  const cert = db.prepare("SELECT * FROM member_certificates WHERE id = ?").get(body.certId) as CertificateRow | undefined
+  const publicKey = cert ? parseEd25519PublicKey(cert.public_key) : null
+  if (!cert || !publicKey || !verifyEd25519(publicKey, loginSigningInput(cert.server_id, cert.id, body.nonce), body.signature)) {
+    return rep.code(401).send(invalid)
+  }
+  if (cert.revoked_at) return rep.code(403).send({ message: "this certificate has been revoked", code: "cert_revoked" })
+  const limiterKey = `${cert.server_id}:${nickKey(body.nick)}`
+  if (loginFailuresByNick.blocked(limiterKey)) {
+    return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
+  }
+  const creds = getCredentials(cert.server_id, cert.client_id)
+  const passwordOk = creds ? await bcrypt.compare(body.password, creds.password_hash) : false
+  if (!creds || creds.nick_key !== nickKey(body.nick) || !passwordOk) {
+    loginFailuresByNick.record(limiterKey)
+    return rep.code(401).send(invalid)
+  }
+  loginFailuresByNick.reset(limiterKey)
+  db.prepare("UPDATE member_certificates SET last_used_at = datetime('now') WHERE id = ?").run(cert.id)
+  const server = db.prepare("SELECT id, name FROM servers WHERE id = ?").get(cert.server_id) as
+    | { id: string; name: string }
+    | undefined
+  if (!server) return rep.code(404).send({ message: "server not found", code: "server_not_found" })
+  ensureDefaultRooms(server.id)
+  const joined = await issueJoinForServer({
+    serverId: server.id,
+    clientId: cert.client_id,
+    displayName: creds.nick,
+    superuserPassword: body.superuserPassword,
+    certId: cert.id
+  })
+  return rep.send({ ...joined, serverName: server.name, bannerUrl: getServerBannerUrl(server.id), certId: cert.id })
 })
 
 app.addHook("preHandler", async (req, rep) => {
@@ -776,6 +1098,9 @@ app.addHook("preHandler", async (req, rep) => {
   if (!token) return rep.code(401).send({ message: "missing auth token" })
   const payload = verifyToken(token, config.tokenSecret)
   if (!payload || payload.sub !== "auth") return rep.code(401).send({ message: "invalid token" })
+  if (payload.certId && !isCertificateActive(payload.certId)) {
+    return rep.code(401).send({ message: "certificate revoked", code: "cert_revoked" })
+  }
   ;(req as any).auth = payload
 })
 
@@ -787,6 +1112,96 @@ function requirePermission(rep: any, serverId: string, clientId: string, permiss
   }
   return info
 }
+
+app.get("/v1/servers/:serverId/me/security", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string; certId?: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const creds = getCredentials(params.serverId, auth.clientId)
+  return rep.send({
+    protected: Boolean(creds),
+    nick: creds?.nick ?? null,
+    currentCertId: auth.certId ?? null,
+    certificates: listCertificates(params.serverId, auth.clientId)
+  })
+})
+
+app.post("/v1/servers/:serverId/me/certificates/:certId/revoke", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), certId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!revokeCertificate(params.serverId, auth.clientId, params.certId, auth.clientId)) {
+    return rep.code(404).send({ message: "certificate not found or already revoked" })
+  }
+  return rep.send({ ok: true })
+})
+
+app.post("/v1/servers/:serverId/me/password", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const body = z.object({ currentPassword: passwordSchema, newPassword: passwordSchema }).parse(req.body)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const creds = getCredentials(params.serverId, auth.clientId)
+  if (!creds) return rep.code(409).send({ message: "this profile has no password yet", code: "profile_not_protected" })
+  const limiterKey = `${params.serverId}:${creds.nick_key}`
+  if (loginFailuresByNick.blocked(limiterKey)) {
+    return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
+  }
+  if (!(await bcrypt.compare(body.currentPassword, creds.password_hash))) {
+    loginFailuresByNick.record(limiterKey)
+    return rep.code(401).send({ message: "current password is wrong", code: "invalid_credentials" })
+  }
+  if (!isValidPassword(body.newPassword)) {
+    return rep.code(400).send({ message: "password must be at least 8 characters", code: "weak_password" })
+  }
+  const hash = await bcrypt.hash(body.newPassword, 10)
+  db.prepare("UPDATE member_credentials SET password_hash = ?, updated_at = datetime('now') WHERE server_id = ? AND client_id = ?").run(
+    hash,
+    params.serverId,
+    auth.clientId
+  )
+  return rep.send({ ok: true })
+})
+
+app.get("/v1/servers/:serverId/members/:clientId/security", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), clientId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
+  const creds = getCredentials(params.serverId, params.clientId)
+  return rep.send({
+    protected: Boolean(creds),
+    nick: creds?.nick ?? null,
+    certificates: listCertificates(params.serverId, params.clientId)
+  })
+})
+
+app.post("/v1/servers/:serverId/members/:clientId/certificates/:certId/revoke", async (req, rep) => {
+  const params = z
+    .object({ serverId: z.string().min(1), clientId: z.string().min(1), certId: z.string().min(1) })
+    .parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
+  if (!revokeCertificate(params.serverId, params.clientId, params.certId, auth.clientId)) {
+    return rep.code(404).send({ message: "certificate not found or already revoked" })
+  }
+  return rep.send({ ok: true })
+})
+
+/** Lost device and password: drop the member's password and certificates so they can claim the profile again. */
+app.post("/v1/servers/:serverId/members/:clientId/reset-credentials", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), clientId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
+  db.prepare(
+    "UPDATE member_certificates SET revoked_at = datetime('now'), revoked_by = ? WHERE server_id = ? AND client_id = ? AND revoked_at IS NULL"
+  ).run(auth.clientId, params.serverId, params.clientId)
+  db.prepare("DELETE FROM member_credentials WHERE server_id = ? AND client_id = ?").run(params.serverId, params.clientId)
+  closeSessions(params.serverId, params.clientId)
+  return rep.send({ ok: true })
+})
 
 app.get("/v1/servers/:serverId", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
@@ -1211,12 +1626,13 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   if (!token) return socket.close(4001, "missing token")
   const auth = verifyToken(token, config.tokenSecret)
   if (!auth || auth.sub !== "auth") return socket.close(4002, "invalid token")
+  if (auth.certId && !isCertificateActive(auth.certId)) return socket.close(4003, "certificate revoked")
 
   const key = auth.serverId
   const set = clients.get(key) ?? new Set<WebSocket>()
   set.add(socket)
   clients.set(key, set)
-  wsClientMeta.set(socket, { serverId: auth.serverId, clientId: auth.clientId })
+  wsClientMeta.set(socket, { serverId: auth.serverId, clientId: auth.clientId, certId: auth.certId })
   const sockKey = clientSocketsKey(auth.serverId, auth.clientId)
   const sockSet = clientSockets.get(sockKey) ?? new Set<WebSocket>()
   sockSet.add(socket)

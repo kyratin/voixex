@@ -6,6 +6,8 @@ type Payload = {
   clientId: string
   displayName?: string
   mediaSeed?: string
+  /** Device certificate the session was opened with; checked against revocation on every request. */
+  certId?: string
   exp: number
 }
 

@@ -139,6 +139,34 @@ export function initDb(dbPath: string) {
     CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id ON message_attachments(message_id);
     CREATE INDEX IF NOT EXISTS idx_message_attachments_server_channel ON message_attachments(server_id, channel_id, created_at DESC);
 
+    -- Member authentication: personal password + device certificates (see auth.ts).
+    CREATE TABLE IF NOT EXISTS server_secrets (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS member_credentials (
+      server_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      nick TEXT NOT NULL,
+      nick_key TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY(server_id, client_id),
+      UNIQUE(server_id, nick_key)
+    );
+    CREATE TABLE IF NOT EXISTS member_certificates (
+      id TEXT PRIMARY KEY,
+      server_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      public_key TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      last_used_at TEXT NULL,
+      revoked_at TEXT NULL,
+      revoked_by TEXT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_member_certificates_client ON member_certificates(server_id, client_id);
+
     -- Backward compatibility for older DB file: ensure display_name exists in member_state.
     -- If it exists, keep it unused by new code.
   `)
