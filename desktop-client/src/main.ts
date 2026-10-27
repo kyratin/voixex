@@ -133,6 +133,12 @@ if (isLegacyWindows10()) {
   app.commandLine.appendSwitch("disable-gpu-compositing")
 }
 app.commandLine.appendSwitch("disable-renderer-backgrounding")
+// macOS: Electron documents system-audio loopback for screen sharing as Windows-only; these
+// Chromium features route it through ScreenCaptureKit / the Core Audio tap on recent macOS.
+// Unknown features are ignored, and the renderer warns when no audio track arrives.
+if (process.platform === "darwin") {
+  app.commandLine.appendSwitch("enable-features", "MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride,MacCatapLoopbackAudioForScreenShare")
+}
 
 // Self-hosted API often uses HTTPS with a private/self-signed cert. Without this, fetch/wss fail with "Failed to fetch".
 app.on("certificate-error", (event, _webContents, _url, _error, _certificate, callback) => {

@@ -159,6 +159,9 @@ type ConnectionPrefs = {
 }
 
 const CONNECTION_PREFS_KEY = "voixex-connection-prefs"
+/** New key: the old one stored "off" for everyone, because the switch used to default to off. */
+const SCREEN_AUDIO_KEY = "voixex-screen-with-audio-v2"
+
 /** Phone layout: narrow screens, and phones held sideways (short and touch-only). */
 const NARROW_QUERY = "(max-width: 767px), (pointer: coarse) and (max-height: 520px)"
 
@@ -491,7 +494,8 @@ export default function VoIPApp() {
   const [screenResolution, setScreenResolution] = useState("1280x720")
   const [screenFps, setScreenFps] = useState(30)
   const [screenBitrateKbps, setScreenBitrateKbps] = useState(3500)
-  const [screenShareWithAudio, setScreenShareWithAudio] = useState(false)
+  // Stream sound on by default, like Discord.
+  const [screenShareWithAudio, setScreenShareWithAudio] = useState(true)
   const screenShareWithAudioRef = useRef(false)
   const [showingStreamWindow, setShowingStreamWindow] = useState(false)
   const [streamVideoFullscreen, setStreamVideoFullscreen] = useState(false)
@@ -2344,11 +2348,11 @@ export default function VoIPApp() {
     const savedRes = localStorage.getItem("voixex-screen-resolution")
     const savedFps = Number(localStorage.getItem("voixex-screen-fps") || "30")
     const savedBitrate = Number(localStorage.getItem("voixex-screen-bitrate-kbps") || "3500")
-    const savedWithAudio = localStorage.getItem("voixex-screen-with-audio")
+    const savedWithAudio = localStorage.getItem(SCREEN_AUDIO_KEY)
     if (savedRes && /^\d+x\d+$/.test(savedRes)) setScreenResolution(savedRes)
     if (Number.isFinite(savedFps) && savedFps > 0) setScreenFps(savedFps)
     if (Number.isFinite(savedBitrate) && savedBitrate > 0) setScreenBitrateKbps(savedBitrate)
-    if (savedWithAudio === "1") setScreenShareWithAudio(true)
+    if (savedWithAudio === "0") setScreenShareWithAudio(false)
   }, [])
 
   useEffect(() => {
@@ -2364,7 +2368,7 @@ export default function VoIPApp() {
   }, [screenBitrateKbps])
 
   useEffect(() => {
-    localStorage.setItem("voixex-screen-with-audio", screenShareWithAudio ? "1" : "0")
+    localStorage.setItem(SCREEN_AUDIO_KEY, screenShareWithAudio ? "1" : "0")
   }, [screenShareWithAudio])
 
   useEffect(() => {
@@ -3080,10 +3084,15 @@ export default function VoIPApp() {
       width: { ideal: targetWidth, max: targetWidth },
       height: { ideal: targetHeight, max: targetHeight }
     }
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: videoConstraints,
-      audio: wantAudio
-    })
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: wantAudio })
+    } catch (e) {
+      // System audio capture is not available everywhere: share the picture without it.
+      if (!wantAudio) throw e
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: false })
+    }
+    if (wantAudio && stream.getAudioTracks().length === 0) toast.warning(t("notices.screenAudioUnavailable"))
     if (!wantAudio) {
       for (const track of stream.getAudioTracks()) {
         track.stop()

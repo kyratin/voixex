@@ -317,6 +317,7 @@ export const es: TranslationDict = {
     threshold: "Umbral: {label}"
   },
   notices: {
+    screenAudioUnavailable: "No se pudo capturar el audio del sistema en este equipo: verán la pantalla sin sonido.",
     serverTooOldForPhoneShare: "Compartir desde el teléfono requiere un servidor más reciente (0.6.2 o superior).",
     channelBannerSaved: "Banner del canal guardado",
     fileUploaded: "Archivo subido",

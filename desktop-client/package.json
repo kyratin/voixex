@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -91,7 +91,8 @@
       "gatekeeperAssess": false,
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Voixex uses the microphone for voice chat in channels.",
-        "NSScreenCaptureUsageDescription": "Voixex needs screen capture permission to share your display with others."
+        "NSScreenCaptureUsageDescription": "Voixex needs screen capture permission to share your display with others.",
+        "NSAudioCaptureUsageDescription": "Voixex captures system audio so viewers hear your screen share."
       }
     },
     "dmg": {

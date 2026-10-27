@@ -318,6 +318,7 @@ export const ru: TranslationDict = {
     threshold: "Порог: {label}"
   },
   notices: {
+    screenAudioUnavailable: "Системный звук на этом компьютере захватить не удалось: зрители увидят экран без звука.",
     serverTooOldForPhoneShare: "Для демонстрации экрана с телефона нужен сервер новее (0.6.2 или выше).",
     channelBannerSaved: "Баннер канала сохранён",
     fileUploaded: "Файл загружен",

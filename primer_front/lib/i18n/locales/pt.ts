@@ -317,6 +317,7 @@ export const pt: TranslationDict = {
     threshold: "Limiar: {label}"
   },
   notices: {
+    screenAudioUnavailable: "Não foi possível capturar o áudio do sistema neste computador: verão a tela sem som.",
     serverTooOldForPhoneShare: "Compartilhar do celular requer um servidor mais novo (0.6.2 ou superior).",
     channelBannerSaved: "Banner do canal guardado",
     fileUploaded: "Ficheiro enviado",
