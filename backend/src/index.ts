@@ -1163,6 +1163,11 @@ app.post("/v1/auth/login", async (req, rep) => {
     return rep.code(403).send({ message: "this profile signs in with nick and password", code: "auth_mode_mismatch", authMode: mode })
   }
   if (modeNeedsPassword(mode)) {
+    // The signature already proved possession of the certificate, so telling its holder that this
+    // level also needs nick + password reveals nothing new (and is not a failed attempt).
+    if (!body.nick && !body.password) {
+      return rep.code(401).send({ message: "this profile also needs nick and password", code: "password_required", authMode: mode })
+    }
     const limiterKey = `${cert.server_id}:${nickKey(body.nick ?? "")}`
     if (loginFailuresByNick.blocked(limiterKey)) {
       return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
