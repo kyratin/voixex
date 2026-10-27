@@ -76,7 +76,8 @@ export const en = {
     voiceCategory: "VOICE",
     screenSharing: "Screen sharing",
     watchingStream: "Watching stream",
-    backToServers: "My servers"
+    backToServers: "My servers",
+    serverSettings: "Server settings"
   },
   userPanel: {
     voiceConnected: "Voice connected",
@@ -128,7 +129,13 @@ export const en = {
     webrtc: "WebRTC",
     popupStreaming: "Streaming: {name}",
     popupViewers: "Viewers: {names}",
-    popupNoFrame: "No active stream frame."
+    popupNoFrame: "No active stream frame.",
+    viewQuality: "Viewing quality",
+    qualityOriginal: "Original",
+    viewQualityHint: "Lower quality uses less bandwidth if the stream stutters.",
+    viewQualityUnavailable: "Lower quality is available when the stream also goes through WebRTC (LiveKit).",
+    restartHint: "Changes restart your stream automatically.",
+    streamRestarted: "Stream restarted with the new settings"
   },
   chat: {
     toggleMembers: "Toggle member list",
@@ -143,16 +150,56 @@ export const en = {
     justNow: "just now",
     minutesAgo: "{n}m ago",
     hoursAgo: "{n}h ago",
-    daysAgo: "{n}d ago"
+    daysAgo: "{n}d ago",
+    today: "Today",
+    yesterday: "Yesterday",
+    inputHint: "Enter — send · Shift + Enter — new line"
   },
   members: {
+    admins: "Admins",
     title: "Members",
     online: "Online",
-    offline: "Offline"
+    offline: "Offline",
+    owner: "Owner",
+    status_online: "Online",
+    status_idle: "Away",
+    status_dnd: "Do not disturb",
+    status_offline: "Offline"
+  },
+  roles: {
+    title: "Admins",
+    intro: "Admins can change server settings, channels, the minimum protection level and other members' roles.",
+    empty: "No registered members yet.",
+    admin: "Admin",
+    you: "you",
+    lastAdmin: "Last admin — cannot be removed",
+    superuserHint: "Signing in with the superuser password always grants admin as well."
+  },
+  deviceCerts: {
+    notIssued: "This certificate was never issued by a server.",
+    needAddress: "The server address for this certificate is unknown: open “Different server address” and enter it.",
+    eyebrow: "This device",
+    title: "Saved certificates",
+    intro: "Certificates created or imported on this computer. Private keys are kept in the system keychain and never leave the device unless you export them.",
+    empty: "No certificates on this device yet. One is created when you join a server with protection level 2 or 3.",
+    export: "Export",
+    inUse: "In use",
+    unused: "Not linked",
+    issued: "issued {date}",
+    pending: "not issued yet",
+    remove: "Delete",
+    removeConfirm: "Delete this certificate from the device?",
+    removeInUse: "A saved server uses this certificate. Without it you will need your nick and password (level 2 profiles cannot sign in at all until you import it again).",
+    repeatPassphrase: "Repeat file password",
+    saveFile: "Save file",
+    unknownNick: "Profile",
+    unknownServer: "unknown server"
   },
   settings: {
+    serverTitle: "Server settings — {name}",
+    serverDescription: "Only admins see this. Changes apply to everyone on the server.",
     title: "Settings",
-    description: "Voice, keybinds, language, and server administration.",
+    description: "Voice, keybinds, language and your profile on this server.",
     tabLanguage: "Language",
     tabVoice: "Voice & Video",
     tabKeybinds: "Keybinds",
@@ -311,6 +358,8 @@ export const en = {
     levelRaised: "The server now requires a higher protection level. Sign in again to raise yours."
   },
   home: {
+    importFromFile: "From a file…",
+    certificateStorage: "Certificate storage",
     deviceSettings: "Device settings",
     title: "My servers",
     subtitle: "Each server is its own closed space. Nothing is visible until you sign in.",
@@ -324,9 +373,16 @@ export const en = {
     online: "Online",
     offline: "Not responding",
     checking: "Checking…",
-    signInAsAdmin: "Sign in with superuser password"
+    signInAsAdmin: "Sign in with superuser password",
+    tagline: "Closed spaces for your people",
+    eyebrow: "Connections",
+    levelChip: "Level {level}",
+    closedTitle: "Your servers are closed.",
+    closedText: "Nothing about them is visible until you sign in. Add a server address or import a certificate to start."
   },
   access: {
+    fromStorage: "From storage",
+    storedChosen: "The certificate is already on this device: no file password needed.",
     passwordTooShort: "Password must be at least {n} characters",
     passwordsDiffer: "Passwords do not match",
     nickLength: "Nick must be 2–32 characters",
@@ -380,6 +436,7 @@ export const en = {
     levelNowPasswordOnly: "This profile now signs in with nick and password on this server (changed on another device)."
   },
   authErrors: {
+    lastAdmin: "The server needs at least one admin. Make someone else admin first.",
     invalidCredentials: "Wrong nick or password for this certificate.",
     certRevoked: "The certificate of this device has been revoked. Import another certificate or ask the server admin.",
     tooManyAttempts: "Too many attempts. Wait a few minutes and try again.",
@@ -464,7 +521,8 @@ export const en = {
     policyHint: "Members below this level cannot enter until they raise their own level. Profiles not protected yet (server password only) count as level 0. Members connected below it are disconnected.",
     policyNone: "No requirement",
     policyAtLeast: "Level {level}+ ({name})",
-    policySaved: "Saved"
+    policySaved: "Saved",
+    sidebarShort: "Protection · level {level}"
   },
   time: {
     months: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const

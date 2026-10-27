@@ -1,8 +1,10 @@
 "use client"
 
 import { cn } from "@/lib/utils"
+import { Volume2, X } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useI18n } from "@/lib/i18n/provider"
 import { avatarGradient } from "@/lib/avatar-colors"
 
@@ -20,149 +22,133 @@ export interface Member {
 interface MemberListProps {
   members: Member[]
   roles?: { id: string; name: string; color?: string }[]
+  /** Hides the list (header close button). */
+  onClose?: () => void
+  /** Members currently in a voice channel / speaking, for the voice icon and avatar ring. */
+  inVoiceIds?: string[]
+  speakingIds?: string[]
 }
 
-const statusColors: Record<string, string> = {
+const statusColors: Record<Member["status"], string> = {
   online: "bg-accent",
   idle: "bg-amber-400",
   dnd: "bg-destructive",
   offline: "bg-muted-foreground"
 }
 
-export function MemberList({ members, roles = [] }: MemberListProps) {
+export function MemberList({ members, roles = [], onClose, inVoiceIds = [], speakingIds = [] }: MemberListProps) {
   const { t } = useI18n()
   const statusOrder: Record<string, number> = { online: 0, idle: 1, dnd: 2, offline: 3 }
-  const sortByStatusThenName = (a: Member, b: Member) => {
-    const byStatus = statusOrder[a.status] - statusOrder[b.status]
-    if (byStatus !== 0) return byStatus
-    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-    if (byName !== 0) return byName
-    return a.id.localeCompare(b.id)
-  }
+  const byName = (a: Member, b: Member) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id)
+  const sortByStatusThenName = (a: Member, b: Member) => statusOrder[a.status] - statusOrder[b.status] || byName(a, b)
 
-  const groupedMembers: Record<string, Member[]> = {}
-  const onlineMembers = members.filter(m => m.status !== "offline")
-  const offlineMembers = members.filter(m => m.status === "offline")
+  const onlineMembers = members.filter((m) => m.status !== "offline")
+  const offlineMembers = [...members.filter((m) => m.status === "offline")].sort(byName)
+  const roleGroups = roles
+    .map((role) => ({ role, members: onlineMembers.filter((m) => m.roles?.includes(role.id)).sort(sortByStatusThenName) }))
+    .filter((g) => g.members.length > 0)
+  const noRoleMembers = onlineMembers.filter((m) => !m.roles || m.roles.length === 0).sort(sortByStatusThenName)
+  const inVoice = new Set(inVoiceIds)
+  const speaking = new Set(speakingIds)
 
-  roles.forEach(role => {
-    groupedMembers[role.id] = onlineMembers
-      .filter(m => m.roles?.includes(role.id))
-      .sort(sortByStatusThenName)
-  })
-
-  const noRoleMembers = onlineMembers
-    .filter(m => !m.roles || m.roles.length === 0)
-    .sort(sortByStatusThenName)
-
-  const sortedOfflineMembers = [...offlineMembers].sort((a, b) => {
-    const byName = a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-    if (byName !== 0) return byName
-    return a.id.localeCompare(b.id)
-  })
+  const group = (key: string, label: string, list: Member[], color?: string) => (
+    <section key={key} className="mb-5">
+      <p className="mb-2 px-2 text-[11px] font-semibold text-muted-foreground" style={color ? { color } : undefined}>
+        {label} — {list.length}
+      </p>
+      <div className="space-y-0.5">
+        {list.map((member) => (
+          <MemberRow
+            key={member.id}
+            member={member}
+            roleName={roles.find((r) => member.roles?.includes(r.id))?.name}
+            inVoice={inVoice.has(member.id)}
+            speaking={speaking.has(member.id)}
+          />
+        ))}
+      </div>
+    </section>
+  )
 
   return (
-    <div className="flex h-full w-60 shrink-0 flex-col bg-card">
-      <div className="flex h-12 shrink-0 items-center px-4 shadow-[0_1px_0_rgba(0,0,0,0.35)]">
-        <span className="text-[15px] font-semibold text-foreground">{t("members.title")}</span>
+    <aside className="flex h-full w-60 shrink-0 flex-col bg-card">
+      <div className="flex shrink-0 items-center justify-between px-4 pb-3 pt-5">
+        <h2 className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+          {t("members.title")} — {members.length}
+        </h2>
+        {onClose ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label={t("voice.hideMembers")}
+                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="left">{t("voice.hideMembers")}</TooltipContent>
+          </Tooltip>
+        ) : null}
       </div>
-      
-      <ScrollArea className="flex-1">
-        <div className="px-2 pb-2 pt-4">
-          {roles.map(role => {
-            const roleMembers = groupedMembers[role.id] || []
-            if (roleMembers.length === 0) return null
 
-            return (
-              <div key={role.id} className="mb-4">
-                <div
-                  className="mb-1 px-2 text-sm font-semibold text-muted-foreground"
-                  style={role.color ? { color: role.color } : undefined}
-                >
-                  {role.name} — {roleMembers.length}
-                </div>
-                <div className="space-y-0.5">
-                  {roleMembers.map(member => (
-                    <MemberItem key={member.id} member={member} />
-                  ))}
-                </div>
-              </div>
-            )
-          })}
-
-          {noRoleMembers.length > 0 && (
-            <div className="mb-4">
-              <div className="mb-1 px-2 text-sm font-semibold text-muted-foreground">
-                {t("members.online")} — {noRoleMembers.length}
-              </div>
-              <div className="space-y-0.5">
-                {noRoleMembers.map(member => (
-                  <MemberItem key={member.id} member={member} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {sortedOfflineMembers.length > 0 && (
-            <div>
-              <div className="mb-1 px-2 text-sm font-semibold text-muted-foreground">
-                {t("members.offline")} — {sortedOfflineMembers.length}
-              </div>
-              <div className="space-y-0.5">
-                {sortedOfflineMembers.map(member => (
-                  <MemberItem key={member.id} member={member} isOffline />
-                ))}
-              </div>
-            </div>
-          )}
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="px-2 pb-4">
+          {roleGroups.map((g) => group(g.role.id, g.role.name, g.members, g.role.color))}
+          {noRoleMembers.length > 0 ? group("online", t("members.online"), noRoleMembers) : null}
+          {offlineMembers.length > 0 ? group("offline", t("members.offline"), offlineMembers) : null}
         </div>
       </ScrollArea>
-    </div>
+    </aside>
   )
 }
 
-interface MemberItemProps {
+function MemberRow({
+  member,
+  roleName,
+  inVoice,
+  speaking
+}: {
   member: Member
-  isOffline?: boolean
-}
-
-function MemberItem({ member, isOffline }: MemberItemProps) {
+  roleName?: string
+  inVoice: boolean
+  speaking: boolean
+}) {
+  const { t } = useI18n()
+  const offline = member.status === "offline"
+  const status = t(`members.status_${member.status}`)
+  const subline = member.activity || (member.isOwner ? t("members.owner") : roleName ? `${roleName} · ${status}` : status)
   return (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent/60",
-        isOffline && "opacity-35 hover:opacity-100"
+        "flex items-center gap-3 rounded-lg px-2 py-2 transition-colors",
+        offline ? "opacity-40 hover:opacity-100" : "hover:bg-sidebar-accent"
       )}
     >
       <div className="relative shrink-0">
         <div
-          className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold text-white"
+          className={cn(
+            "flex size-8 items-center justify-center rounded-full text-xs font-bold text-white transition-shadow",
+            speaking && "ring-2 ring-accent ring-offset-2 ring-offset-card"
+          )}
           style={{ background: avatarGradient(member.id || member.name) }}
         >
           {member.avatar}
         </div>
-        {!isOffline && (
-          <div className={cn(
-            "absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full ring-[3px] ring-card",
-            statusColors[member.status]
-          )} />
-        )}
+        {!offline ? (
+          <span className={cn("absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full ring-2 ring-card", statusColors[member.status])} />
+        ) : null}
       </div>
-      <div className="flex-1 min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className={cn("truncate text-[15px] font-medium", isOffline ? "text-muted-foreground" : "text-foreground")}>
-            {member.name}
-          </span>
-          {member.isOwner && (
-            <span className="text-yellow-500 text-xs">&#9733;</span>
-          )}
-          {member.isBot && (
-            <Badge variant="outline" className="h-4 px-1 text-[9px]">BOT</Badge>
-          )}
+          <p className={cn("truncate text-sm font-medium", offline ? "text-muted-foreground" : "text-foreground")}>{member.name}</p>
+          {member.isBot ? <Badge variant="outline" className="h-4 px-1 text-[9px]">BOT</Badge> : null}
         </div>
-        {member.activity && (
-          <div className="truncate text-[11px] text-muted-foreground">{member.activity}</div>
-        )}
+        <p className="truncate text-[10px] text-muted-foreground">{subline}</p>
       </div>
+      {inVoice ? <Volume2 className="h-4 w-4 shrink-0 text-accent" aria-label={t("sidebar.inVoiceChannel")} /> : null}
     </div>
   )
 }

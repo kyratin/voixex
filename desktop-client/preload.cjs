@@ -45,10 +45,14 @@ const voixexIdentity = {
   get: (ref) => ipcRenderer.invoke("identity:get", ref),
   sign: (ref, message) => ipcRenderer.invoke("identity:sign", ref, message),
   remove: (ref) => ipcRenderer.invoke("identity:remove", ref),
+  list: () => ipcRenderer.invoke("identity:list"),
+  setMeta: (ref, meta) => ipcRenderer.invoke("identity:setMeta", ref, meta),
   exportToFile: (ref, passphrase, server) => ipcRenderer.invoke("identity:export", ref, passphrase, server),
   pickImportFile: () => ipcRenderer.invoke("identity:pickImportFile"),
   importFromFile: (contents, passphrase) => ipcRenderer.invoke("identity:import", contents, passphrase)
 }
 
 contextBridge.exposeInMainWorld("electronVoice", electronVoice)
+/** Lets the UI draw its own title bar where the system one is hidden (Windows/Linux). */
+contextBridge.exposeInMainWorld("voixexWindow", { platform: process.platform, customTitleBar: true })
 contextBridge.exposeInMainWorld("voixexIdentity", voixexIdentity)

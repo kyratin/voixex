@@ -7,7 +7,9 @@ import {
   RemoteTrackPublication,
   Room,
   RoomEvent,
-  Track
+  Track,
+  VideoPreset,
+  VideoQuality
 } from "livekit-client"
 
 export type WebRtcMediaToken = {
@@ -15,6 +17,9 @@ export type WebRtcMediaToken = {
   token: string
   roomName: string
 }
+
+/** Viewer-selected screen share quality: the publisher's original, or a smaller simulcast layer. */
+export type ScreenViewQuality = "high" | "medium" | "low"
 
 export type ScreenPublishOptions = {
   fps?: number
@@ -42,6 +47,10 @@ export class WebRtcMediaSession {
   private peerVoiceVolumeByIdentity = new Map<string, number>()
   private screenAudioElements = new Set<HTMLMediaElement>()
   private remoteScreenTrack: RemoteTrack | null = null
+  private remoteScreenPublication: RemoteTrackPublication | null = null
+  /** Identity of the participant whose screen track is subscribed. */
+  private remoteScreenIdentity: string | null = null
+  private screenViewQuality: ScreenViewQuality = "high"
   private remoteScreenVideoEl: HTMLVideoElement | null = null
   private remoteScreenPopupEl: HTMLVideoElement | null = null
   private screenAudioContainer: HTMLElement | null = null
@@ -70,7 +79,8 @@ export class WebRtcMediaSession {
     const room = new Room({
       // Fixed screen quality on LiveKit fallback; legacy WS/MSE is preferred for viewers.
       adaptiveStream: false,
-      dynacast: false
+      // The sharer stops encoding simulcast layers nobody is watching, saving its uplink.
+      dynacast: true
     })
     room
       .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
@@ -109,6 +119,11 @@ export class WebRtcMediaSession {
       el.muted = true
       void el.play().catch(() => {})
     }
+  }
+
+  /** Who is sharing the currently subscribed screen track (stays subscribed while the viewer hides the stream). */
+  get remoteScreenSharer(): string | null {
+    return this.remoteScreenTrack ? this.remoteScreenIdentity : null
   }
 
   /** Re-attach an existing remote screen track (e.g. after rejoin or video element remount). */
@@ -272,9 +287,10 @@ export class WebRtcMediaSession {
     await this.applyOutputDeviceToElements()
   }
 
-  async publishScreenStream(stream: MediaStream, encoding?: ScreenPublishOptions) {
+  /** Returns true when the screen video reached LiveKit (viewers can watch without the WS relay). */
+  async publishScreenStream(stream: MediaStream, encoding?: ScreenPublishOptions): Promise<boolean> {
     const room = this.room
-    if (!room) return
+    if (!room || !this.live) return false
     await this.stopScreenShare()
     const published: LocalTrack[] = []
     const video = stream.getVideoTracks()[0]
@@ -283,13 +299,24 @@ export class WebRtcMediaSession {
       const track = new LocalVideoTrack(video)
       const maxBitrate = Math.max(600_000, Math.min(10_000_000, (encoding?.bitrateKbps ?? 3500) * 1000))
       const maxFramerate = Math.max(8, Math.min(60, encoding?.fps ?? 30))
+      // Smaller simulcast layers (lowest first, as LiveKit expects) let each viewer pick a lower
+      // quality when the stream stutters; the top layer is the captured original.
+      const settings = video.getSettings()
+      const height = settings.height ?? 1080
+      const width = settings.width ?? Math.round((height * 16) / 9)
+      const layer = (targetHeight: number, bitrate: number, fps: number) =>
+        new VideoPreset(Math.round((width * targetHeight) / height), targetHeight, Math.min(bitrate, maxBitrate), Math.min(fps, maxFramerate))
+      const layers: VideoPreset[] = []
+      if (height > 360) layers.push(layer(360, 500_000, 15))
+      if (height > 720) layers.push(layer(720, 1_800_000, 30))
       await room.localParticipant.publishTrack(track, {
         source: Track.Source.ScreenShare,
-        simulcast: false,
+        simulcast: layers.length > 0,
         screenShareEncoding: {
           maxBitrate,
           maxFramerate
-        }
+        },
+        ...(layers.length > 0 ? { screenShareSimulcastLayers: layers } : {})
       })
       published.push(track)
     }
@@ -301,6 +328,23 @@ export class WebRtcMediaSession {
     }
     this.screenTracks = published
     this.opts.onScreenShareChange?.(true)
+    return Boolean(video)
+  }
+
+  /** Viewer side: which simulcast layer of the remote screen share to receive. */
+  setScreenViewQuality(quality: ScreenViewQuality) {
+    this.screenViewQuality = quality
+    this.applyScreenViewQuality()
+  }
+
+  private applyScreenViewQuality() {
+    const quality =
+      this.screenViewQuality === "low" ? VideoQuality.LOW : this.screenViewQuality === "medium" ? VideoQuality.MEDIUM : VideoQuality.HIGH
+    try {
+      this.remoteScreenPublication?.setVideoQuality(quality)
+    } catch {
+      // publication already gone
+    }
   }
 
   async stopScreenShare() {
@@ -411,6 +455,9 @@ export class WebRtcMediaSession {
       this.remoteScreenTrack.detach(this.remoteScreenVideoEl)
     }
     this.remoteScreenTrack = track
+    this.remoteScreenPublication = publication
+    this.remoteScreenIdentity = participantIdentity
+    this.applyScreenViewQuality()
     this.opts.onWatchingScreenChange?.(true)
     this.opts.onRemoteVideo?.(true, participantIdentity)
     if (this.remoteScreenVideoEl) {
@@ -437,6 +484,7 @@ export class WebRtcMediaSession {
         if (this.remoteScreenVideoEl) track.detach(this.remoteScreenVideoEl)
         this.unbindPopupScreenVideo()
         this.remoteScreenTrack = null
+        this.remoteScreenPublication = null
       }
       this.opts.onWatchingScreenChange?.(false)
       this.opts.onRemoteVideo?.(false, null)
@@ -449,6 +497,7 @@ export class WebRtcMediaSession {
     }
     this.unbindPopupScreenVideo()
     this.remoteScreenTrack = null
+    this.remoteScreenPublication = null
     this.remoteScreenVideoEl = null
     this.clearVoiceAudioElements()
     for (const element of this.remoteElements.values()) {

@@ -14,6 +14,9 @@ import {
   type UpgradeInput
 } from "@/components/voip/server-access-dialog"
 import { MemberSecurityAdmin, MySecurityPanel, ServerSecurityPolicy } from "@/components/voip/security-panel"
+import { RolesAdmin } from "@/components/voip/roles-admin"
+import { DeviceCertificates, type DeviceCertificate } from "@/components/voip/device-certificates"
+import type { VoixexStoredIdentity } from "@/types/electron-voice"
 import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-sidebar"
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
@@ -50,7 +53,8 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { MicLevelMeter, type MicLevelMeterSample } from "@/components/voip/mic-level-meter"
 import { ConnectServerDialog, type ConnectionDraft } from "@/components/voip/connect-server-dialog"
 import { LanguageSelector } from "@/components/voip/language-selector"
-import { VoiceChannelView } from "@/components/voip/voice-channel-view"
+import { VoiceStage } from "@/components/voip/voice-stage"
+import { TitleBar } from "@/components/voip/title-bar"
 import { useI18n } from "@/lib/i18n/provider"
 import { Headphones, Server } from "lucide-react"
 
@@ -77,6 +81,13 @@ function getBuildTimeConnectionDefaults() {
   const password = process.env.NEXT_PUBLIC_DEFAULT_SERVER_PASSWORD?.trim() ?? "1234"
   const udpPort = process.env.NEXT_PUBLIC_DEFAULT_UDP_PORT?.trim() ?? ""
   return { host, port, useHttps, password, udpPort }
+}
+
+/** "host:port" (as stored with a device certificate) → host and port. */
+function splitAddress(address: string): { apiHost: string; apiPort: string } {
+  const i = address.lastIndexOf(":")
+  if (i > 0 && /^\d+$/.test(address.slice(i + 1))) return { apiHost: address.slice(0, i), apiPort: address.slice(i + 1) }
+  return { apiHost: address, apiPort: "" }
 }
 
 function buildApiBaseUrl(host: string, port: string, useHttps: boolean): string {
@@ -133,6 +144,8 @@ type ConnectionPrefs = {
 }
 
 const CONNECTION_PREFS_KEY = "voixex-connection-prefs"
+/** Member-list group id for admins (the only role the UI manages). */
+const ADMIN_ROLE_GROUP = "admin"
 
 function loadGlobalConnectionPrefs(): ConnectionPrefs {
   try {
@@ -316,6 +329,19 @@ export default function VoIPApp() {
   const [peerVolumeRevision, setPeerVolumeRevision] = useState(0)
   const [myVoiceClientId, setMyVoiceClientId] = useState<string | null>(null)
   const [members, setMembers] = useState<Member[]>([])
+  const membersRefreshAtRef = useRef(0)
+  /** Keys stored on this device (desktop only); null = bridge unavailable or too old to list them. */
+  const [deviceIdentities, setDeviceIdentities] = useState<VoixexStoredIdentity[] | null>(null)
+  const [showCertStorage, setShowCertStorage] = useState(false)
+  const refreshDeviceIdentities = useCallback(async () => {
+    const list = window.voixexIdentity?.list
+    if (!list) return
+    try {
+      setDeviceIdentities(await list())
+    } catch {
+      setDeviceIdentities([])
+    }
+  }, [])
   const [status, setStatus] = useState("Disconnected")
   const [error, setError] = useState("")
   const [joining, setJoining] = useState(false)
@@ -373,7 +399,6 @@ export default function VoIPApp() {
   /** AGC often boosts constant hiss between words; prefer manual mic level + Opus. */
   const [autoGainControlEnabled, setAutoGainControlEnabled] = useState(false)
   /** Opus masks noise/hiss far better than raw PCM; PCM uplink sends full ADC noise floor (~768 kb/s). */
-  const [useOpusUplink, setUseOpusUplink] = useState(true)
   /** SpeexDSP preprocess in AudioWorklet; causes hollow "tube" sound — off by default, browser NS is better. */
   const [speexNoiseSuppressionEnabled, setSpeexNoiseSuppressionEnabled] = useState(false)
   const [monitorEnabled, setMonitorEnabled] = useState(false)
@@ -393,6 +418,8 @@ export default function VoIPApp() {
   const [playbackHighpassHz, setPlaybackHighpassHz] = useState(85)
   const [playbackLimiterEnabled, setPlaybackLimiterEnabled] = useState(false)
   const [micMeter, setMicMeter] = useState<MicLevelMeterSample | null>(null)
+  /** The meter is only shown in Voice settings; elsewhere its updates would just re-render the page. */
+  const micMeterVisibleRef = useRef(false)
   const [keybinds, setKeybinds] = useState<{ toggleMute: string | null; toggleDeafen: string | null; pushToTalk: string | null }>({
     toggleMute: null,
     toggleDeafen: null,
@@ -414,6 +441,12 @@ export default function VoIPApp() {
   const [screenImageUrl, setScreenImageUrl] = useState<string | null>(null)
   const [screenVideoUrl, setScreenVideoUrl] = useState<string | null>(null)
   const [hasRemoteWebRtcVideo, setHasRemoteWebRtcVideo] = useState(false)
+  /**
+   * Viewer's stream quality: "original" is the full stream (WebSocket relay or the top LiveKit
+   * layer); "medium"/"low" watch a smaller LiveKit simulcast layer and turn the WS relay off.
+   */
+  const [viewerStreamQuality, setViewerStreamQuality] = useState<"original" | "medium" | "low">("original")
+  const viewerStreamQualityRef = useRef(viewerStreamQuality)
   const [localScreenPreviewUrl, setLocalScreenPreviewUrl] = useState<string | null>(null)
   const [screenSources, setScreenSources] = useState<Array<{ id: string; name: string }>>([])
   const [selectedScreenSourceId, setSelectedScreenSourceId] = useState<string | null>(null)
@@ -439,6 +472,8 @@ export default function VoIPApp() {
   const screenShareTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const screenCaptureStreamRef = useRef<MediaStream | null>(null)
   const screenMediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const screenRecorderConfigRef = useRef<{ mimeType: string; bitsPerSecond: number } | null>(null)
+  const startScreenRecorderRef = useRef<() => void>(() => {})
   const webRtcAudioSinkRef = useRef<HTMLDivElement | null>(null)
   const webRtcSessionRef = useRef<WebRtcMediaSession | null>(null)
   /** serverId:roomId the current WebRtcMediaSession belongs to. */
@@ -693,8 +728,23 @@ export default function VoIPApp() {
           onlineByClientId.set(member.clientId, { clientId: member.clientId, displayName: member.displayName })
         }
       }
+      // Everyone registered on the server; presence decides online/offline. Profiles that came online
+      // after the list was loaded (just registered) trigger one reload.
+      const registered = u.registeredMembers
+      const known = new Set(registered.map((m) => m.clientId))
+      if (registered.length > 0 && [...onlineByClientId.keys()].some((id) => !known.has(id))) {
+        const now = Date.now()
+        if (now - membersRefreshAtRef.current > 5000) {
+          membersRefreshAtRef.current = now
+          void uiClient.refreshMembers()
+        }
+      }
+      const adminIds = new Set(registered.filter((m) => m.isAdmin).map((m) => m.clientId))
+      const merged = new Map<string, { clientId: string; displayName: string; online: boolean }>()
+      for (const m of registered) merged.set(m.clientId, { clientId: m.clientId, displayName: m.displayName, online: false })
+      for (const m of onlineByClientId.values()) merged.set(m.clientId, { ...m, online: true })
       setMembers(
-        Array.from(onlineByClientId.values())
+        Array.from(merged.values())
           .sort((a, b) => {
             const byName = a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" })
             if (byName !== 0) return byName
@@ -704,8 +754,8 @@ export default function VoIPApp() {
             id: m.clientId,
             name: m.displayName,
             avatar: m.displayName.slice(0, 1).toUpperCase(),
-            status: "online",
-            roles: []
+            status: m.online ? "online" : "offline",
+            roles: adminIds.has(m.clientId) ? [ADMIN_ROLE_GROUP] : []
           }))
       )
 
@@ -953,7 +1003,6 @@ export default function VoIPApp() {
         playbackHighpassEnabled?: boolean
         playbackHighpassHz?: number
         playbackLimiterEnabled?: boolean
-        useOpusUplink?: boolean
         speexNoiseSuppressionEnabled?: boolean
       }
       if (typeof parsed.micVolumePct === "number") setMicVolumePct(Math.max(0, Math.min(200, Math.round(parsed.micVolumePct))))
@@ -982,7 +1031,6 @@ export default function VoIPApp() {
       if (typeof parsed.gateFloorPct === "number") setGateFloorPct(Math.max(1, Math.min(50, Math.round(parsed.gateFloorPct))))
       // Playback DSP stays manual-only from Settings.
       // Do not auto-restore these toggles from old profiles/localStorage.
-      if (typeof parsed.useOpusUplink === "boolean") setUseOpusUplink(parsed.useOpusUplink)
       if (typeof parsed.speexNoiseSuppressionEnabled === "boolean") setSpeexNoiseSuppressionEnabled(parsed.speexNoiseSuppressionEnabled)
     } catch {
       // ignore broken localStorage payload
@@ -1010,7 +1058,6 @@ export default function VoIPApp() {
         playbackHighpassEnabled,
         playbackHighpassHz,
         playbackLimiterEnabled,
-        useOpusUplink,
         speexNoiseSuppressionEnabled
       })
     )
@@ -1032,7 +1079,6 @@ export default function VoIPApp() {
     playbackHighpassEnabled,
     playbackHighpassHz,
     playbackLimiterEnabled,
-    useOpusUplink,
     speexNoiseSuppressionEnabled
   ])
 
@@ -1254,7 +1300,7 @@ export default function VoIPApp() {
     if (active && participantIdentity) {
       setHasRemoteWebRtcVideo(true)
       setActiveScreenSharerName(resolveRosterDisplayName(participantIdentity))
-      const legacyActive = legacyStreamHasBufferedRef.current
+      const legacyActive = legacyStreamHasBufferedRef.current && viewerStreamQualityRef.current === "original"
       if (!legacyActive && screenVideoUrlRef.current) {
         resetLegacyStreamPlayback()
       }
@@ -1279,7 +1325,11 @@ export default function VoIPApp() {
     return Boolean(sbuf && sbuf.buffered.length > 0)
   }
 
-  const requestViewerStreamResync = (roomId: string, force = false) => {
+  /**
+   * fallback: this viewer needs the WebSocket stream. By default only when it has no LiveKit
+   * connection; with LiveKit the sharer is not asked to upload the video a second time.
+   */
+  const requestViewerStreamResync = (roomId: string, force = false, fallback = !webRtcSessionRef.current?.live) => {
     if (!roomId || !hasDesktopBridge || streamHiddenByUserRef.current) return
     const now = Date.now()
     const prev = lastViewerScreenResyncReqRef.current
@@ -1287,7 +1337,7 @@ export default function VoIPApp() {
     lastViewerScreenResyncReqRef.current = { room: roomId, at: now }
     pendingLegacyStreamResyncRef.current = true
     setStreamLoading(true)
-    getVoiceWsClientRef.current().requestScreenResync(roomId)
+    getVoiceWsClientRef.current().requestScreenResync(roomId, fallback)
   }
 
   const getStreamRoomSharerId = (roomId: string) => {
@@ -1673,6 +1723,8 @@ export default function VoIPApp() {
     return c.subscribeScreenVideoChunks((fromClientId, chunkBase64) => {
       const me = c.getMeState()
       if (me && fromClientId === me.clientId) return
+      // Watching a lower LiveKit layer: chunks still arriving from an older server are ignored.
+      if (viewerStreamQualityRef.current !== "original") return
       try {
         pushRemoteVideoChunkRef.current(decodeBytesBase64(chunkBase64))
       } catch {
@@ -1856,6 +1908,7 @@ export default function VoIPApp() {
   // Outside a voice channel the pipeline also runs while the Voice settings tab is open, so the mic
   // can be tested (level meter, monitor, volume sliders) without sending anything to the server.
   const micTestActive = hasDesktopBridge && showAppSettings && appSettingsTab === "voice" && !isInVoice
+  micMeterVisibleRef.current = showAppSettings && appSettingsTab === "voice"
   const voicePipelineMode: "voice" | "test" | null =
     hasDesktopBridge && isInVoice && currentVoiceChannel ? "voice" : micTestActive ? "test" : null
 
@@ -1976,8 +2029,8 @@ export default function VoIPApp() {
         const captureSinkNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
         const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
-          startMs: 220,
-          maxQueuedSec: 1.2
+          startMs: 60,
+          maxQueuedSec: 0.4
         })
         playbackWorklet.port.onmessage = (ev: MessageEvent) => {
           const d = ev.data as { type?: string; bufferedSamples?: number; underruns?: number; overflowDrops?: number }
@@ -2050,31 +2103,8 @@ export default function VoIPApp() {
         const frameSize = 960
         runtime.txResampleInput = new Float32Array(0)
         runtime.txResamplePos = 0
-        // In TCP mode we prefer raw PCM uplink to avoid additional codec artifacts:
-        // transport is already reliable and bandwidth is acceptable for desktop.
-        const shouldUseOpusUplink = useOpusUplink && voiceTransport !== "tcp"
-        let opusEncoder: unknown = null
-        if (sendsToServer && shouldUseOpusUplink && window.electronVoice?.sendOpusFrame) {
-          try {
-            const mod = await import("opusscript")
-            const OpusScript = (mod as unknown as { default: typeof import("opusscript") }).default
-            const enc = new OpusScript(48_000, 1, OpusScript.Application.VOIP)
-            enc.setBitrate(128_000)
-            try { enc.encoderCTL(4024, 3001) } catch { /* OPUS_SET_SIGNAL → VOICE */ }
-            try { enc.encoderCTL(4006, 1) } catch { /* OPUS_SET_VBR_REQUEST → enabled */ }
-            try { enc.encoderCTL(4020, 0) } catch { /* OPUS_SET_VBR_CONSTRAINT_REQUEST → unconstrained */ }
-            try { enc.encoderCTL(4010, 10) } catch { /* OPUS_SET_COMPLEXITY → max quality */ }
-            try { enc.encoderCTL(4012, 1) } catch { /* OPUS_SET_INBAND_FEC → on */ }
-            try { enc.encoderCTL(4014, 5) } catch { /* OPUS_SET_PACKET_LOSS_PERC → realistic mild loss hint */ }
-            try { enc.encoderCTL(4016, 0) } catch { /* OPUS_SET_DTX → off for stable speech continuity */ }
-            opusEncoder = enc
-          } catch {
-            setDeviceError(t("notices.opusFailed"))
-            opusEncoder = null
-          }
-        } else if (sendsToServer && voiceTransport === "tcp") {
-          setDeviceError(t("notices.tcpPcmUplink"))
-        }
+        // Frames go to the desktop engine as PCM; it encodes Opus itself when the server supports
+        // it (the renderer-side encoder never worked: Buffer does not exist in the isolated renderer).
         let lastMeterEmitAt = 0
         captureNode.onaudioprocess = (ev) => {
           if (!voicePipelineRef.current || voicePipelineRef.current !== runtime) return
@@ -2098,7 +2128,7 @@ export default function VoIPApp() {
           const txPcm = muted ? new Int16Array(gatedPcm.length) : gatedPcm
 
           const now = Date.now()
-          if (now - lastMeterEmitAt >= 80) {
+          if (micMeterVisibleRef.current && now - lastMeterEmitAt >= 80) {
             lastMeterEmitAt = now
             const pre = calcFrameEnergy(pcm)
             const post = calcFrameEnergy(gatedPcm)
@@ -2120,17 +2150,7 @@ export default function VoIPApp() {
           while (offset + frameSize <= merged.length) {
             if (sendsToServer && !mutedRef.current) {
               const frame = merged.subarray(offset, offset + frameSize)
-              if (opusEncoder && window.electronVoice?.sendOpusFrame) {
-                try {
-                  const pcmBytes = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength)
-                  const encoded = (opusEncoder as { encode: (pcm: Buffer, frameSize: number) => Uint8Array }).encode(pcmBytes, frameSize)
-                  void window.electronVoice.sendOpusFrame(encodeBytesBase64(encoded))
-                } catch {
-                  void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
-                }
-              } else {
-                void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
-              }
+              void window.electronVoice?.sendPcm16Frame(encodePcm16Base64(frame))
               if (VOICE_TRACE) traceRef.current.txFrames += 1
             }
             offset += frameSize
@@ -2309,13 +2329,9 @@ export default function VoIPApp() {
     screenVideoUrlRef.current = screenVideoUrl
   }, [screenVideoUrl])
 
-  const viewingLegacyStream = Boolean((screenVideoUrl || screenImageUrl) && legacyStreamBuffered)
+  const viewingLegacyStream = Boolean((screenVideoUrl || screenImageUrl) && legacyStreamBuffered && viewerStreamQuality === "original")
   const viewingWebRtcStream = hasRemoteWebRtcVideo && !viewingLegacyStream
   const streamPathLabel = viewingLegacyStream ? "Legacy" : viewingWebRtcStream ? "WebRTC" : ""
-  const activeChannelBannerUrl =
-    activeChannelId && serverAppearance.channelBanners?.[activeChannelId]
-      ? serverAppearance.channelBanners[activeChannelId]
-      : null
 
   const saveServerBanner = async () => {
     if (!activeServerId) return
@@ -2545,6 +2561,7 @@ export default function VoIPApp() {
     screenEncodeInFlightRef.current = false
     screenInitSegmentRef.current = null
     setIsScreenSharing(false)
+    isScreenSharingRef.current = false
     getVoiceWsClientRef.current().setScreenShare(false)
     setLocalScreenPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev)
@@ -2612,8 +2629,14 @@ export default function VoIPApp() {
   useEffect(() => {
     if (!hasDesktopBridge || !isScreenSharing) return
     const c = isVoiceSplit ? voiceClient : uiClient
-    return c.subscribeScreenResyncRequests((roomId) => {
+    return c.subscribeScreenResyncRequests((roomId, fallback) => {
       if (roomId !== currentVoiceChannelRef.current) return
+      const recorder = screenMediaRecorderRef.current
+      if (!recorder || recorder.state === "inactive") {
+        // Streaming through LiveKit only: start the WS copy just for viewers who need it.
+        if (fallback) startScreenRecorderRef.current()
+        return
+      }
       resyncScreenForLateViewers()
     })
   }, [hasDesktopBridge, isScreenSharing, isVoiceSplit, uiClient, voiceClient, resyncScreenForLateViewers])
@@ -2622,7 +2645,8 @@ export default function VoIPApp() {
     if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName || !isInVoice || streamHiddenByUser) return
     setStreamLoading(true)
     const room = currentVoiceChannel
-    const timer = window.setTimeout(() => requestViewerStreamResync(room, true), 350)
+    // Refreshes the WebM header if the WS stream runs; the 5 s check below asks for it otherwise.
+    const timer = window.setTimeout(() => requestViewerStreamResync(room, true, false), 350)
     return () => clearTimeout(timer)
   }, [hasDesktopBridge, currentVoiceChannel, isScreenSharing, activeScreenSharerName, isInVoice, streamHiddenByUser])
 
@@ -2640,8 +2664,9 @@ export default function VoIPApp() {
     setStreamLoading(true)
     const room = currentVoiceChannelRef.current
     const retryTimer = window.setTimeout(() => {
+      // Nothing arrived through LiveKit either: ask for the WebSocket stream.
       if (!isLegacyStreamBuffered() && !hasRemoteWebRtcVideo) {
-        requestViewerStreamResync(room, true)
+        requestViewerStreamResync(room, true, true)
       }
     }, 5000)
     const fallbackTimer = window.setTimeout(() => {
@@ -2680,8 +2705,14 @@ export default function VoIPApp() {
     const serverId = activeServerId
     if (room && serverId && activeScreenSharerName) {
       void ensureLiveKitForVoiceRoom(serverId, room).then(() => {
+        // The LiveKit track stayed subscribed while hidden, so no new TrackSubscribed event will
+        // announce it: restore the "has WebRTC video" state from the live session ourselves.
+        const sharer = webRtcSessionRef.current?.remoteScreenSharer
+        if (sharer) applyRemoteWebRtcVideo(true, sharer)
         requestViewerStreamResync(room, true)
-        window.requestAnimationFrame(() => rebindViewerStreamElements())
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => rebindViewerStreamElements())
+        })
       })
     }
   }
@@ -2760,15 +2791,46 @@ export default function VoIPApp() {
     const localCapture = isScreenSharing ? screenCaptureStreamRef.current : null
     const doc = streamWindowRef.current.document
     if (!doc.getElementById("voixex-stream-root")) {
+      // Same dark palette as the app; the video fills the window and keeps its aspect ratio.
+      const platform = window.voixexWindow?.customTitleBar ? window.voixexWindow.platform : null
+      const barPadding = platform === "darwin" ? "0 80px" : platform ? "0 150px 0 12px" : "0 12px"
+      const style = doc.createElement("style")
+      style.textContent = `
+        html, body { margin: 0; height: 100%; background: #08080a; color: #e6e6eb; overflow: hidden;
+          font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; color-scheme: dark; }
+        #voixex-stream-root { display: flex; flex-direction: column; height: 100%; }
+        #voixex-stream-bar { height: 32px; flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+          padding: ${barPadding}; background: #0f0f14; color: #9494a1; user-select: none;
+          -webkit-app-region: ${platform ? "drag" : "no-drag"}; white-space: nowrap; overflow: hidden; }
+        #voixex-stream-live { background: #da373c; color: #fff; font-size: 9px; font-weight: 700; letter-spacing: .04em;
+          padding: 2px 5px; border-radius: 4px; text-transform: uppercase; }
+        #voixex-streaming { color: #e6e6eb; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+        #voixex-viewers { margin-left: auto; overflow: hidden; text-overflow: ellipsis; opacity: .75; }
+        #voixex-stream-stage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+        #voixex-stream-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: none; }
+        #voixex-stream-placeholder { color: #6e6e7a; font-size: 13px; }
+      `
+      doc.head.appendChild(style)
       doc.body.innerHTML = `
-        <div id="voixex-stream-root" style="font-family:sans-serif;background:#111;color:#eee;margin:0;padding:12px">
-          <div id="voixex-streaming" style="margin-bottom:8px"></div>
-          <div id="voixex-viewers" style="margin-bottom:8px"></div>
-          <div id="voixex-stream-audio-host" style="display:none"></div>
-          <video id="voixex-stream-video" autoplay playsinline controls style="display:none;max-width:100%;max-height:85vh;background:#000;border:1px solid #444;border-radius:6px"></video>
-          <div id="voixex-stream-placeholder" style="color:#999">${t("voice.popupNoFrame")}</div>
+        <div id="voixex-stream-root">
+          <div id="voixex-stream-bar">
+            <span id="voixex-stream-live">Live</span>
+            <span id="voixex-streaming"></span>
+            <span id="voixex-viewers"></span>
+          </div>
+          <div id="voixex-stream-stage">
+            <div id="voixex-stream-audio-host" style="display:none"></div>
+            <video id="voixex-stream-video" autoplay playsinline></video>
+            <div id="voixex-stream-placeholder">${t("voice.popupNoFrame")}</div>
+          </div>
         </div>
       `
+      const video = doc.getElementById("voixex-stream-video") as HTMLVideoElement | null
+      // Double-click toggles fullscreen, like most players.
+      video?.addEventListener("dblclick", () => {
+        if (doc.fullscreenElement) void doc.exitFullscreen().catch(() => {})
+        else void video.requestFullscreen().catch(() => {})
+      })
     }
     const streamingEl = doc.getElementById("voixex-streaming")
     const viewersEl = doc.getElementById("voixex-viewers")
@@ -2776,6 +2838,8 @@ export default function VoIPApp() {
     const placeholderEl = doc.getElementById("voixex-stream-placeholder")
     if (streamingEl) streamingEl.textContent = t("voice.popupStreaming", { name: activeScreenSharerName || t("common.none") })
     if (viewersEl) viewersEl.textContent = t("voice.popupViewers", { names: viewers })
+    const liveEl = doc.getElementById("voixex-stream-live")
+    if (liveEl) liveEl.style.display = activeScreenSharerName || isScreenSharing ? "" : "none"
     if (imageEl && placeholderEl) {
       if (localCapture) {
         stopPopupMirrorTracks()
@@ -2896,7 +2960,8 @@ export default function VoIPApp() {
     if (!navigator.mediaDevices?.getDisplayMedia) {
       throw new Error(t("notices.screenCaptureUnavailable"))
     }
-    if (isScreenSharing) return
+    // The ref, not state: an automatic restart calls this right after stopScreenShare().
+    if (isScreenSharingRef.current) return
     const meId = getVoiceWsClientRef.current().getMeState()?.clientId
     if (activeScreenSharerId && (!meId || activeScreenSharerId !== meId)) {
       throw new Error(t("notices.anotherStreaming"))
@@ -2944,38 +3009,56 @@ export default function VoIPApp() {
           "video/webm"
         ]
       : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
-    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? "video/webm"
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: bitrateKbps * 1000
-    })
-    recorder.ondataavailable = (event) => {
-      if (!event.data || event.data.size === 0) return
-      void event.data.arrayBuffer().then((buffer) => {
-        sendScreenVideoChunkBytes(new Uint8Array(buffer))
-      })
+    screenRecorderConfigRef.current = {
+      mimeType: mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) ?? "video/webm",
+      bitsPerSecond: bitrateKbps * 1000
     }
-
     screenInitSegmentRef.current = null
 
     setIsScreenSharing(true)
+    isScreenSharingRef.current = true
     getVoiceWsClientRef.current().setScreenShare(true)
-    recorder.start(250)
-    screenMediaRecorderRef.current = recorder
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => {
         void stopScreenShare()
       }
     })
 
+    let viaLiveKit = false
     try {
-      await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps })
+      viaLiveKit = Boolean(await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps }))
     } catch {
-      /* LiveKit mirror is optional when SFU is unavailable */
+      viaLiveKit = false
     }
+    // Viewers watch through LiveKit. The WebSocket copy (a second full upload of the same video)
+    // only starts when there is no LiveKit or a viewer asks for it.
+    if (!viaLiveKit) startScreenRecorder()
 
     setStatus("Screen share started")
   }
+
+  /** WebSocket stream (MediaRecorder WebM chunks), the fallback for viewers without LiveKit video. */
+  const startScreenRecorder = () => {
+    const stream = screenCaptureStreamRef.current
+    const config = screenRecorderConfigRef.current
+    if (!stream || !config || !isScreenSharingRef.current) return
+    const running = screenMediaRecorderRef.current
+    if (running && running.state !== "inactive") return
+    try {
+      const recorder = new MediaRecorder(stream, { mimeType: config.mimeType, videoBitsPerSecond: config.bitsPerSecond })
+      recorder.ondataavailable = (event) => {
+        if (!event.data || event.data.size === 0) return
+        void event.data.arrayBuffer().then((buffer) => {
+          sendScreenVideoChunkBytes(new Uint8Array(buffer))
+        })
+      }
+      recorder.start(250)
+      screenMediaRecorderRef.current = recorder
+    } catch {
+      screenMediaRecorderRef.current = null
+    }
+  }
+  startScreenRecorderRef.current = startScreenRecorder
 
   const handleScreenShareToggle = async () => {
     try {
@@ -2995,9 +3078,71 @@ export default function VoIPApp() {
     }
   }
 
+  // Changing source/resolution/FPS/bitrate while sharing restarts the share with the new settings.
+  const shareSettingsKey = `${selectedScreenSourceId}|${screenResolution}|${screenFps}|${screenBitrateKbps}`
+  const appliedShareSettingsRef = useRef(shareSettingsKey)
+  useEffect(() => {
+    if (!isScreenSharing) {
+      appliedShareSettingsRef.current = shareSettingsKey
+      return
+    }
+    if (appliedShareSettingsRef.current === shareSettingsKey) return
+    const timer = setTimeout(() => {
+      appliedShareSettingsRef.current = shareSettingsKey
+      void (async () => {
+        try {
+          await stopScreenShare()
+          await startScreenShare()
+          toast.success(t("voice.streamRestarted"))
+        } catch (e) {
+          setError(errorText(e, "notices.toggleScreenShareFailed"))
+        }
+      })()
+    }, 500)
+    return () => clearTimeout(timer)
+    // stop/startScreenShare are recreated every render; the settings key is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shareSettingsKey, isScreenSharing])
+
+  const handleViewerStreamQualityChange = (quality: "original" | "medium" | "low") => {
+    viewerStreamQualityRef.current = quality
+    setViewerStreamQuality(quality)
+    webRtcSessionRef.current?.setScreenViewQuality(quality === "original" ? "high" : quality)
+    getVoiceWsClientRef.current().setScreenRelay(quality === "original")
+    if (quality !== "original") {
+      resetLegacyStreamPlayback()
+      webRtcSessionRef.current?.rebindRemoteScreenVideo(remoteStreamVideoRef.current)
+    } else {
+      const room = currentVoiceChannelRef.current
+      if (room) requestViewerStreamResync(room, true)
+      window.requestAnimationFrame(() => rebindViewerStreamElements())
+    }
+  }
+
+  // Stream over or left voice: back to the original quality and the normal relay.
+  useEffect(() => {
+    if ((activeScreenSharerId && isInVoice) || viewerStreamQualityRef.current === "original") return
+    viewerStreamQualityRef.current = "original"
+    setViewerStreamQuality("original")
+    webRtcSessionRef.current?.setScreenViewQuality("high")
+    if (isInVoice) getVoiceWsClientRef.current().setScreenRelay(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScreenSharerId, isInVoice])
+
+  // A new WebSocket starts with the relay on; repeat the viewer's choice after reconnecting.
+  useEffect(() => {
+    if (viewerStreamQualityRef.current === "original") return
+    if (!(wsConnected || voiceSigWsConnected)) return
+    getVoiceWsClientRef.current().setScreenRelay(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsConnected, voiceSigWsConnected])
+
   const handleChannelSelect = async (channelId: string) => {
-    setActiveChannelId(channelId)
     const channel = categories.flatMap((c) => c.channels).find((c) => c.id === channelId)
+    // Voice channels are joined, not opened: the text channel stays on screen with the voice
+    // stage above it. Clicking the voice channel you are already in does nothing.
+    if (channel?.type !== "voice") setActiveChannelId(channelId)
+    if (channel?.type === "voice" && isInVoice && currentVoiceChannel === channelId) return
     if (channel?.type === "voice") {
       if (isScreenSharing) {
         await stopScreenShare()
@@ -3151,6 +3296,11 @@ export default function VoIPApp() {
   const voiceChannelName = categories.flatMap((c) => c.channels).find((c) => c.id === currentVoiceChannel)?.name || ""
   const isTextChannel = activeChannel?.type === "text"
   const canOpenServerSettings = Boolean(activeServerId && canManageServer)
+  const serverSettingsScope = appSettingsTab.startsWith("server_")
+  // Lost the admin role (taken away, or gave it up) while server settings were open.
+  useEffect(() => {
+    if (showAppSettings && serverSettingsScope && !canOpenServerSettings) setShowAppSettings(false)
+  }, [showAppSettings, serverSettingsScope, canOpenServerSettings])
   // Worst of ping, loss and jitter decides the colour: a 200+ ms ping is not "green" even with no loss.
   const qualityClass = useMemo(() => {
     if (!voiceStats) return "text-muted-foreground"
@@ -3465,6 +3615,18 @@ export default function VoIPApp() {
       const nextSaved = [updatedProfile, ...withoutSameHostForName]
       setSavedServers(nextSaved)
       localStorage.setItem("voixex-saved-servers", JSON.stringify(nextSaved))
+      if (updatedProfile.identityRef) {
+        // Label the device certificate so the home screen can say whose it is and for which server.
+        void window.voixexIdentity
+          ?.setMeta?.(updatedProfile.identityRef, {
+            nick: join.profile.displayName,
+            label: effectiveListName,
+            address: port ? `${host}:${port}` : host,
+            secure: resolvedUseHttps
+          })
+          .then(() => refreshDeviceIdentities())
+          .catch(() => {})
+      }
       setServers(
         nextSaved.map((s) => ({
           id: s.serverId,
@@ -3494,6 +3656,13 @@ export default function VoIPApp() {
     } finally {
       setJoining(false)
     }
+  }
+
+  /** Server administration lives in its own dialog and is only reachable for admins. */
+  const openServerSettings = (initialTab: AppSettingsTab = "server_general") => {
+    if (!canOpenServerSettings) return
+    setAppSettingsTab(initialTab)
+    setShowAppSettings(true)
   }
 
   const openAppSettings = async (initialTab: AppSettingsTab = "voice") => {
@@ -3749,6 +3918,8 @@ export default function VoIPApp() {
   }
 
   const handleImportCertificate = async (input: ImportInput) => {
+    if (input.storedRef) return signInWithStoredCertificate(input.storedRef, input)
+    if (!input.file) throw new Error(t("access.pickFileFirst"))
     const identity = requireIdentityBridge()
     const imported = await identity.importFromFile(input.file.contents, input.filePassphrase)
     const fromFile = imported.server
@@ -3780,6 +3951,47 @@ export default function VoIPApp() {
       identityRef: imported.ref,
       certId: imported.certificate.certId,
       serverClientId: imported.certificate.clientId
+    }
+    upsertSavedServer(profile)
+    if (modeNeedsPassword(authMode) && (!input.nick || !input.password)) throw new Error(t("access.fillNickPassword"))
+    await signInToProfile(profile, { nick: input.nick, password: input.password })
+  }
+
+  /** Sign in with a certificate already on this device (no file, no file password). */
+  const signInWithStoredCertificate = async (ref: string, input: ImportInput) => {
+    const identity = requireIdentityBridge()
+    const stored = await identity.get(ref)
+    if (!stored?.certificate) throw new Error(t("deviceCerts.notIssued"))
+    const certificate = stored.certificate
+    const meta = deviceIdentities?.find((d) => d.ref === ref)?.meta
+    const existing = savedServers.find((s) => s.serverId === certificate.serverId)
+    const fromMeta = meta?.address ? splitAddress(meta.address) : null
+    const address = input.apiHost
+      ? { apiHost: input.apiHost, apiPort: input.apiPort ?? "", apiUseHttps: Boolean(input.apiUseHttps) }
+      : existing
+        ? { apiHost: existing.apiHost, apiPort: existing.apiPort, apiUseHttps: Boolean(existing.apiUseHttps) }
+        : fromMeta
+          ? { ...fromMeta, apiUseHttps: meta?.secure ?? fromMeta.apiPort === "443" }
+          : null
+    if (!address?.apiHost) throw new Error(t("deviceCerts.needAddress"))
+    // Level 3 needs nick + password; without them try level 2 (the server says if more is needed).
+    const authMode: AuthMode = existing?.authMode ?? (input.nick && input.password ? "password_certificate" : "certificate")
+    if (existing?.identityRef && existing.identityRef !== ref) {
+      await identity.remove(existing.identityRef).catch(() => {})
+    }
+    const profile: SavedServerProfile = {
+      ...newServerMediaDefaults(),
+      ...(existing ?? {}),
+      serverId: certificate.serverId,
+      serverName: input.label || existing?.serverName || meta?.label || address.apiHost,
+      ...address,
+      serverPassword: "",
+      displayName: "",
+      superuserPassword: undefined,
+      authMode,
+      identityRef: ref,
+      certId: certificate.certId,
+      serverClientId: certificate.clientId
     }
     upsertSavedServer(profile)
     if (modeNeedsPassword(authMode) && (!input.nick || !input.password)) throw new Error(t("access.fillNickPassword"))
@@ -4025,23 +4237,80 @@ export default function VoIPApp() {
   )
   const activeProfile = savedServers.find((s) => s.serverId === activeServerId)
 
+  useEffect(() => {
+    if (!activeServerId) void refreshDeviceIdentities()
+  }, [activeServerId, savedServers, refreshDeviceIdentities])
+
+  const deviceCertificates = useMemo<DeviceCertificate[] | null>(() => {
+    if (!deviceIdentities) return null
+    return deviceIdentities
+      .map((identity) => {
+        const saved = savedServers.find((s) => s.identityRef === identity.ref)
+        return {
+          ref: identity.ref,
+          certId: identity.certificate?.certId ?? null,
+          nick: identity.meta.nick || null,
+          serverLabel: identity.meta.label || saved?.serverName || null,
+          address: identity.meta.address || (saved ? (saved.apiPort ? `${saved.apiHost}:${saved.apiPort}` : saved.apiHost) : null),
+          issuedAt: identity.certificate?.issuedAt ?? null,
+          inUse: Boolean(saved)
+        }
+      })
+      .sort((a, b) => Number(b.inUse) - Number(a.inUse) || (b.issuedAt ?? "").localeCompare(a.issuedAt ?? ""))
+  }, [deviceIdentities, savedServers])
+
+  const exportDeviceCertificate = async (ref: string, passphrase: string) => {
+    const identity = requireIdentityBridge()
+    const saved = savedServers.find((s) => s.identityRef === ref)
+    const meta = deviceIdentities?.find((d) => d.ref === ref)?.meta
+    return identity.exportToFile(ref, passphrase, {
+      label: saved?.serverName || meta?.label,
+      authMode: saved?.authMode,
+      apiHost: saved?.apiHost,
+      apiPort: saved?.apiPort,
+      apiUseHttps: saved?.apiUseHttps
+    })
+  }
+
+  const removeDeviceCertificate = async (ref: string) => {
+    await requireIdentityBridge().remove(ref)
+    // A saved server that used this certificate falls back to signing in with nick + password.
+    if (savedServers.some((s) => s.identityRef === ref)) {
+      const next = savedServers.map((s) => {
+        if (s.identityRef !== ref) return s
+        const { identityRef: _ref, certId: _cert, ...rest } = s
+        return rest
+      })
+      setSavedServers(next)
+      localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
+    }
+    await refreshDeviceIdentities()
+  }
+
   return (
     <>
-      <main className="flex h-dvh overflow-hidden bg-background">
+      <div className="flex h-dvh flex-col bg-background">
+      <TitleBar title={activeServerId ? `Voixex — ${servers.find((s) => s.id === activeServerId)?.name ?? ""}` : "Voixex"} />
+      <main className="flex min-h-0 flex-1 overflow-hidden bg-background">
         <div ref={webRtcAudioSinkRef} className="hidden" aria-hidden="true" />
 
         {activeServerId ? (
           <aside className="flex h-full min-h-0 w-60 shrink-0 flex-col bg-card">
             <ChannelSidebar
               serverName={servers.find((s) => s.id === activeServerId)?.name || t("common.noServer")}
+              serverAddress={activeProfile ? (activeProfile.apiPort ? `${activeProfile.apiHost}:${activeProfile.apiPort}` : activeProfile.apiHost) : undefined}
               onLeaveServer={() => void leaveServer()}
+              onOpenServerSettings={canOpenServerSettings ? () => openServerSettings() : undefined}
               security={
                 activeProfile
                   ? {
                       secure: Boolean(activeProfile.apiUseHttps),
                       levelLabel: activeProfile.authMode
+                        ? t("levels.sidebarShort", { level: authLevel(activeProfile.authMode) })
+                        : t("levels.unprotected"),
+                      levelHint: activeProfile.authMode
                         ? t("levels.short", { level: authLevel(activeProfile.authMode), name: t(`levels.${activeProfile.authMode}`) })
-                        : t("levels.unprotected")
+                        : undefined
                     }
                   : undefined
               }
@@ -4052,15 +4321,10 @@ export default function VoIPApp() {
               isInVoice={isInVoice}
               onChannelSelect={handleChannelSelect}
               voiceUsers={voiceUsers}
-              selfClientId={myVoiceClientId}
-              peerVolumePct={peerVolumePct}
-              onPeerVolumeChange={handlePeerVolumeChange}
-              enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
             />
             <UserPanel
               user={currentUser}
               isMuted={isMuted}
-              isDeafened={isDeafened}
               isInVoice={isInVoice}
               voiceChannelName={voiceChannelName}
               onToggleMute={() => {
@@ -4068,8 +4332,6 @@ export default function VoIPApp() {
                 if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
                 applyMute(next)
               }}
-              onToggleDeafen={() => applyDeafen(!isDeafened)}
-              onDisconnect={handleDisconnect}
               voiceStatsSummary={voiceStatsSummary}
               voiceStats={voiceStats}
               audioPipelineDiag={audioPipelineDiag}
@@ -4097,69 +4359,100 @@ export default function VoIPApp() {
             onEdit={handleEditServer}
             onRemove={(id) => void handleRemoveSavedServer(id)}
             onOpenDeviceSettings={() => void openAppSettings("voice")}
-          />
-        ) : activeChannel?.type === "voice" ? (
-          <VoiceChannelView
-            channelName={activeChannel.name}
-            channelBannerUrl={activeChannelBannerUrl}
-            error={error}
-            activeScreenSharerName={activeScreenSharerName}
-            watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || t("common.none")}
-            isScreenSharing={isScreenSharing}
-            viewingLegacyStream={viewingLegacyStream}
-            viewingWebRtcStream={viewingWebRtcStream}
-            streamLoading={streamLoading}
-            streamPathLabel={streamPathLabel}
-            screenVideoUrl={screenVideoUrl}
-            screenImageUrl={screenImageUrl}
-            streamVolumePct={streamVolumePct}
-            streamVideoFullscreen={streamVideoFullscreen}
-            showingStreamWindow={showingStreamWindow}
-            showMemberList={showMemberList}
-            isInVoice={isInVoice}
-            hasDesktopBridge={hasDesktopBridge}
-            isDeafened={isDeafened}
-            canStartScreenShare={canStartScreenShare}
-            screenShareWithAudio={screenShareWithAudio}
-            screenSources={screenSources}
-            selectedScreenSourceId={selectedScreenSourceId}
-            screenResolution={screenResolution}
-            screenFps={screenFps}
-            screenBitrateKbps={screenBitrateKbps}
-            localPreviewVideoRef={localPreviewVideoRef}
-            remoteStreamVideoRef={remoteStreamVideoRef}
-            onScreenSourceChange={setSelectedScreenSourceId}
-            onScreenResolutionChange={setScreenResolution}
-            onScreenFpsChange={setScreenFps}
-            onScreenBitrateChange={setScreenBitrateKbps}
-            onScreenShareWithAudioToggle={() => setScreenShareWithAudio((v) => !v)}
-            onScreenShareToggle={() => void handleScreenShareToggle()}
-            onToggleStreamWindow={toggleStreamWindow}
-            onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
-            onToggleMemberList={() => setShowMemberList((v) => !v)}
-            onStreamVolumeLiveChange={applyStreamVolumeLive}
-            onStreamVolumeCommit={handleStreamVolumeCommit}
-            streamHiddenByUser={streamHiddenByUser}
-            onHideStream={handleHideStream}
-            onShowStream={handleShowStream}
-            onJoinVoice={() => void handleChannelSelect(activeChannelId)}
-            onLeaveVoice={handleDisconnect}
+            onOpenCertificateStorage={
+              deviceCertificates
+                ? () => {
+                    void refreshDeviceIdentities()
+                    setShowCertStorage(true)
+                  }
+                : undefined
+            }
+            storedCertificateCount={deviceCertificates?.length ?? 0}
           />
         ) : (
           <ChatArea
-            channelName={activeChannel?.name || "general"}
-            channelType={activeChannel?.type || "text"}
-            messages={messages}
+            channelName={activeChannel?.type === "text" ? activeChannel.name : ""}
+            channelType="text"
+            messages={activeChannel?.type === "text" ? messages : []}
             onSendMessage={handleSendMessage}
             onUploadAttachment={handleUploadAttachment}
             canSend={Boolean(activeServerId && activeChannelId && isTextChannel)}
             showMemberList={showMemberList}
             onToggleMemberList={() => setShowMemberList(!showMemberList)}
+            stage={
+              isInVoice && currentVoiceChannel ? (
+                <VoiceStage
+                  roomId={currentVoiceChannel}
+                  channelName={voiceChannelName}
+                  participants={voiceUsers[currentVoiceChannel] ?? []}
+                  error={error}
+                  isMuted={isMuted}
+                  isDeafened={isDeafened}
+                  onToggleMute={() => {
+                    if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+                    applyMute(!isMuted)
+                  }}
+                  onToggleDeafen={() => applyDeafen(!isDeafened)}
+                  onLeaveVoice={handleDisconnect}
+                  activeScreenSharerName={activeScreenSharerName}
+                  watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || t("common.none")}
+                  isScreenSharing={isScreenSharing}
+                  viewingLegacyStream={viewingLegacyStream}
+                  viewingWebRtcStream={viewingWebRtcStream}
+                  streamLoading={streamLoading}
+                  streamPathLabel={streamPathLabel}
+                  screenVideoUrl={screenVideoUrl}
+                  screenImageUrl={screenImageUrl}
+                  streamVolumePct={streamVolumePct}
+                  streamVideoFullscreen={streamVideoFullscreen}
+                  showingStreamWindow={showingStreamWindow}
+                  hasDesktopBridge={hasDesktopBridge}
+                  canStartScreenShare={canStartScreenShare}
+                  screenShareWithAudio={screenShareWithAudio}
+                  screenSources={screenSources}
+                  selectedScreenSourceId={selectedScreenSourceId}
+                  screenResolution={screenResolution}
+                  screenFps={screenFps}
+                  screenBitrateKbps={screenBitrateKbps}
+                  localPreviewVideoRef={localPreviewVideoRef}
+                  remoteStreamVideoRef={remoteStreamVideoRef}
+                  onScreenSourceChange={setSelectedScreenSourceId}
+                  onScreenResolutionChange={setScreenResolution}
+                  onScreenFpsChange={setScreenFps}
+                  onScreenBitrateChange={setScreenBitrateKbps}
+                  onScreenShareWithAudioToggle={() => setScreenShareWithAudio((v) => !v)}
+                  onScreenShareToggle={() => void handleScreenShareToggle()}
+                  onToggleStreamWindow={toggleStreamWindow}
+                  onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
+                  onStreamVolumeLiveChange={applyStreamVolumeLive}
+                  onStreamVolumeCommit={handleStreamVolumeCommit}
+                  streamHiddenByUser={streamHiddenByUser}
+                  onHideStream={handleHideStream}
+                  onShowStream={handleShowStream}
+                  viewerQuality={viewerStreamQuality}
+                  onViewerQualityChange={handleViewerStreamQualityChange}
+                  viewerQualityAvailable={hasRemoteWebRtcVideo}
+                  selfClientId={myVoiceClientId}
+                  peerVolumePct={peerVolumePct}
+                  enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
+                  onPeerVolumeChange={handlePeerVolumeChange}
+                />
+              ) : null
+            }
           />
         )}
 
-        {showMemberList && activeServerId ? <MemberList members={members} roles={[]} /> : null}
+        {showMemberList && activeServerId ? (
+          <MemberList
+            members={members}
+            roles={[{ id: ADMIN_ROLE_GROUP, name: t("members.admins"), color: "#8b87f5" }]}
+            onClose={() => setShowMemberList(false)}
+            inVoiceIds={Object.values(voiceUsers).flat().map((u) => u.id)}
+            speakingIds={Object.values(voiceUsers).flat().filter((u) => u.isSpeaking).map((u) => u.id)}
+          />
+        ) : null}
       </main>
+      </div>
 
       <ConnectServerDialog
         draft={editDraft?.draft ?? null}
@@ -4181,14 +4474,40 @@ export default function VoIPApp() {
         onUpgrade={handleUpgrade}
         onLegacyJoin={handleLegacyJoin}
         pickCertificateFile={async () => (await window.voixexIdentity?.pickImportFile()) ?? null}
+        storedCertificates={(deviceCertificates ?? [])
+          .filter((c) => c.certId)
+          .map((c) => ({
+            ref: c.ref,
+            title: `${c.nick ?? t("deviceCerts.unknownNick")} · ${c.serverLabel ?? t("deviceCerts.unknownServer")}`,
+            subtitle: [c.address, c.inUse ? t("deviceCerts.inUse") : t("deviceCerts.unused")].filter(Boolean).join(" · ")
+          }))}
         describeError={describeAuthError}
         hasDesktopBridge={hasDesktopBridge}
       />
+      <Dialog open={showCertStorage} onOpenChange={setShowCertStorage}>
+        <DialogContent className="flex max-h-[min(85vh,720px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+          <DialogHeader className="shrink-0 px-6 pb-3 pt-5">
+            <DialogTitle>{t("deviceCerts.title")}</DialogTitle>
+            <DialogDescription>{t("deviceCerts.intro")}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
+            <DeviceCertificates
+              certificates={deviceCertificates ?? []}
+              onExport={exportDeviceCertificate}
+              onRemove={removeDeviceCertificate}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={showAppSettings} onOpenChange={setShowAppSettings}>
         <DialogContent className="flex h-[min(85vh,720px)] max-w-3xl flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
           <DialogHeader className="shrink-0 border-b border-border px-6 py-4">
-            <DialogTitle>{t("settings.title")}</DialogTitle>
-            <DialogDescription>{t("settings.description")}</DialogDescription>
+            <DialogTitle>
+              {serverSettingsScope
+                ? t("settings.serverTitle", { name: servers.find((s) => s.id === activeServerId)?.name ?? "" })
+                : t("settings.title")}
+            </DialogTitle>
+            <DialogDescription>{serverSettingsScope ? t("settings.serverDescription") : t("settings.description")}</DialogDescription>
           </DialogHeader>
           <Tabs
             value={appSettingsTab}
@@ -4197,21 +4516,25 @@ export default function VoIPApp() {
           >
             <div className="flex min-h-0 flex-1">
               <TabsList className="flex h-auto w-44 shrink-0 flex-col items-stretch justify-start gap-1 rounded-none border-r border-border bg-muted/20 p-2">
-                <TabsTrigger value="language" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
-                  {t("settings.tabLanguage")}
-                </TabsTrigger>
-                <TabsTrigger value="voice" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
-                  {t("settings.tabVoice")}
-                </TabsTrigger>
-                <TabsTrigger value="keybinds" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
-                  {t("settings.tabKeybinds")}
-                </TabsTrigger>
-                {activeServerId && activeProfile?.authMode ? (
+                {!serverSettingsScope ? (
+                  <>
+                    <TabsTrigger value="language" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabLanguage")}
+                    </TabsTrigger>
+                    <TabsTrigger value="voice" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabVoice")}
+                    </TabsTrigger>
+                    <TabsTrigger value="keybinds" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabKeybinds")}
+                    </TabsTrigger>
+                  </>
+                ) : null}
+                {!serverSettingsScope && activeServerId && activeProfile?.authMode ? (
                   <TabsTrigger value="security" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
                     {t("settings.tabSecurity")}
                   </TabsTrigger>
                 ) : null}
-                {canOpenServerSettings ? (
+                {serverSettingsScope && canOpenServerSettings ? (
                   <>
                     <TabsTrigger value="server_general" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
                       {t("settings.tabServer")}
@@ -4331,20 +4654,6 @@ export default function VoIPApp() {
                 </div>
               ) : null}
 
-              <div className="rounded-lg border border-border p-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>{t("settings.opusUplink")}</Label>
-                    <p className="text-xs text-muted-foreground">
-                      {t("settings.opusUplinkHint")}
-                    </p>
-                  </div>
-                  <Switch checked={useOpusUplink} onCheckedChange={setUseOpusUplink} />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {t("settings.opusFallback")}
-                </p>
-              </div>
 
               <div className="rounded-lg border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between">
@@ -4625,9 +4934,19 @@ export default function VoIPApp() {
             </TabsContent>
 
             <TabsContent value="server_roles" className="mt-0">
-              <p className="text-sm text-muted-foreground">
-                {t("settings.rolesPlaceholder")}
-              </p>
+              {canOpenServerSettings ? (
+                <RolesAdmin
+                  members={members.map((m) => ({
+                    id: m.id,
+                    name: m.name,
+                    isAdmin: Boolean(m.roles?.includes(ADMIN_ROLE_GROUP)),
+                    online: m.status !== "offline"
+                  }))}
+                  meId={uiClient.getMeState()?.clientId ?? null}
+                  onSetAdmin={(clientId, admin) => uiClient.setMemberAdmin(activeServerId, clientId, admin)}
+                  describeError={describeAuthError}
+                />
+              ) : null}
             </TabsContent>
                 </div>
               </ScrollArea>

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { FileKey, KeyRound, Lock, LockOpen, ShieldCheck } from "lucide-react"
+import { Archive, FileKey, KeyRound, Lock, LockOpen, ShieldCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Spinner } from "@/components/ui/spinner"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { AUTH_MODES_BY_LEVEL, authLevel, modeNeedsPassword, type AuthMode } from "@/lib/voip-client"
 import { useI18n } from "@/lib/i18n/provider"
@@ -46,11 +47,17 @@ export type RegisterInput = ServerAddress & {
 }
 export type ImportInput = Partial<ServerAddress> & {
   label: string
-  file: { path: string; contents: string }
+  /** A certificate file to import, or… */
+  file?: { path: string; contents: string }
   filePassphrase: string
+  /** …a certificate already stored on this device. */
+  storedRef?: string
   nick: string
   password: string
 }
+
+/** A certificate in the device storage, as offered in the import step. */
+export type StoredCertificateOption = { ref: string; title: string; subtitle: string }
 export type LoginInput = { nick: string; password: string; superuserPassword: string }
 export type ClaimInput = { nick: string; authMode: AuthMode; password: string }
 export type UpgradeInput = { authMode: AuthMode; newPassword: string }
@@ -68,6 +75,8 @@ interface ServerAccessDialogProps {
   /** Server predates protected profiles: join with the shared password only. */
   onLegacyJoin: (input: { address?: ServerAddress; label?: string; serverPassword?: string; nick?: string }) => Promise<void>
   pickCertificateFile: () => Promise<{ path: string; contents: string } | null>
+  /** Certificates already on this device (desktop); empty hides the "From storage" choice. */
+  storedCertificates?: StoredCertificateOption[]
   describeError: (error: unknown) => DescribedError
   hasDesktopBridge: boolean
 }
@@ -153,6 +162,7 @@ export function ServerAccessDialog({
   onUpgrade,
   onLegacyJoin,
   pickCertificateFile,
+  storedCertificates = [],
   describeError,
   hasDesktopBridge
 }: ServerAccessDialogProps) {
@@ -165,6 +175,8 @@ export function ServerAccessDialog({
   const [passwordRepeat, setPasswordRepeat] = useState("")
   const [superuserPassword, setSuperuserPassword] = useState("")
   const [file, setFile] = useState<{ path: string; contents: string } | null>(null)
+  const [storedRef, setStoredRef] = useState<string | null>(null)
+  const stored = storedCertificates.find((c) => c.ref === storedRef) ?? null
   const [filePassphrase, setFilePassphrase] = useState("")
   const [addTab, setAddTab] = useState<"new" | "certificate">("new")
   const [step, setStep] = useState<"server" | "protection">("server")
@@ -185,6 +197,7 @@ export function ServerAccessDialog({
     setPasswordRepeat("")
     setSuperuserPassword("")
     setFile(null)
+    setStoredRef(null)
     setFilePassphrase("")
     setAddTab(mode.kind === "import" ? "certificate" : "new")
     setStep("server")
@@ -282,13 +295,13 @@ export function ServerAccessDialog({
         })
       )
     }
-    if (!file) return setError({ text: t("access.pickFileFirst") })
-    if (!filePassphrase) return setError({ text: t("access.fillFilePassphrase") })
+    if (!file && !stored) return setError({ text: t("access.pickFileFirst") })
+    if (file && !filePassphrase) return setError({ text: t("access.fillFilePassphrase") })
     return void run(() =>
       onImport({
         ...(address.apiHost.trim() ? { ...address, apiHost: address.apiHost.trim() } : {}),
         label: label.trim(),
-        file,
+        ...(stored ? { storedRef: stored.ref } : { file: file ?? undefined }),
         filePassphrase,
         nick: nick.trim(),
         password
@@ -510,7 +523,7 @@ export function ServerAccessDialog({
         <TabsContent value="certificate" className="mt-0 space-y-4">
           <div className="space-y-1.5">
             <Label>{t("access.certificateFile")}</Label>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="secondary"
@@ -518,22 +531,55 @@ export function ServerAccessDialog({
                 onClick={() =>
                   void (async () => {
                     const picked = await pickCertificateFile()
-                    if (picked) setFile(picked)
+                    if (picked) {
+                      setFile(picked)
+                      setStoredRef(null)
+                    }
                   })()
                 }
               >
                 <FileKey className="h-4 w-4" />
                 {t("access.pickFile")}
               </Button>
-              <span className="min-w-0 truncate text-xs text-muted-foreground">
-                {file ? file.path.split(/[\\/]/).pop() : t("access.noFile")}
+              {storedCertificates.length > 0 ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="secondary" className="gap-2">
+                      <Archive className="h-4 w-4" />
+                      {t("access.fromStorage")}
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="max-w-80">
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">{t("deviceCerts.title")}</DropdownMenuLabel>
+                    {storedCertificates.map((c) => (
+                      <DropdownMenuItem
+                        key={c.ref}
+                        className="flex-col items-start gap-0"
+                        onClick={() => {
+                          setStoredRef(c.ref)
+                          setFile(null)
+                        }}
+                      >
+                        <span className="w-full truncate text-sm">{c.title}</span>
+                        <span className="w-full truncate text-xs text-muted-foreground">{c.subtitle}</span>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                {stored ? stored.title : file ? file.path.split(/[\\/]/).pop() : t("access.noFile")}
               </span>
             </div>
           </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="access-file-pass">{t("access.filePassphrase")}</Label>
-            <Input id="access-file-pass" type="password" value={filePassphrase} onChange={(e) => setFilePassphrase(e.target.value)} />
-          </div>
+          {stored ? (
+            <p className="text-xs text-muted-foreground">{t("access.storedChosen")}</p>
+          ) : (
+            <div className="space-y-1.5">
+              <Label htmlFor="access-file-pass">{t("access.filePassphrase")}</Label>
+              <Input id="access-file-pass" type="password" value={filePassphrase} onChange={(e) => setFilePassphrase(e.target.value)} />
+            </div>
+          )}
           <p className="text-xs text-muted-foreground">{t("access.importNickHint")}</p>
           {nickField(false, true)}
           {passwordField("access.password", true)}

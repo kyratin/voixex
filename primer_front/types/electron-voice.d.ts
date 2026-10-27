@@ -12,8 +12,20 @@ type VoixexServerCertificate = {
 
 type VoixexIdentityServerInfo = { label?: string; apiHost?: string; apiPort?: string; apiUseHttps?: boolean; authMode?: string }
 
+type VoixexIdentityMeta = { nick?: string; label?: string; address?: string; secure?: boolean }
+
+export type VoixexStoredIdentity = {
+  ref: string
+  publicKey: string
+  certificate: VoixexServerCertificate | null
+  createdAt: string
+  meta: VoixexIdentityMeta
+}
+
 declare global {
   interface Window {
+    /** Desktop window info; customTitleBar = the system title bar is hidden and the UI draws one. */
+    voixexWindow?: { platform: string; customTitleBar: boolean }
     /** Per-server device certificates (desktop only). Private keys never leave the main process. */
     voixexIdentity?: {
       create: () => Promise<{ ref: string; publicKey: string }>
@@ -21,6 +33,9 @@ declare global {
       get: (ref: string) => Promise<{ publicKey: string; certificate: VoixexServerCertificate | null } | null>
       sign: (ref: string, message: string) => Promise<string>
       remove: (ref: string) => Promise<void>
+      /** Older desktop builds lack list/setMeta. */
+      list?: () => Promise<VoixexStoredIdentity[]>
+      setMeta?: (ref: string, meta: VoixexIdentityMeta) => Promise<void>
       exportToFile: (ref: string, passphrase: string, server: VoixexIdentityServerInfo) => Promise<string | null>
       pickImportFile: () => Promise<{ path: string; contents: string } | null>
       importFromFile: (

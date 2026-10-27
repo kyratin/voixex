@@ -1,8 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { FileKey, KeyRound, Lock, MoreHorizontal, Pencil, Plus, Settings, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { Archive, AudioLines, ChevronDown, FileKey, KeyRound, LockKeyhole, MoreHorizontal, Pencil, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { Spinner } from "@/components/ui/spinner"
 import {
   DropdownMenu,
@@ -13,7 +12,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { avatarGradient } from "@/lib/avatar-colors"
 import { authLevel, type AuthMode } from "@/lib/voip-client"
-import { ConnectionSecurityBadge } from "@/components/voip/server-access-dialog"
 import { useI18n } from "@/lib/i18n/provider"
 
 export type ServerCardInfo = {
@@ -38,6 +36,23 @@ interface ServerHomeProps {
   onEdit: (serverId: string) => void
   onRemove: (serverId: string) => void
   onOpenDeviceSettings: () => void
+  /** Opens the certificates stored on this device (desktop only). */
+  onOpenCertificateStorage?: () => void
+  /** Number of certificates in the device storage, shown in the menu. */
+  storedCertificateCount?: number
+}
+
+function Chip({ tone, children }: { tone: "accent" | "warning" | "muted"; children: React.ReactNode }) {
+  return (
+    <span
+      className={cn(
+        "rounded px-1.5 py-0.5",
+        tone === "accent" ? "bg-accent/15 text-accent" : tone === "warning" ? "bg-amber-400/15 text-amber-400" : "bg-secondary text-muted-foreground"
+      )}
+    >
+      {children}
+    </span>
+  )
 }
 
 /**
@@ -53,86 +68,116 @@ export function ServerHome({
   onSignInAsAdmin,
   onEdit,
   onRemove,
-  onOpenDeviceSettings
+  onOpenDeviceSettings,
+  onOpenCertificateStorage,
+  storedCertificateCount = 0
 }: ServerHomeProps) {
   const { t } = useI18n()
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-background">
-      <header className="flex h-14 shrink-0 items-center justify-between px-6 shadow-[0_1px_0_rgba(0,0,0,0.35)]">
-        <span className="text-lg font-bold tracking-tight text-foreground">Voixex</span>
-        <Button variant="ghost" size="sm" className="gap-2 text-muted-foreground" onClick={onOpenDeviceSettings}>
-          <Settings className="h-4 w-4" />
-          {t("home.deviceSettings")}
-        </Button>
+    <main className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-background p-8">
+      <header className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+              <AudioLines className="h-5 w-5" />
+            </div>
+            <span className="text-xl font-bold tracking-tight text-foreground">Voixex</span>
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">{t("home.tagline")}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onOpenDeviceSettings}
+            className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Settings className="h-4 w-4" />
+            {t("home.deviceSettings")}
+          </button>
+          <button
+            type="button"
+            onClick={onAdd}
+            className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Plus className="h-4 w-4" />
+            {t("home.addServer")}
+          </button>
+        </div>
       </header>
 
-      <div className="mx-auto w-full max-w-5xl px-6 py-8">
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+      <section className="mx-auto mt-12 max-w-5xl">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold text-foreground">{t("home.title")}</h1>
-            <p className="mt-1 text-sm text-muted-foreground">{t("home.subtitle")}</p>
+            <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{t("home.eyebrow")}</p>
+            <h1 className="mt-1 text-2xl font-bold text-foreground">{t("home.title")}</h1>
           </div>
-          <div className="flex gap-2">
-            <Button variant="secondary" className="gap-2" onClick={onImport}>
-              <FileKey className="h-4 w-4" />
-              {t("home.importCertificate")}
-            </Button>
-            <Button className="gap-2" onClick={onAdd}>
-              <Plus className="h-4 w-4" />
-              {t("home.addServer")}
-            </Button>
-          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="flex items-center gap-2 rounded-lg bg-secondary px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ShieldCheck className="h-4 w-4" />
+                {t("home.importCertificate")}
+                <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-60">
+              <DropdownMenuItem className="gap-2" onClick={onImport}>
+                <FileKey className="h-4 w-4" />
+                {t("home.importFromFile")}
+              </DropdownMenuItem>
+              {onOpenCertificateStorage ? (
+                <DropdownMenuItem className="gap-2" onClick={onOpenCertificateStorage}>
+                  <Archive className="h-4 w-4" />
+                  <span className="flex-1">{t("home.certificateStorage")}</span>
+                  <span className="text-xs text-muted-foreground">{storedCertificateCount}</span>
+                </DropdownMenuItem>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
-        {servers.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 rounded-xl bg-card px-6 py-16 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-secondary">
-              <Lock className="h-7 w-7 text-muted-foreground" />
-            </div>
-            <h2 className="text-lg font-semibold text-foreground">{t("home.emptyTitle")}</h2>
-            <p className="max-w-md text-sm text-muted-foreground">{t("home.emptyText")}</p>
-            <Button className="mt-2 gap-2" onClick={onAdd}>
-              <Plus className="h-4 w-4" />
-              {t("home.addServer")}
-            </Button>
-          </div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {servers.map((server) => {
-              const busy = busyServerId === server.id
-              return (
-                <div
-                  key={server.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => !busy && onOpen(server.id)}
-                  onKeyDown={(e) => {
-                    if ((e.key === "Enter" || e.key === " ") && !busy) {
-                      e.preventDefault()
-                      onOpen(server.id)
-                    }
-                  }}
-                  className="group relative flex cursor-pointer flex-col gap-3 rounded-xl bg-card p-4 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <div className="flex items-start gap-3">
-                    <div
-                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-base font-semibold text-white"
-                      style={{ background: avatarGradient(server.id) }}
-                    >
-                      {server.label.slice(0, 1).toUpperCase() || "S"}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[15px] font-semibold text-foreground">{server.label}</div>
-                      <div className="truncate text-xs text-muted-foreground">{server.address}</div>
-                    </div>
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+          {servers.map((server) => {
+            const busy = busyServerId === server.id
+            const offline = server.reachable === "offline"
+            return (
+              <div
+                key={server.id}
+                role="button"
+                tabIndex={0}
+                aria-busy={busy}
+                onClick={() => !busy && onOpen(server.id)}
+                onKeyDown={(e) => {
+                  if ((e.key === "Enter" || e.key === " ") && !busy) {
+                    e.preventDefault()
+                    onOpen(server.id)
+                  }
+                }}
+                className={cn(
+                  "group flex min-h-44 cursor-pointer flex-col rounded-xl bg-card p-4 text-left transition-all hover:-translate-y-0.5 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  offline && "opacity-65"
+                )}
+              >
+                <div className="flex items-start justify-between">
+                  <div
+                    className="flex size-10 items-center justify-center rounded-xl text-lg font-bold text-white"
+                    style={{ background: avatarGradient(server.id) }}
+                  >
+                    {server.label.slice(0, 1).toUpperCase() || "S"}
+                  </div>
+                  {busy ? (
+                    <Spinner className="h-4 w-4" />
+                  ) : (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <button
                           type="button"
                           onClick={(e) => e.stopPropagation()}
-                          className="rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                           aria-label={t("home.serverActions")}
+                          className="rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-card hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
                         >
                           <MoreHorizontal className="h-4 w-4" />
                         </button>
@@ -155,51 +200,54 @@ export function ServerHome({
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="flex min-w-0 flex-wrap items-center gap-1.5">
-                      <ConnectionSecurityBadge secure={server.secure} />
-                      {server.authMode ? (
-                        <span className="inline-flex items-center gap-1 text-accent">
-                          <ShieldCheck className="h-3.5 w-3.5" />
-                          {t("levels.short", { level: authLevel(server.authMode), name: t(`levels.${server.authMode}`) })}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-amber-400">
-                          <ShieldAlert className="h-3.5 w-3.5" />
-                          {t("home.needsProtection")}
-                        </span>
-                      )}
-                    </span>
-                    {busy ? (
-                      <Spinner className="h-3.5 w-3.5" />
-                    ) : (
-                      <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-                        <span
-                          className={cn(
-                            "h-2 w-2 rounded-full",
-                            server.reachable === "online"
-                              ? "bg-accent"
-                              : server.reachable === "offline"
-                                ? "bg-destructive"
-                                : "bg-muted-foreground/50"
-                          )}
-                        />
-                        {server.reachable === "online"
-                          ? t("home.online")
-                          : server.reachable === "offline"
-                            ? t("home.offline")
-                            : t("home.checking")}
-                      </span>
-                    )}
-                  </div>
+                  )}
                 </div>
-              )
-            })}
-          </div>
-        )}
+                <p className="mt-4 truncate font-semibold text-foreground">{server.label}</p>
+                <p className="mt-1 truncate text-xs text-muted-foreground">{server.address}</p>
+                <div className="mt-auto flex flex-wrap items-center gap-2 pt-4 text-[10px] font-semibold">
+                  <Chip tone={server.secure ? "accent" : "muted"}>{server.secure ? "HTTPS" : "HTTP"}</Chip>
+                  {server.authMode ? (
+                    <Chip tone="muted">{t("home.levelChip", { level: authLevel(server.authMode) })}</Chip>
+                  ) : (
+                    <Chip tone="warning">{t("home.needsProtection")}</Chip>
+                  )}
+                  <span
+                    className={cn(
+                      "ml-auto flex items-center gap-1",
+                      server.reachable === "online" ? "text-accent" : "text-muted-foreground"
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "size-1.5 rounded-full",
+                        server.reachable === "online" ? "bg-accent" : offline ? "bg-destructive" : "bg-muted-foreground/50"
+                      )}
+                    />
+                    {server.reachable === "online" ? t("home.online") : offline ? t("home.offline") : t("home.checking")}
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+          <button
+            type="button"
+            onClick={onAdd}
+            className="flex min-h-44 flex-col items-center justify-center gap-3 rounded-xl bg-card text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span className="flex size-10 items-center justify-center rounded-full bg-secondary">
+              <Plus className="h-5 w-5" />
+            </span>
+            <span className="text-sm font-medium">{t("home.addServer")}</span>
+          </button>
+        </div>
+      </section>
+
+      <div className="mx-auto mt-10 flex max-w-5xl items-center gap-3 rounded-xl bg-card p-4 text-sm text-muted-foreground">
+        <LockKeyhole className="h-5 w-5 shrink-0 text-accent" />
+        <p>
+          <span className="font-semibold text-foreground">{t("home.closedTitle")}</span> {t("home.closedText")}
+        </p>
       </div>
-    </div>
+    </main>
   )
 }

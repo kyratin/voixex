@@ -1,16 +1,14 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { ArrowLeft, Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Eye } from "lucide-react"
+import { ArrowLeft, ChevronDown, Hash, Lock, Settings, Volume2 } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { Slider } from "@/components/ui/slider"
-import { Label } from "@/components/ui/label"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useI18n } from "@/lib/i18n/provider"
-import { ConnectionSecurityBadge } from "@/components/voip/server-access-dialog"
 import { avatarGradient } from "@/lib/avatar-colors"
+import { ConnectionSecurityBadge } from "@/components/voip/server-access-dialog"
 
 export interface Channel {
   id: string
@@ -40,10 +38,14 @@ export interface VoiceUser {
 
 interface ChannelSidebarProps {
   serverName: string
+  /** host:port shown under the server name. */
+  serverAddress?: string
   /** Leave this server and go back to the server list. */
   onLeaveServer?: () => void
+  /** Opens settings (server tab for admins, "My profile here" otherwise). */
+  onOpenServerSettings?: () => void
   /** Connection (HTTPS/HTTP) and the member's protection level on this server. */
-  security?: { secure: boolean; levelLabel: string }
+  security?: { secure: boolean; levelLabel: string; levelHint?: string }
   serverBannerUrl?: string | null
   categories: ChannelCategory[]
   activeChannelId: string
@@ -51,229 +53,197 @@ interface ChannelSidebarProps {
   isInVoice?: boolean
   onChannelSelect: (channelId: string) => void
   voiceUsers?: Record<string, VoiceUser[]>
-  /** When set, voice rows can open per-user output volume (desktop UDP mixer on server). */
-  selfClientId?: string | null
-  peerVolumePct?: Record<string, number>
-  onPeerVolumeChange?: (roomId: string, targetClientId: string, targetName: string, volumePct: number) => void
-  enablePeerVolume?: boolean
 }
 
-export function ChannelSidebar({ 
+const STACK_LIMIT = 4
+
+/** Participants of a voice channel as a compact avatar stack (details live on the voice stage). */
+function VoiceUserStack({ users }: { users: VoiceUser[] }) {
+  const shown = users.slice(0, STACK_LIMIT)
+  const extra = users.length - shown.length
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="ml-auto flex shrink-0 items-center -space-x-1.5">
+          {shown.map((u) => (
+            <span
+              key={u.id}
+              className={cn(
+                "flex size-5 items-center justify-center rounded-full text-[9px] font-bold text-white ring-2 ring-card",
+                u.isSpeaking && "ring-accent"
+              )}
+              style={{ background: avatarGradient(u.id || u.name) }}
+            >
+              {u.avatar.slice(0, 1).toUpperCase()}
+            </span>
+          ))}
+          {extra > 0 ? (
+            <span className="flex size-5 items-center justify-center rounded-full bg-secondary text-[9px] font-semibold text-foreground ring-2 ring-card">
+              +{extra}
+            </span>
+          ) : null}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="right">
+        {users.map((u) => u.name).join(", ")}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+export function ChannelSidebar({
   serverName,
+  serverAddress,
   onLeaveServer,
+  onOpenServerSettings,
   security,
   serverBannerUrl,
-  categories, 
+  categories,
   activeChannelId,
   currentVoiceChannelId = "",
   isInVoice = false,
   onChannelSelect,
-  voiceUsers = {},
-  selfClientId = null,
-  peerVolumePct = {},
-  onPeerVolumeChange,
-  enablePeerVolume = false
+  voiceUsers = {}
 }: ChannelSidebarProps) {
   const { t } = useI18n()
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
 
   const toggleCategory = (categoryId: string) => {
-    setCollapsedCategories(prev => {
+    setCollapsedCategories((prev) => {
       const next = new Set(prev)
-      if (next.has(categoryId)) {
-        next.delete(categoryId)
-      } else {
-        next.add(categoryId)
-      }
+      if (next.has(categoryId)) next.delete(categoryId)
+      else next.add(categoryId)
       return next
     })
   }
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col bg-card">
-      {onLeaveServer ? (
-        <button
-          type="button"
-          onClick={onLeaveServer}
-          className="flex h-9 shrink-0 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          {t("sidebar.backToServers")}
-        </button>
-      ) : null}
-      {security ? (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pb-1.5 text-[11px] text-muted-foreground">
-          <ConnectionSecurityBadge secure={security.secure} />
-          <span className="truncate">{security.levelLabel}</span>
-        </div>
-      ) : null}
-      {serverBannerUrl ? (
-        <div className="relative h-20 shrink-0 overflow-hidden">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={serverBannerUrl} alt="" className="h-full w-full object-cover" />
-          <div className="absolute inset-0 bg-gradient-to-t from-card via-card/30 to-transparent" />
-          <div className="absolute bottom-0 left-0 right-0 truncate px-4 pb-1.5 text-sm font-semibold text-foreground">
-            {serverName}
-          </div>
-        </div>
-      ) : (
-        <div className="flex h-12 shrink-0 items-center px-4 shadow-[0_1px_0_rgba(0,0,0,0.35)]">
-          <span className="truncate text-[15px] font-semibold text-foreground">{serverName}</span>
-        </div>
-      )}
+      <div className="flex shrink-0 items-center gap-3 bg-sidebar px-4 py-3">
+        {onLeaveServer ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={onLeaveServer}
+                aria-label={t("sidebar.backToServers")}
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t("sidebar.backToServers")}</TooltipContent>
+          </Tooltip>
+        ) : null}
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">{t("sidebar.backToServers")}</span>
+        {onOpenServerSettings ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={onOpenServerSettings}
+                aria-label={t("sidebar.serverSettings")}
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Settings className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t("sidebar.serverSettings")}</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
 
+      {security ? (
+        <div className="flex shrink-0 items-center gap-2 px-4 pt-3 text-[11px] text-muted-foreground">
+          <ConnectionSecurityBadge secure={security.secure} />
+          <span className="truncate" title={security.levelHint}>
+            {security.levelLabel}
+          </span>
+        </div>
+      ) : null}
+
+      <div className="relative shrink-0 overflow-hidden px-4 pb-4 pt-2">
+        {serverBannerUrl ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={serverBannerUrl} alt="" className="absolute inset-0 h-full w-full object-cover opacity-40" />
+            <div className="absolute inset-0 bg-gradient-to-t from-card via-card/70 to-transparent" />
+          </>
+        ) : null}
+        <div className="relative">
+          <p className="truncate text-lg font-bold text-foreground">{serverName}</p>
+          {serverAddress ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{serverAddress}</p> : null}
+        </div>
+      </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="p-2">
+        <nav className="px-2 pb-2">
           {categories.map((category) => (
-            <div key={category.id} className="mb-1">
+            <div key={category.id} className="mb-5">
               <button
+                type="button"
                 onClick={() => toggleCategory(category.id)}
-                className="group/cat mb-0.5 mt-3 flex w-full items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                className="mb-1 flex w-full items-center gap-1 px-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
               >
                 <span className="flex-1 truncate text-left">{category.name}</span>
-                <ChevronDown className={cn(
-                  "h-3.5 w-3.5 shrink-0 opacity-70 transition-transform duration-200",
-                  collapsedCategories.has(category.id) && "-rotate-90"
-                )} />
+                <ChevronDown
+                  className={cn("h-3 w-3 shrink-0 transition-transform duration-200", collapsedCategories.has(category.id) && "-rotate-90")}
+                />
               </button>
 
-              <div className={cn(
-                "grid transition-all duration-200",
-                collapsedCategories.has(category.id) ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
-              )}>
-                <div className="overflow-hidden">
-                  <div className="space-y-0.5">
-                    {category.channels.map((channel) => (
-                      <div key={channel.id}>
-                        <button
-                          onClick={() => onChannelSelect(channel.id)}
-                          className={cn(
-                            "flex w-full items-center gap-1.5 rounded-md px-2 py-[5px] text-[15px] text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-foreground",
-                            activeChannelId === channel.id && "bg-sidebar-accent text-foreground hover:bg-sidebar-accent",
-                            isInVoice && currentVoiceChannelId === channel.id && "text-accent",
-                            channel.unread && "font-medium text-foreground"
-                          )}
-                        >
-                          {channel.type === "text" ? (
-                            <Hash className="h-[18px] w-[18px] shrink-0 opacity-70" />
-                          ) : (
-                            <Volume2 className="h-[18px] w-[18px] shrink-0 opacity-70" />
-                          )}
-                          {channel.isPrivate && (
-                            <Lock className="h-3 w-3 shrink-0 opacity-50" />
-                          )}
-                          <span className="flex-1 truncate text-left">
-                            {channel.name}
-                          </span>
-                          {channel.mentions && channel.mentions > 0 && (
-                            <Badge variant="destructive" className="h-4 min-w-4 px-1 text-[10px]">
-                              {channel.mentions}
-                            </Badge>
-                          )}
-                        </button>
-
-                        {channel.type === "voice" && voiceUsers[channel.id] && voiceUsers[channel.id].length > 0 && (
-                          <div className="space-y-px py-0.5 pl-5">
-                            {voiceUsers[channel.id].map((user) => (
-                              <VoiceChannelUserRow
-                                key={user.id}
-                                roomId={channel.id}
-                                user={user}
-                                selfClientId={selfClientId}
-                                volumePct={peerVolumePct[`${channel.id}:${user.id}`] ?? 100}
-                                enablePeerVolume={enablePeerVolume && Boolean(onPeerVolumeChange)}
-                                onPeerVolumeChange={onPeerVolumeChange}
-                              />
-                            ))}
-                          </div>
+              <div
+                className={cn(
+                  "grid transition-all duration-200",
+                  collapsedCategories.has(category.id) ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
+                )}
+              >
+                <div className="space-y-0.5 overflow-hidden">
+                  {category.channels.map((channel) => {
+                    const users = channel.type === "voice" ? (voiceUsers[channel.id] ?? []) : []
+                    const inThisVoice = isInVoice && currentVoiceChannelId === channel.id
+                    const active = channel.type === "text" ? activeChannelId === channel.id : inThisVoice
+                    const live = users.some((u) => u.isScreenSharing)
+                    return (
+                      <button
+                        key={channel.id}
+                        type="button"
+                        onClick={() => onChannelSelect(channel.id)}
+                        className={cn(
+                          "group flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                          active
+                            ? "bg-sidebar-accent text-foreground"
+                            : "text-muted-foreground hover:bg-sidebar-accent/70 hover:text-foreground",
+                          inThisVoice && "text-accent",
+                          channel.unread && !active && "font-semibold text-foreground"
                         )}
-                      </div>
-                    ))}
-                  </div>
+                      >
+                        {channel.type === "text" ? (
+                          <Hash className="h-4 w-4 shrink-0 opacity-70" />
+                        ) : (
+                          <Volume2 className={cn("h-4 w-4 shrink-0", inThisVoice ? "opacity-100" : "opacity-70")} />
+                        )}
+                        {channel.isPrivate ? <Lock className="h-3 w-3 shrink-0 opacity-50" /> : null}
+                        <span className="min-w-0 truncate">{channel.name}</span>
+                        {live ? (
+                          <span className="shrink-0 rounded bg-destructive px-1 py-px text-[9px] font-bold uppercase leading-none text-white">
+                            Live
+                          </span>
+                        ) : null}
+                        {channel.mentions && channel.mentions > 0 ? (
+                          <Badge variant="destructive" className="ml-auto h-4 min-w-4 px-1 text-[10px]">
+                            {channel.mentions}
+                          </Badge>
+                        ) : null}
+                        {users.length > 0 ? <VoiceUserStack users={users} /> : null}
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
             </div>
           ))}
-        </div>
+        </nav>
       </ScrollArea>
-    </div>
-  )
-}
-
-function VoiceChannelUserRow({
-  roomId,
-  user,
-  selfClientId,
-  volumePct,
-  enablePeerVolume,
-  onPeerVolumeChange
-}: {
-  roomId: string
-  user: VoiceUser
-  selfClientId: string | null
-  volumePct: number
-  enablePeerVolume: boolean
-  onPeerVolumeChange?: (roomId: string, targetClientId: string, targetName: string, volumePct: number) => void
-}) {
-  const { t } = useI18n()
-  const showVol = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
-  return (
-    <div className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm text-muted-foreground hover:bg-sidebar-accent/60">
-      <div
-        className={cn(
-          "flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white transition-shadow",
-          user.isSpeaking && "ring-2 ring-accent ring-offset-2 ring-offset-card"
-        )}
-        style={{ background: avatarGradient(user.id || user.name) }}
-      >
-        {user.avatar.slice(0, 1).toUpperCase()}
-      </div>
-      <span className={cn("min-w-0 flex-1 truncate", user.isSpeaking ? "text-foreground" : "text-foreground/80")}>
-        {user.name}
-      </span>
-      <div className="flex shrink-0 items-center gap-1">
-        {user.isScreenSharing && (
-          <span className="rounded bg-destructive px-1 py-px text-[9px] font-bold uppercase leading-none tracking-wide text-white" aria-label={t("sidebar.screenSharing")}>
-            Live
-          </span>
-        )}
-        {user.isWatchingScreen && <Eye className="h-3 w-3 text-muted-foreground" aria-label={t("sidebar.watchingStream")} />}
-        {user.isMuted && <MicOff className="h-3.5 w-3.5 text-muted-foreground" />}
-        {user.isDeafened && <Headphones className="h-3.5 w-3.5 text-destructive/80" />}
-        {showVol && (
-          <Popover>
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                title={t("sidebar.theirVolume")}
-              >
-                <Volume2 className="h-3.5 w-3.5" />
-              </button>
-            </PopoverTrigger>
-            <PopoverContent className="w-56 p-3" align="end" onOpenAutoFocus={(e) => e.preventDefault()}>
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <Label className="text-xs">{t("sidebar.theirVolume")}</Label>
-                  <span className="text-[11px] text-muted-foreground tabular-nums">{volumePct}%</span>
-                </div>
-                <Slider
-                  value={[volumePct]}
-                  min={0}
-                  max={200}
-                  step={1}
-                  onValueChange={([v]) => {
-                    const next = Number.isFinite(v) ? Math.max(0, Math.min(200, Math.round(v))) : 100
-                    onPeerVolumeChange(roomId, user.id, user.name, next)
-                  }}
-                />
-                <p className="text-[10px] text-muted-foreground">{t("sidebar.volumeDefaultHint")}</p>
-              </div>
-            </PopoverContent>
-          </Popover>
-        )}
-      </div>
     </div>
   )
 }

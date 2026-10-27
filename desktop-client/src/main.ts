@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { release } from "node:os"
 import { join, normalize, relative } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { IdentityStore, type IdentityServerInfo, type ServerCertificate } from "./identity-store.js"
+import { IdentityStore, type IdentityMeta, type IdentityServerInfo, type ServerCertificate } from "./identity-store.js"
 import { VoiceService } from "./voice-service.js"
 
 const voice = new VoiceService()
@@ -150,12 +150,28 @@ function loadFallbackErrorPage(win: BrowserWindow, error: string, target: string
   void win.loadURL(`data:text/html,${encodeURIComponent(html)}`)
 }
 
+/** Height of the title bar the UI draws (must match TITLE_BAR_HEIGHT in the frontend). */
+const TITLE_BAR_HEIGHT = 32
+// macOS: hidden title bar with the traffic lights centred in the UI's bar (the UI leaves room on the left).
+// Windows/Linux: hidden title bar with the native window buttons overlaid on the right.
+const customTitleBar =
+  process.platform === "darwin"
+    ? { titleBarStyle: "hidden" as const, trafficLightPosition: { x: 12, y: 9 } }
+    : {
+        titleBarStyle: "hidden" as const,
+        titleBarOverlay: { color: "#0f0f14", symbolColor: "#9494a1", height: TITLE_BAR_HEIGHT }
+      }
+
 function createWindow() {
   const iconPath = resolveRuntimeIconPath()
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
-    backgroundColor: "#111111",
+    minWidth: 960,
+    minHeight: 600,
+    backgroundColor: "#0f0f14",
+    // Drop the light system title bar; the UI draws a dark one under the native window controls.
+    ...customTitleBar,
     show: false,
     icon: iconPath ? nativeImage.createFromPath(iconPath) : undefined,
     webPreferences: {
@@ -172,8 +188,9 @@ function createWindow() {
     overrideBrowserWindowOptions: {
       width: 1280,
       height: 760,
-      backgroundColor: "#111111",
+      backgroundColor: "#0f0f14",
       autoHideMenuBar: true,
+      ...customTitleBar,
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
@@ -245,6 +262,8 @@ app.whenReady().then(async () => {
   ipcMain.handle("identity:get", (_event, ref: string) => identities.get(ref))
   ipcMain.handle("identity:sign", (_event, ref: string, message: string) => identities.sign(ref, message))
   ipcMain.handle("identity:remove", (_event, ref: string) => identities.remove(ref))
+  ipcMain.handle("identity:list", () => identities.list())
+  ipcMain.handle("identity:setMeta", (_event, ref: string, meta: IdentityMeta) => identities.setMeta(ref, meta ?? {}))
   ipcMain.handle("identity:export", async (event, ref: string, passphrase: string, server: IdentityServerInfo) => {
     const contents = identities.exportEncrypted(ref, passphrase, server)
     const win = BrowserWindow.fromWebContents(event.sender)

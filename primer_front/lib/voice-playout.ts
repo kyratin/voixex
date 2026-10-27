@@ -30,8 +30,8 @@ export class VoicePlayoutPrefetch {
   constructor(sampleRate: number, port: MessagePort, opts: number | VoicePlayoutOptions = {}) {
     this.port = port
     this.sampleRate = sampleRate
-    let startMs = 180
-    let maxQueuedSec = 0.9
+    let startMs = 60
+    let maxQueuedSec = 0.4
     if (typeof opts === "number") {
       startMs = opts
     } else {
@@ -76,6 +76,7 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
     this.maxBuffered = Math.round(48000 * 0.5)
     this.underruns = 0
     this.overflowDrops = 0
+    this.catchupDrops = 0
     this._tick = 0
     this.lastOut = 0
     this.port.onmessage = (e) => {
@@ -90,7 +91,8 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
         }
         const used = this._used()
         if (used > this.maxBuffered) {
-          const drop = used - this.maxBuffered
+          // Far behind (e.g. after the app was frozen): jump to the target at once.
+          const drop = used - this.startThreshold
           this.r = (this.r + drop) % L
           this.overflowDrops += drop
         }
@@ -103,6 +105,7 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
         this.started = false
         this.underruns = 0
         this.overflowDrops = 0
+        this.catchupDrops = 0
         this.lastOut = 0
       } else if (m.type === "configure") {
         if (typeof m.startThreshold === "number") this.startThreshold = m.startThreshold
@@ -124,19 +127,32 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
     }
     const L = this.buf.length
     let hadUnderrun = false
+    // More than ~2x the target queued: skip near-silent samples until back near the target.
+    // Latency drains during pauses without pitch shifts or jumps inside words.
+    let catchUp = this._used() > this.startThreshold * 2 + 960
     for (let i = 0; i < n; i++) {
       if (this.r === this.w) {
         hadUnderrun = true
         this.lastOut *= 0.97
         out[i] = this.lastOut
-      } else {
-        const s = this.buf[this.r]
-        this.r = (this.r + 1) % L
-        this.lastOut = s
-        out[i] = s
+        continue
       }
+      let s = this.buf[this.r]
+      this.r = (this.r + 1) % L
+      if (catchUp && s > -0.004 && s < 0.004 && this.r !== this.w) {
+        s = this.buf[this.r]
+        this.r = (this.r + 1) % L
+        this.catchupDrops += 1
+        if (this._used() <= this.startThreshold + 480) catchUp = false
+      }
+      this.lastOut = s
+      out[i] = s
     }
-    if (hadUnderrun) this.underruns += 1
+    if (hadUnderrun) {
+      this.underruns += 1
+      // Ran dry: wait for the target amount again instead of stuttering on every late packet.
+      this.started = false
+    }
     this._tick += 1
     if (this._tick >= 375) {
       this._tick = 0
@@ -144,7 +160,7 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
         type: "stats",
         bufferedSamples: this._used(),
         underruns: this.underruns,
-        overflowDrops: this.overflowDrops
+        overflowDrops: this.overflowDrops + this.catchupDrops
       })
     }
     return true

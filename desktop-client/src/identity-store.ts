@@ -29,12 +29,22 @@ export type IdentityServerInfo = {
   apiUseHttps?: boolean
 }
 
+/** Non-secret labels shown in the certificate list: which profile and server a key belongs to. */
+export type IdentityMeta = {
+  nick?: string
+  label?: string
+  /** host:port, so a stored certificate can sign in without typing the address. */
+  address?: string
+  secure?: boolean
+}
+
 type StoredIdentity = {
   publicKey: string
   /** PKCS#8 PEM encrypted by safeStorage, base64. */
   privateKeyEnc: string
   certificate: ServerCertificate | null
   createdAt: string
+  meta?: IdentityMeta
 }
 
 type StoreFile = { version: 1; identities: Record<string, StoredIdentity> }
@@ -86,7 +96,7 @@ export class IdentityStore {
     return createPrivateKey(pem)
   }
 
-  private save(publicKey: string, pkcs8Pem: string, certificate: ServerCertificate | null) {
+  private save(publicKey: string, pkcs8Pem: string, certificate: ServerCertificate | null, meta?: IdentityMeta) {
     this.ensureEncryption()
     const ref = randomUUID()
     const data = this.read()
@@ -94,7 +104,8 @@ export class IdentityStore {
       publicKey,
       privateKeyEnc: safeStorage.encryptString(pkcs8Pem).toString("base64"),
       certificate,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      ...(meta ? { meta } : {})
     }
     this.write(data)
     return ref
@@ -123,6 +134,32 @@ export class IdentityStore {
     const entry = this.read().identities[ref]
     if (!entry) return null
     return { publicKey: entry.publicKey, certificate: entry.certificate }
+  }
+
+  /** Every key on this device with its certificate and labels (no private material). */
+  list() {
+    return Object.entries(this.read().identities).map(([ref, entry]) => ({
+      ref,
+      publicKey: entry.publicKey,
+      certificate: entry.certificate,
+      createdAt: entry.createdAt,
+      meta: entry.meta ?? {}
+    }))
+  }
+
+  setMeta(ref: string, meta: IdentityMeta) {
+    const data = this.read()
+    const entry = data.identities[ref]
+    if (!entry) return
+    const clean = (v: unknown) => (typeof v === "string" ? v.slice(0, 200) : undefined)
+    entry.meta = {
+      ...entry.meta,
+      nick: clean(meta.nick) ?? entry.meta?.nick,
+      label: clean(meta.label) ?? entry.meta?.label,
+      address: clean(meta.address) ?? entry.meta?.address,
+      secure: typeof meta.secure === "boolean" ? meta.secure : entry.meta?.secure
+    }
+    this.write(data)
   }
 
   sign(ref: string, message: string) {
@@ -199,7 +236,12 @@ export class IdentityStore {
     if (derivedPublic !== parsed.publicKey || parsed.certificate?.publicKey !== parsed.publicKey) {
       throw new Error("The certificate file is damaged")
     }
-    const ref = this.save(parsed.publicKey, parsed.privateKey, parsed.certificate)
+    const server = parsed.server ?? {}
+    const ref = this.save(parsed.publicKey, parsed.privateKey, parsed.certificate, {
+      label: server.label,
+      address: server.apiHost ? (server.apiPort ? `${server.apiHost}:${server.apiPort}` : server.apiHost) : undefined,
+      secure: server.apiUseHttps
+    })
     return { ref, publicKey: parsed.publicKey, certificate: parsed.certificate, server: parsed.server ?? {} }
   }
 }

@@ -78,7 +78,8 @@ export const pt: TranslationDict = {
     voiceCategory: "VOZ",
     screenSharing: "A partilhar ecrã",
     watchingStream: "A ver a transmissão",
-    backToServers: "Os meus servidores"
+    backToServers: "Os meus servidores",
+    serverSettings: "Definições do servidor"
   },
   userPanel: {
     voiceConnected: "Voz ligada",
@@ -130,7 +131,13 @@ export const pt: TranslationDict = {
     webrtc: "WebRTC",
     popupStreaming: "A transmitir: {name}",
     popupViewers: "Espectadores: {names}",
-    popupNoFrame: "Sem fotograma ativo."
+    popupNoFrame: "Sem fotograma ativo.",
+    viewQuality: "Qualidade de visualização",
+    qualityOriginal: "Original",
+    viewQualityHint: "Uma qualidade menor usa menos largura de banda se a transmissão engasgar.",
+    viewQualityUnavailable: "A qualidade menor está disponível quando a transmissão também passa por WebRTC (LiveKit).",
+    restartHint: "As alterações reiniciam a sua transmissão automaticamente.",
+    streamRestarted: "Transmissão reiniciada com as novas definições"
   },
   chat: {
     toggleMembers: "Lista de membros",
@@ -145,16 +152,56 @@ export const pt: TranslationDict = {
     justNow: "agora",
     minutesAgo: "há {n} min",
     hoursAgo: "há {n} h",
-    daysAgo: "há {n} d"
+    daysAgo: "há {n} d",
+    today: "Hoje",
+    yesterday: "Ontem",
+    inputHint: "Enter — enviar · Shift + Enter — nova linha"
   },
   members: {
+    admins: "Administradores",
     title: "Membros",
     online: "Online",
-    offline: "Offline"
+    offline: "Offline",
+    owner: "Proprietário",
+    status_online: "Online",
+    status_idle: "Ausente",
+    status_dnd: "Não incomodar",
+    status_offline: "Offline"
+  },
+  roles: {
+    title: "Administradores",
+    intro: "Administradores podem alterar configurações do servidor, canais, o nível mínimo de proteção e os papéis de outros membros.",
+    empty: "Ainda não há membros registrados.",
+    admin: "Administrador",
+    you: "você",
+    lastAdmin: "Último administrador — não pode ser removido",
+    superuserHint: "Entrar com a senha de superusuário também sempre concede o papel de administrador."
+  },
+  deviceCerts: {
+    notIssued: "Este certificado nunca foi emitido por um servidor.",
+    needAddress: "O endereço do servidor deste certificado é desconhecido: abra “Outro endereço do servidor” e digite-o.",
+    eyebrow: "Este dispositivo",
+    title: "Certificados salvos",
+    intro: "Certificados criados ou importados neste computador. As chaves privadas ficam no chaveiro do sistema e não saem do dispositivo a menos que você as exporte.",
+    empty: "Ainda não há certificados neste dispositivo. Um é criado ao entrar em um servidor com nível de proteção 2 ou 3.",
+    export: "Exportar",
+    inUse: "Em uso",
+    unused: "Não vinculado",
+    issued: "emitido {date}",
+    pending: "ainda não emitido",
+    remove: "Excluir",
+    removeConfirm: "Excluir este certificado do dispositivo?",
+    removeInUse: "Um servidor salvo usa este certificado. Sem ele você precisará do nick e da senha (perfis de nível 2 não poderão entrar até importá-lo de novo).",
+    repeatPassphrase: "Repita a senha do arquivo",
+    saveFile: "Salvar arquivo",
+    unknownNick: "Perfil",
+    unknownServer: "servidor desconhecido"
   },
   settings: {
+    serverTitle: "Configurações do servidor — {name}",
+    serverDescription: "Só administradores veem isto. As mudanças valem para todos no servidor.",
     title: "Definições",
-    description: "Voz, atalhos, idioma e administração do servidor.",
+    description: "Voz, atalhos, idioma e seu perfil neste servidor.",
     tabLanguage: "Idioma",
     tabVoice: "Voz e vídeo",
     tabKeybinds: "Atalhos",
@@ -312,6 +359,8 @@ export const pt: TranslationDict = {
     levelRaised: "O servidor agora exige mais proteção. Entre novamente para aumentar o seu nível."
   },
   home: {
+    importFromFile: "De um arquivo…",
+    certificateStorage: "Armazenamento de certificados",
     deviceSettings: "Definições do dispositivo",
     title: "Os meus servidores",
     subtitle: "Cada servidor é um espaço fechado. Nada é visível até iniciar sessão.",
@@ -325,9 +374,16 @@ export const pt: TranslationDict = {
     online: "Online",
     offline: "Não responde",
     checking: "A verificar…",
-    signInAsAdmin: "Entrar com palavra-passe de superutilizador"
+    signInAsAdmin: "Entrar com palavra-passe de superutilizador",
+    tagline: "Espaços fechados para os seus",
+    eyebrow: "Ligações",
+    levelChip: "Nível {level}",
+    closedTitle: "Os seus servidores estão fechados.",
+    closedText: "Nada deles é visível até iniciar sessão. Adicione o endereço de um servidor ou importe um certificado para começar."
   },
   access: {
+    fromStorage: "Do armazenamento",
+    storedChosen: "O certificado já está neste dispositivo: a senha do arquivo não é necessária.",
     passwordTooShort: "A palavra-passe deve ter pelo menos {n} caracteres",
     passwordsDiffer: "As palavras-passe não coincidem",
     nickLength: "O nick deve ter 2 a 32 caracteres",
@@ -381,6 +437,7 @@ export const pt: TranslationDict = {
     levelNowPasswordOnly: "Este perfil agora entra com nick e palavra-passe neste servidor (alterado noutro dispositivo)."
   },
   authErrors: {
+    lastAdmin: "O servidor precisa de pelo menos um administrador. Nomeie outro primeiro.",
     invalidCredentials: "Nick ou palavra-passe errados para este certificado.",
     certRevoked: "O certificado deste dispositivo foi revogado. Importe outro certificado ou fale com o administrador.",
     tooManyAttempts: "Demasiadas tentativas. Aguarde alguns minutos e tente novamente.",
@@ -465,7 +522,8 @@ export const pt: TranslationDict = {
     policyHint: "Os membros abaixo deste nível não podem entrar até subirem o seu. Perfis ainda sem proteção (só palavra-passe do servidor) contam como nível 0. Os ligados abaixo dele são desligados.",
     policyNone: "Sem requisito",
     policyAtLeast: "Nível {level}+ ({name})",
-    policySaved: "Guardado"
+    policySaved: "Guardado",
+    sidebarShort: "Proteção · nível {level}"
   },
   time: {
     months: ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]

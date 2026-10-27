@@ -39,7 +39,18 @@ export type RosterMember = {
   mediaEngine?: MediaEngineMode
 }
 
+/** A profile registered on the server, online or not. */
+export type RegisteredMember = {
+  clientId: string
+  displayName: string
+  roles: Array<{ id: string; key: string; name: string }>
+  isAdmin: boolean
+  joinedAt: string
+}
+
 export type RealtimeState = {
+  /** Every registered profile (empty until loaded or on servers without the endpoint). */
+  registeredMembers: RegisteredMember[]
   rooms: Array<{ id: string; name: string; kind: "voice" | "text" }>
   rosterByRoom: Record<string, RosterMember[]>
   lobby: RosterMember[]
@@ -240,6 +251,7 @@ export class VoipClient {
   private mediaToken: string | null = null
   private listeners = new Set<(s: RealtimeState) => void>()
   private state: RealtimeState = {
+    registeredMembers: [],
     rooms: [],
     rosterByRoom: {},
     lobby: [],
@@ -257,7 +269,8 @@ export class VoipClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private lastServerGeneration: number | null = null
   private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
-  private screenResyncListeners = new Set<(roomId: string) => void>()
+  /** fallback: a viewer needs the WebSocket stream; false (or old servers) = someone joined. */
+  private screenResyncListeners = new Set<(roomId: string, fallback: boolean) => void>()
   
   setApiBase(url: string) {
     this.apiBase = url.replace(/\/+$/, "")
@@ -563,6 +576,31 @@ export class VoipClient {
     return me
   }
 
+  /** Loads all registered members; older servers without the endpoint keep the list empty. */
+  async refreshMembers(serverId = this.currentServerId) {
+    if (!this.authToken || !serverId) return
+    try {
+      const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/members`, { headers: { Authorization: `Bearer ${this.authToken}` } })
+      if (!res.ok) return
+      const body = (await res.json()) as { members: RegisteredMember[] }
+      if (serverId !== this.currentServerId) return
+      this.state.registeredMembers = body.members
+      this.emit()
+    } catch {
+      /* offline: keep the last list */
+    }
+  }
+
+  async setMemberAdmin(serverId: string, clientId: string, admin: boolean) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/members/${clientId}/admin`, {
+      method: admin ? "PUT" : "DELETE",
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!res.ok) throw await errorFromResponse(res, "role change failed")
+    await this.refreshMembers(serverId)
+  }
+
   async updateProfile(serverId: string, displayName: string) {
     if (!this.authToken) throw new Error("not authorized")
     const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/me`, {
@@ -642,6 +680,7 @@ export class VoipClient {
     this.pendingWsMessages = []
     this.lastServerGeneration = null
     this.state = {
+      registeredMembers: [],
       rooms: [],
       rosterByRoom: {},
       lobby: [],
@@ -706,9 +745,11 @@ export class VoipClient {
       if (data.type === "screen_share_resync_request") {
         const roomId = data.roomId as string
         if (typeof roomId !== "string") return
+        // Servers before 0.5 do not say why; treat that as a viewer needing the WS stream.
+        const fallback = data.fallback !== false
         for (const cb of this.screenResyncListeners) {
           try {
-            cb(roomId)
+            cb(roomId, fallback)
           } catch {
             /* ignore */
           }
@@ -718,6 +759,7 @@ export class VoipClient {
       const typed = data as
         | { type: "hello"; clientId: string; serverId: string; serverGeneration?: number; bannerUrl?: string | null }
         | { type: "server_appearance_updated"; bannerUrl: string | null }
+        | { type: "members_changed"; clientId?: string }
         | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
         | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
@@ -734,6 +776,8 @@ export class VoipClient {
         | { type: "chat_message"; message: ChatMessage }
         | { type: "screen_share_state"; clientId: string; roomId: string | null; active: boolean }
       if (typed.type === "hello") {
+        // (Re)connected: the member list may have changed while we were away.
+        void this.refreshMembers()
         if (typeof typed.serverGeneration === "number") {
           this.lastServerGeneration = typed.serverGeneration
         }
@@ -742,6 +786,12 @@ export class VoipClient {
         }
       } else if (typed.type === "server_appearance_updated") {
         this.state.serverBannerUrl = typed.bannerUrl?.trim() || null
+      } else if (typed.type === "members_changed") {
+        void this.refreshMembers()
+        // Our own roles changed: reload permissions so admin-only UI appears or disappears.
+        if (this.currentServerId && typed.clientId && typed.clientId === this.state.me?.clientId) {
+          void this.getMe(this.currentServerId).catch(() => {})
+        }
       } else if (typed.type === "rooms_snapshot") {
         this.state.rooms = typed.rooms
       } else if (typed.type === "rooms_updated") {
@@ -856,6 +906,11 @@ export class VoipClient {
     this.sendWsEvent({ type: "sync_presence", ...input })
   }
 
+  /** Viewer on a lower LiveKit layer: ask the server to stop relaying the full WS screen stream. */
+  setScreenRelay(enabled: boolean) {
+    this.sendWsEvent({ type: "set_screen_relay", enabled })
+  }
+
   setWatchingScreen(watching: boolean, roomId?: string) {
     this.sendWsEvent({ type: "set_watching_screen", watching, roomId })
   }
@@ -878,8 +933,8 @@ export class VoipClient {
   }
 
   /** Ask server to signal the active sharer in this voice room (MSE needs a fresh WebM header). */
-  requestScreenResync(roomId: string) {
-    this.sendWsEvent({ type: "request_screen_resync", roomId })
+  requestScreenResync(roomId: string, fallback = true) {
+    this.sendWsEvent({ type: "request_screen_resync", roomId, fallback })
   }
 
   /** Reliable screen: one MediaRecorder blob per message (TCP/WebSocket). */
@@ -895,7 +950,7 @@ export class VoipClient {
   }
 
   /** Only the active screen sharer receives this (server targets their socket). */
-  subscribeScreenResyncRequests(cb: (roomId: string) => void) {
+  subscribeScreenResyncRequests(cb: (roomId: string, fallback: boolean) => void) {
     this.screenResyncListeners.add(cb)
     return () => {
       this.screenResyncListeners.delete(cb)

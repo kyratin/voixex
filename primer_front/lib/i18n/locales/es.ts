@@ -78,7 +78,8 @@ export const es: TranslationDict = {
     voiceCategory: "VOZ",
     screenSharing: "Compartiendo pantalla",
     watchingStream: "Viendo la transmisión",
-    backToServers: "Mis servidores"
+    backToServers: "Mis servidores",
+    serverSettings: "Ajustes del servidor"
   },
   userPanel: {
     voiceConnected: "Voz conectada",
@@ -130,7 +131,13 @@ export const es: TranslationDict = {
     webrtc: "WebRTC",
     popupStreaming: "Transmitiendo: {name}",
     popupViewers: "Espectadores: {names}",
-    popupNoFrame: "No hay fotograma activo."
+    popupNoFrame: "No hay fotograma activo.",
+    viewQuality: "Calidad de visualización",
+    qualityOriginal: "Original",
+    viewQualityHint: "Una calidad menor usa menos ancho de banda si la transmisión se entrecorta.",
+    viewQualityUnavailable: "La calidad menor está disponible cuando la transmisión también va por WebRTC (LiveKit).",
+    restartHint: "Los cambios reinician tu transmisión automáticamente.",
+    streamRestarted: "Transmisión reiniciada con los nuevos ajustes"
   },
   chat: {
     toggleMembers: "Lista de miembros",
@@ -145,16 +152,56 @@ export const es: TranslationDict = {
     justNow: "ahora",
     minutesAgo: "hace {n} min",
     hoursAgo: "hace {n} h",
-    daysAgo: "hace {n} d"
+    daysAgo: "hace {n} d",
+    today: "Hoy",
+    yesterday: "Ayer",
+    inputHint: "Enter — enviar · Shift + Enter — nueva línea"
   },
   members: {
+    admins: "Administradores",
     title: "Miembros",
     online: "En línea",
-    offline: "Desconectados"
+    offline: "Desconectados",
+    owner: "Propietario",
+    status_online: "En línea",
+    status_idle: "Ausente",
+    status_dnd: "No molestar",
+    status_offline: "Desconectado"
+  },
+  roles: {
+    title: "Administradores",
+    intro: "Los administradores pueden cambiar los ajustes del servidor, los canales, el nivel mínimo de protección y los roles de otros miembros.",
+    empty: "Aún no hay miembros registrados.",
+    admin: "Administrador",
+    you: "tú",
+    lastAdmin: "Último administrador: no se puede quitar",
+    superuserHint: "Iniciar sesión con la contraseña de superusuario también otorga siempre el rol de administrador."
+  },
+  deviceCerts: {
+    notIssued: "Este certificado nunca fue emitido por un servidor.",
+    needAddress: "Se desconoce la dirección del servidor de este certificado: abre «Otra dirección del servidor» e introdúcela.",
+    eyebrow: "Este dispositivo",
+    title: "Certificados guardados",
+    intro: "Certificados creados o importados en este equipo. Las claves privadas se guardan en el llavero del sistema y no salen del dispositivo salvo que las exportes.",
+    empty: "Aún no hay certificados en este dispositivo. Se crea uno al unirte a un servidor con nivel de protección 2 o 3.",
+    export: "Exportar",
+    inUse: "En uso",
+    unused: "Sin vincular",
+    issued: "emitido {date}",
+    pending: "aún no emitido",
+    remove: "Eliminar",
+    removeConfirm: "¿Eliminar este certificado del dispositivo?",
+    removeInUse: "Un servidor guardado usa este certificado. Sin él necesitarás tu nick y contraseña (los perfiles de nivel 2 no podrán entrar hasta que lo vuelvas a importar).",
+    repeatPassphrase: "Repite la contraseña del archivo",
+    saveFile: "Guardar archivo",
+    unknownNick: "Perfil",
+    unknownServer: "servidor desconocido"
   },
   settings: {
+    serverTitle: "Ajustes del servidor — {name}",
+    serverDescription: "Solo lo ven los administradores. Los cambios afectan a todos en el servidor.",
     title: "Ajustes",
-    description: "Voz, atajos, idioma y administración del servidor.",
+    description: "Voz, atajos, idioma y tu perfil en este servidor.",
     tabLanguage: "Idioma",
     tabVoice: "Voz y vídeo",
     tabKeybinds: "Atajos",
@@ -312,6 +359,8 @@ export const es: TranslationDict = {
     levelRaised: "El servidor ahora exige más protección. Vuelve a entrar para subir tu nivel."
   },
   home: {
+    importFromFile: "Desde un archivo…",
+    certificateStorage: "Almacén de certificados",
     deviceSettings: "Ajustes del dispositivo",
     title: "Mis servidores",
     subtitle: "Cada servidor es un espacio cerrado. No se ve nada hasta que inicias sesión.",
@@ -325,9 +374,16 @@ export const es: TranslationDict = {
     online: "En línea",
     offline: "No responde",
     checking: "Comprobando…",
-    signInAsAdmin: "Entrar con contraseña de superusuario"
+    signInAsAdmin: "Entrar con contraseña de superusuario",
+    tagline: "Espacios cerrados para los tuyos",
+    eyebrow: "Conexiones",
+    levelChip: "Nivel {level}",
+    closedTitle: "Tus servidores están cerrados.",
+    closedText: "No se ve nada de ellos hasta que inicias sesión. Añade la dirección de un servidor o importa un certificado para empezar."
   },
   access: {
+    fromStorage: "Del almacén",
+    storedChosen: "El certificado ya está en este dispositivo: no hace falta la contraseña del archivo.",
     passwordTooShort: "La contraseña debe tener al menos {n} caracteres",
     passwordsDiffer: "Las contraseñas no coinciden",
     nickLength: "El nick debe tener de 2 a 32 caracteres",
@@ -381,6 +437,7 @@ export const es: TranslationDict = {
     levelNowPasswordOnly: "Este perfil ahora entra con nick y contraseña en este servidor (cambiado en otro dispositivo)."
   },
   authErrors: {
+    lastAdmin: "El servidor necesita al menos un administrador. Nombra a otro primero.",
     invalidCredentials: "Nick o contraseña incorrectos para este certificado.",
     certRevoked: "El certificado de este dispositivo fue revocado. Importa otro certificado o habla con el administrador.",
     tooManyAttempts: "Demasiados intentos. Espera unos minutos y vuelve a intentarlo.",
@@ -465,7 +522,8 @@ export const es: TranslationDict = {
     policyHint: "Los miembros por debajo de este nivel no podrán entrar hasta subir el suyo. Los perfiles aún sin proteger (solo contraseña del servidor) cuentan como nivel 0. Los conectados por debajo se desconectan.",
     policyNone: "Sin requisito",
     policyAtLeast: "Nivel {level}+ ({name})",
-    policySaved: "Guardado"
+    policySaved: "Guardado",
+    sidebarShort: "Protección · nivel {level}"
   },
   time: {
     months: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]

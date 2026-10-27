@@ -9,7 +9,9 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "opusscript": "^0.1.1"
+  },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "tsx": "^4.20.6",
