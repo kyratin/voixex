@@ -317,6 +317,7 @@ export const pt: TranslationDict = {
     threshold: "Limiar: {label}"
   },
   notices: {
+    serverTooOldForPhoneShare: "Compartilhar do celular requer um servidor mais novo (0.6.2 ou superior).",
     channelBannerSaved: "Banner do canal guardado",
     fileUploaded: "Ficheiro enviado",
     anotherStreaming: "Outro participante já está a transmitir neste canal.",

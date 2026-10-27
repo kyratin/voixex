@@ -87,6 +87,17 @@ function getBuildTimeConnectionDefaults() {
   return { host, port, useHttps, password, udpPort }
 }
 
+/** The `sub` claim of a JWT (LiveKit tokens carry the participant identity there). */
+function jwtSubject(token: string): string {
+  try {
+    const part = token.split(".")[1] ?? ""
+    const json = atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "="))
+    return String((JSON.parse(json) as { sub?: unknown }).sub ?? "")
+  } catch {
+    return ""
+  }
+}
+
 /** "host:port" (as stored with a device certificate) → host and port. */
 function splitAddress(address: string): { apiHost: string; apiPort: string } {
   const i = address.lastIndexOf(":")
@@ -3025,6 +3036,9 @@ export default function VoIPApp() {
     if (!isInVoice || !currentVoiceChannel || !voiceServerIdRef.current) throw new Error(t("notices.joinVoiceFirst"))
     if (isScreenSharingRef.current) return
     const token = await getVoiceWsClientRef.current().getSfuToken(voiceServerIdRef.current, currentVoiceChannel, "screen")
+    // Servers before 0.6.2 ignore purpose=screen and return our own identity, which would kick
+    // this phone's voice/stream session out of the LiveKit room.
+    if (!jwtSubject(token.token).endsWith(":screen")) throw new Error(t("notices.serverTooOldForPhoneShare"))
     const result = await startNativeScreenShare(token.url, token.token)
     if (!result.started) {
       if (result.reason === "denied") return

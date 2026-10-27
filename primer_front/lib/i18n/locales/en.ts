@@ -316,6 +316,7 @@ export const en = {
     threshold: "{label} threshold"
   },
   notices: {
+    serverTooOldForPhoneShare: "Sharing from a phone needs a newer server (0.6.2 or later).",
     channelBannerSaved: "Channel banner saved",
     fileUploaded: "File uploaded",
     anotherStreaming: "Another participant is already streaming in this channel.",

@@ -317,6 +317,7 @@ export const es: TranslationDict = {
     threshold: "Umbral: {label}"
   },
   notices: {
+    serverTooOldForPhoneShare: "Compartir desde el teléfono requiere un servidor más reciente (0.6.2 o superior).",
     channelBannerSaved: "Banner del canal guardado",
     fileUploaded: "Archivo subido",
     anotherStreaming: "Otro participante ya está transmitiendo en este canal.",
