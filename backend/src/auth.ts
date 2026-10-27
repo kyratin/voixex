@@ -2,10 +2,36 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, si
 import type Database from "better-sqlite3"
 
 /**
- * Member authentication: a member proves possession of a device certificate (Ed25519 key the
- * server signed at registration) and knows their nick + personal password. The shared server
- * password is only needed to register (or to protect an existing pre-auth profile).
+ * Member authentication. The shared server password is needed once, to create (or protect) a
+ * profile; after that the member signs in at the protection level they chose (AuthMode).
+ * A device certificate is an Ed25519 key the server signed for that member.
  */
+
+/**
+ * password             — nick + personal password, from any device
+ * certificate          — this device's certificate alone
+ * password_certificate — certificate + nick + personal password
+ */
+export type AuthMode = "password" | "certificate" | "password_certificate"
+
+export const AUTH_MODES: readonly AuthMode[] = ["password", "certificate", "password_certificate"]
+
+export function isAuthMode(value: unknown): value is AuthMode {
+  return typeof value === "string" && (AUTH_MODES as readonly string[]).includes(value)
+}
+
+export function modeNeedsPassword(mode: AuthMode) {
+  return mode !== "certificate"
+}
+
+export function modeNeedsCertificate(mode: AuthMode) {
+  return mode !== "password"
+}
+
+/** 1 password, 2 certificate, 3 both; 0 is an unprotected (server-password-only) profile. */
+export function authLevel(mode: AuthMode | null) {
+  return mode === "password" ? 1 : mode === "certificate" ? 2 : mode === "password_certificate" ? 3 : 0
+}
 
 // DER prefix of an Ed25519 SubjectPublicKeyInfo; followed by the raw 32-byte key.
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex")

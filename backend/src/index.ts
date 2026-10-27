@@ -18,6 +18,11 @@ import { createMediaTcpServer } from "./media-tcp.js"
 import {
   AttemptLimiter,
   ChallengeStore,
+  authLevel,
+  isAuthMode,
+  modeNeedsCertificate,
+  modeNeedsPassword,
+  type AuthMode,
   isValidNick,
   isValidPassword,
   loadServerSigningKey,
@@ -639,6 +644,8 @@ async function issueJoinForServer(input: {
   displayName: string
   superuserPassword?: string
   certId?: string
+  credentialed?: boolean
+  limited?: boolean
 }) {
   const existingMember = db
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
@@ -709,7 +716,9 @@ async function issueJoinForServer(input: {
       clientId: input.clientId,
       displayName: resolvedName,
       mediaSeed,
-      ...(input.certId ? { certId: input.certId } : {})
+      ...(input.certId ? { certId: input.certId } : {}),
+      ...(input.credentialed ? { credentialed: true } : {}),
+      ...(input.limited ? { limited: true } : {})
     },
     config.tokenSecret
   )
@@ -802,11 +811,14 @@ app.post("/v1/servers/:serverId/join", async (req, rep) => {
 })
 
 // ---------------------------------------------------------------------------
-// Member authentication: device certificate + nick + personal password.
-// The shared server password only gates registration and claiming old profiles.
+// Member authentication. The shared server password is needed once, to create (or protect) a
+// profile. Afterwards the member signs in at the protection level they chose:
+//   password             — nick + personal password, from any device
+//   certificate          — this device's certificate alone
+//   password_certificate — certificate + nick + personal password
 // ---------------------------------------------------------------------------
 
-type CredentialsRow = { client_id: string; nick: string; nick_key: string; password_hash: string }
+type CredentialsRow = { client_id: string; nick: string; nick_key: string; password_hash: string; auth_mode: string }
 type CertificateRow = {
   id: string
   server_id: string
@@ -820,8 +832,24 @@ type CertificateRow = {
 
 function getCredentials(serverId: string, clientId: string) {
   return db
-    .prepare("SELECT client_id, nick, nick_key, password_hash FROM member_credentials WHERE server_id = ? AND client_id = ?")
+    .prepare(
+      "SELECT client_id, nick, nick_key, password_hash, auth_mode FROM member_credentials WHERE server_id = ? AND client_id = ?"
+    )
     .get(serverId, clientId) as CredentialsRow | undefined
+}
+
+function credentialsMode(row: CredentialsRow): AuthMode {
+  return isAuthMode(row.auth_mode) ? row.auth_mode : "password_certificate"
+}
+
+/** Minimum protection level (0 = none, 1..3) the server admin requires to enter. */
+function serverMinLevel(serverId: string) {
+  const row = db.prepare("SELECT min_auth_level FROM servers WHERE id = ?").get(serverId) as { min_auth_level: number } | undefined
+  return row?.min_auth_level ?? 0
+}
+
+function levelTooLow(minLevel: number) {
+  return { message: `this server requires protection level ${minLevel} or higher`, code: "level_too_low", minLevel }
 }
 
 function isCertificateActive(certId: string) {
@@ -829,6 +857,13 @@ function isCertificateActive(certId: string) {
     | { revoked_at: string | null }
     | undefined
   return Boolean(row && !row.revoked_at)
+}
+
+function activeCertificateCount(serverId: string, clientId: string) {
+  const row = db
+    .prepare("SELECT COUNT(*) AS c FROM member_certificates WHERE server_id = ? AND client_id = ? AND revoked_at IS NULL")
+    .get(serverId, clientId) as { c: number }
+  return row.c
 }
 
 function listCertificates(serverId: string, clientId: string) {
@@ -847,19 +882,34 @@ function listCertificates(serverId: string, clientId: string) {
   }))
 }
 
+function securitySummary(serverId: string, clientId: string) {
+  const creds = getCredentials(serverId, clientId)
+  return {
+    minAuthLevel: serverMinLevel(serverId),
+    protected: Boolean(creds),
+    nick: creds?.nick ?? null,
+    authMode: creds ? credentialsMode(creds) : null,
+    hasPassword: Boolean(creds?.password_hash),
+    certificates: listCertificates(serverId, clientId)
+  }
+}
+
 /** Why a password-only /v1/join is refused, or null when it is allowed. */
 function legacyJoinError(serverId: string, clientId: string) {
   // Never let the old path open a protected profile: client ids are visible to every member.
   if (getCredentials(serverId, clientId)) {
-    return { message: "this profile is protected; sign in with your certificate, nick and password", code: "profile_protected" }
+    return { message: "this profile is protected; sign in with your nick, password or certificate", code: "profile_protected" }
   }
+  // An unprotected profile is level 0, below any minimum the admin set.
+  const minLevel = serverMinLevel(serverId)
+  if (minLevel > 0) return levelTooLow(minLevel)
   if (config.legacyJoin === "open") return null
   if (config.legacyJoin === "off") {
     return { message: "password-only join is disabled on this server", code: "legacy_join_disabled" }
   }
   const member = db.prepare("SELECT 1 FROM server_members WHERE server_id = ? AND client_id = ?").get(serverId, clientId)
   if (!member) {
-    return { message: "new members register with a nick, password and certificate; update the client", code: "registration_required" }
+    return { message: "new members create a protected profile; update the client", code: "registration_required" }
   }
   return null
 }
@@ -877,6 +927,12 @@ function isNickTaken(serverId: string, nick: string, exceptClientId?: string) {
   return members.some((m) => m.client_id !== exceptClientId && nickKey(m.display_name) === key)
 }
 
+function currentServer() {
+  return db.prepare("SELECT id, name, access_password_hash FROM servers ORDER BY created_at DESC LIMIT 1").get() as
+    | { id: string; name: string; access_password_hash: string }
+    | undefined
+}
+
 /** Checks the shared server password; the first registration on an empty instance creates the server. */
 async function checkServerPassword(
   serverPassword: string,
@@ -885,20 +941,15 @@ async function checkServerPassword(
   if (serverPasswordAttempts.blocked("all")) {
     return { status: 429, error: { message: "too many attempts, try again later", code: "too_many_attempts" } }
   }
-  let server = db
-    .prepare("SELECT id, access_password_hash FROM servers ORDER BY created_at DESC LIMIT 1")
-    .get() as { id: string; access_password_hash: string } | undefined
+  let server = currentServer()
   if (!server) {
     if (!options.createIfMissing) return { status: 404, error: { message: "server not found", code: "server_not_found" } }
     const id = randomUUID()
+    const name = options.serverName ?? "Main Server"
     const hash = await bcrypt.hash(serverPassword, 10)
-    db.prepare("INSERT INTO servers(id, name, access_password_hash) VALUES (?, ?, ?)").run(
-      id,
-      options.serverName ?? "Main Server",
-      hash
-    )
+    db.prepare("INSERT INTO servers(id, name, access_password_hash) VALUES (?, ?, ?)").run(id, name, hash)
     ensureDefaultRooms(id)
-    server = { id, access_password_hash: hash }
+    server = { id, name, access_password_hash: hash }
   }
   if (!(await bcrypt.compare(serverPassword, server.access_password_hash))) {
     serverPasswordAttempts.record("all")
@@ -928,7 +979,7 @@ function closeSessions(serverId: string, clientId: string, certId?: string) {
     const meta = wsClientMeta.get(ws)
     if (certId && meta?.certId !== certId) continue
     try {
-      ws.close(4003, "certificate revoked")
+      ws.close(4003, "session ended")
     } catch {
       // already closing
     }
@@ -949,14 +1000,32 @@ function revokeCertificate(serverId: string, clientId: string, certId: string, r
 const nickSchema = z.string().max(64)
 const passwordSchema = z.string().max(256)
 const publicKeySchema = z.string().max(128)
+const authModeSchema = z.enum(["password", "certificate", "password_certificate"])
 
-function validateNewIdentity(input: { nick?: string; password: string; publicKey: string }) {
+/** Checks that what the chosen level needs (password and/or device key) is present and valid. */
+function validateProtection(input: { nick?: string; authMode: AuthMode; password?: string; publicKey?: string }) {
   if (input.nick !== undefined && !isValidNick(input.nick)) {
     return { message: "nick must be 2-32 letters, digits, spaces, dots, dashes or underscores", code: "invalid_nick" }
   }
-  if (!isValidPassword(input.password)) return { message: "password must be at least 8 characters", code: "weak_password" }
-  if (!parseEd25519PublicKey(input.publicKey)) return { message: "invalid public key", code: "invalid_public_key" }
+  if (modeNeedsPassword(input.authMode) && !isValidPassword(input.password ?? "")) {
+    return { message: "password must be at least 8 characters", code: "weak_password" }
+  }
+  if (modeNeedsCertificate(input.authMode) && !parseEd25519PublicKey(input.publicKey ?? "")) {
+    return { message: "invalid public key", code: "invalid_public_key" }
+  }
   return null
+}
+
+async function storeCredentials(serverId: string, clientId: string, nick: string, authMode: AuthMode, password?: string) {
+  const hash = modeNeedsPassword(authMode) && password ? await bcrypt.hash(password, 10) : ""
+  db.prepare(
+    "INSERT INTO member_credentials(server_id, client_id, nick, nick_key, password_hash, auth_mode) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(serverId, clientId, nick, nickKey(nick), hash, authMode)
+}
+
+function protectionResult(serverId: string, clientId: string, nick: string, authMode: AuthMode, publicKey?: string) {
+  const certificate = modeNeedsCertificate(authMode) && publicKey ? issueCertificate(serverId, clientId, publicKey) : null
+  return { serverId, clientId, nick, authMode, certificate }
 }
 
 app.post("/v1/auth/register", async (req, rep) => {
@@ -964,38 +1033,39 @@ app.post("/v1/auth/register", async (req, rep) => {
     .object({
       serverPassword: z.string().min(1).max(256),
       nick: nickSchema,
-      password: passwordSchema,
-      publicKey: publicKeySchema,
+      // Clients from before protection levels always used certificate + password.
+      authMode: authModeSchema.default("password_certificate"),
+      password: passwordSchema.optional(),
+      publicKey: publicKeySchema.optional(),
       serverName: z.string().min(1).max(64).optional()
     })
     .parse(req.body)
   const nick = normalizeNick(body.nick)
-  const invalid = validateNewIdentity({ nick, password: body.password, publicKey: body.publicKey })
+  const invalid = validateProtection({ nick, authMode: body.authMode, password: body.password, publicKey: body.publicKey })
   if (invalid) return rep.code(400).send(invalid)
   const server = await checkServerPassword(body.serverPassword, { createIfMissing: true, serverName: body.serverName })
   if ("error" in server) return rep.code(server.status).send(server.error)
+  const minLevel = serverMinLevel(server.serverId)
+  if (authLevel(body.authMode) < minLevel) return rep.code(400).send(levelTooLow(minLevel))
   if (isNickTaken(server.serverId, nick)) return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
   const clientId = randomUUID()
-  const hash = await bcrypt.hash(body.password, 10)
   try {
-    db.prepare(
-      "INSERT INTO member_credentials(server_id, client_id, nick, nick_key, password_hash) VALUES (?, ?, ?, ?, ?)"
-    ).run(server.serverId, clientId, nick, nickKey(nick), hash)
+    await storeCredentials(server.serverId, clientId, nick, body.authMode, body.password)
   } catch {
     return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
   }
-  const certificate = issueCertificate(server.serverId, clientId, body.publicKey)
-  return rep.code(201).send({ serverId: server.serverId, clientId, nick, certificate })
+  return rep.code(201).send(protectionResult(server.serverId, clientId, nick, body.authMode, body.publicKey))
 })
 
-/** Protects a profile created before certificates existed; keeps its nick, messages and history. */
+/** Protects a profile created before protection existed; keeps its nick, messages and history. */
 app.post("/v1/auth/claim", async (req, rep) => {
   const body = z
     .object({
       serverPassword: z.string().min(1).max(256),
       clientId: z.string().min(3).max(128),
-      password: passwordSchema,
-      publicKey: publicKeySchema,
+      authMode: authModeSchema.default("password_certificate"),
+      password: passwordSchema.optional(),
+      publicKey: publicKeySchema.optional(),
       nick: nickSchema.optional()
     })
     .parse(req.body)
@@ -1009,16 +1079,15 @@ app.post("/v1/auth/claim", async (req, rep) => {
     return rep.code(409).send({ message: "this profile is already protected", code: "profile_protected" })
   }
   const nick = normalizeNick(body.nick ?? member.display_name)
-  const invalid = validateNewIdentity({ nick, password: body.password, publicKey: body.publicKey })
+  const invalid = validateProtection({ nick, authMode: body.authMode, password: body.password, publicKey: body.publicKey })
   if (invalid) return rep.code(400).send(invalid)
+  const minLevel = serverMinLevel(server.serverId)
+  if (authLevel(body.authMode) < minLevel) return rep.code(400).send(levelTooLow(minLevel))
   if (isNickTaken(server.serverId, nick, body.clientId)) {
     return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
   }
-  const hash = await bcrypt.hash(body.password, 10)
   try {
-    db.prepare(
-      "INSERT INTO member_credentials(server_id, client_id, nick, nick_key, password_hash) VALUES (?, ?, ?, ?, ?)"
-    ).run(server.serverId, body.clientId, nick, nickKey(nick), hash)
+    await storeCredentials(server.serverId, body.clientId, nick, body.authMode, body.password)
   } catch {
     return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
   }
@@ -1030,8 +1099,7 @@ app.post("/v1/auth/claim", async (req, rep) => {
   // Client ids were visible to everyone, so whoever claims one must not inherit its roles.
   // An admin gets the role back by signing in with the superuser password.
   db.prepare("DELETE FROM member_roles WHERE server_id = ? AND client_id = ?").run(server.serverId, body.clientId)
-  const certificate = issueCertificate(server.serverId, body.clientId, body.publicKey)
-  return rep.code(201).send({ serverId: server.serverId, clientId: body.clientId, nick, certificate })
+  return rep.code(201).send(protectionResult(server.serverId, body.clientId, nick, body.authMode, body.publicKey))
 })
 
 app.post("/v1/auth/challenge", async (req, rep) => {
@@ -1040,14 +1108,41 @@ app.post("/v1/auth/challenge", async (req, rep) => {
   return rep.send(loginChallenges.issue(body.certId))
 })
 
+async function finishLogin(serverId: string, creds: CredentialsRow, superuserPassword: string | undefined, certId?: string) {
+  const server = db.prepare("SELECT id, name FROM servers WHERE id = ?").get(serverId) as { id: string; name: string } | undefined
+  if (!server) return null
+  ensureDefaultRooms(server.id)
+  const minLevel = serverMinLevel(server.id)
+  // Below the minimum the member gets a session that can only raise its protection level.
+  const limited = authLevel(credentialsMode(creds)) < minLevel
+  const joined = await issueJoinForServer({
+    serverId: server.id,
+    clientId: creds.client_id,
+    displayName: creds.nick,
+    superuserPassword: limited ? undefined : superuserPassword,
+    certId,
+    credentialed: true,
+    limited
+  })
+  return {
+    ...joined,
+    serverName: server.name,
+    bannerUrl: getServerBannerUrl(server.id),
+    authMode: credentialsMode(creds),
+    ...(certId ? { certId } : {}),
+    ...(limited ? { upgradeRequired: { minLevel } } : {})
+  }
+}
+
+/** Levels 2 and 3: device certificate (plus nick + password for level 3). */
 app.post("/v1/auth/login", async (req, rep) => {
   const body = z
     .object({
       certId: z.string().min(1).max(64),
       nonce: z.string().min(1).max(128),
       signature: z.string().min(1).max(128),
-      nick: nickSchema,
-      password: passwordSchema,
+      nick: nickSchema.optional(),
+      password: passwordSchema.optional(),
       superuserPassword: z.string().min(1).max(256).optional()
     })
     .parse(req.body)
@@ -1061,31 +1156,62 @@ app.post("/v1/auth/login", async (req, rep) => {
     return rep.code(401).send(invalid)
   }
   if (cert.revoked_at) return rep.code(403).send({ message: "this certificate has been revoked", code: "cert_revoked" })
-  const limiterKey = `${cert.server_id}:${nickKey(body.nick)}`
+  const creds = getCredentials(cert.server_id, cert.client_id)
+  if (!creds) return rep.code(401).send(invalid)
+  const mode = credentialsMode(creds)
+  if (!modeNeedsCertificate(mode)) {
+    return rep.code(403).send({ message: "this profile signs in with nick and password", code: "auth_mode_mismatch", authMode: mode })
+  }
+  if (modeNeedsPassword(mode)) {
+    const limiterKey = `${cert.server_id}:${nickKey(body.nick ?? "")}`
+    if (loginFailuresByNick.blocked(limiterKey)) {
+      return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
+    }
+    const passwordOk = await bcrypt.compare(body.password ?? "", creds.password_hash)
+    if (creds.nick_key !== nickKey(body.nick ?? "") || !passwordOk) {
+      loginFailuresByNick.record(limiterKey)
+      return rep.code(401).send(invalid)
+    }
+    loginFailuresByNick.reset(limiterKey)
+  }
+  db.prepare("UPDATE member_certificates SET last_used_at = datetime('now') WHERE id = ?").run(cert.id)
+  const out = await finishLogin(cert.server_id, creds, body.superuserPassword, cert.id)
+  if (!out) return rep.code(404).send({ message: "server not found", code: "server_not_found" })
+  return rep.send(out)
+})
+
+/** Level 1: nick + personal password, from any device. */
+app.post("/v1/auth/password-login", async (req, rep) => {
+  const body = z
+    .object({ nick: nickSchema, password: passwordSchema, superuserPassword: z.string().min(1).max(256).optional() })
+    .parse(req.body)
+  const invalid = { message: "invalid nick or password", code: "invalid_credentials" }
+  const server = currentServer()
+  if (!server) return rep.code(404).send({ message: "server not found", code: "server_not_found" })
+  const key = nickKey(body.nick)
+  const limiterKey = `${server.id}:${key}`
   if (loginFailuresByNick.blocked(limiterKey)) {
     return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
   }
-  const creds = getCredentials(cert.server_id, cert.client_id)
-  const passwordOk = creds ? await bcrypt.compare(body.password, creds.password_hash) : false
-  if (!creds || creds.nick_key !== nickKey(body.nick) || !passwordOk) {
+  const creds = db
+    .prepare(
+      "SELECT client_id, nick, nick_key, password_hash, auth_mode FROM member_credentials WHERE server_id = ? AND nick_key = ?"
+    )
+    .get(server.id, key) as CredentialsRow | undefined
+  const mode = creds ? credentialsMode(creds) : null
+  const passwordOk = creds?.password_hash ? await bcrypt.compare(body.password, creds.password_hash) : false
+  if (!creds || (mode !== "certificate" && !passwordOk)) {
     loginFailuresByNick.record(limiterKey)
     return rep.code(401).send(invalid)
   }
+  if (mode && modeNeedsCertificate(mode)) {
+    // Only revealed after the password matched (or for a certificate-only profile, which has none).
+    return rep.code(403).send({ message: "this profile needs its certificate", code: "certificate_required", authMode: mode })
+  }
   loginFailuresByNick.reset(limiterKey)
-  db.prepare("UPDATE member_certificates SET last_used_at = datetime('now') WHERE id = ?").run(cert.id)
-  const server = db.prepare("SELECT id, name FROM servers WHERE id = ?").get(cert.server_id) as
-    | { id: string; name: string }
-    | undefined
-  if (!server) return rep.code(404).send({ message: "server not found", code: "server_not_found" })
-  ensureDefaultRooms(server.id)
-  const joined = await issueJoinForServer({
-    serverId: server.id,
-    clientId: cert.client_id,
-    displayName: creds.nick,
-    superuserPassword: body.superuserPassword,
-    certId: cert.id
-  })
-  return rep.send({ ...joined, serverName: server.name, bannerUrl: getServerBannerUrl(server.id), certId: cert.id })
+  const out = await finishLogin(server.id, creds, body.superuserPassword)
+  if (!out) return rep.code(404).send({ message: "server not found", code: "server_not_found" })
+  return rep.send(out)
 })
 
 app.addHook("preHandler", async (req, rep) => {
@@ -1100,6 +1226,16 @@ app.addHook("preHandler", async (req, rep) => {
   if (!payload || payload.sub !== "auth") return rep.code(401).send({ message: "invalid token" })
   if (payload.certId && !isCertificateActive(payload.certId)) {
     return rep.code(401).send({ message: "certificate revoked", code: "cert_revoked" })
+  }
+  if (payload.credentialed && !getCredentials(payload.serverId, payload.clientId)) {
+    return rep.code(401).send({ message: "access was reset by an admin", code: "session_expired" })
+  }
+  if (payload.limited) {
+    const path = req.url.split("?")[0]
+    const allowed =
+      (req.method === "GET" && /^\/v1\/servers\/[^/]+\/me\/security$/.test(path)) ||
+      (req.method === "POST" && /^\/v1\/servers\/[^/]+\/me\/auth-mode$/.test(path))
+    if (!allowed) return rep.code(403).send(levelTooLow(serverMinLevel(payload.serverId)))
   }
   ;(req as any).auth = payload
 })
@@ -1117,19 +1253,78 @@ app.get("/v1/servers/:serverId/me/security", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
   const auth = (req as any).auth as { serverId: string; clientId: string; certId?: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  return rep.send({ ...securitySummary(params.serverId, auth.clientId), currentCertId: auth.certId ?? null })
+})
+
+/** Change the protection level. Needs the current password when the profile has one. */
+app.post("/v1/servers/:serverId/me/auth-mode", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const body = z
+    .object({
+      authMode: authModeSchema,
+      currentPassword: passwordSchema.optional(),
+      newPassword: passwordSchema.optional(),
+      publicKey: publicKeySchema.optional()
+    })
+    .parse(req.body)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   const creds = getCredentials(params.serverId, auth.clientId)
-  return rep.send({
-    protected: Boolean(creds),
-    nick: creds?.nick ?? null,
-    currentCertId: auth.certId ?? null,
-    certificates: listCertificates(params.serverId, auth.clientId)
-  })
+  if (!creds) return rep.code(409).send({ message: "this profile is not protected yet", code: "profile_not_protected" })
+  const minLevel = serverMinLevel(params.serverId)
+  if (authLevel(body.authMode) < minLevel) return rep.code(400).send(levelTooLow(minLevel))
+  const limiterKey = `${params.serverId}:${creds.nick_key}`
+  if (creds.password_hash) {
+    if (loginFailuresByNick.blocked(limiterKey)) {
+      return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
+    }
+    if (!(await bcrypt.compare(body.currentPassword ?? "", creds.password_hash))) {
+      loginFailuresByNick.record(limiterKey)
+      return rep.code(401).send({ message: "current password is wrong", code: "invalid_credentials" })
+    }
+  }
+  let passwordHash = ""
+  if (modeNeedsPassword(body.authMode)) {
+    if (body.newPassword) {
+      if (!isValidPassword(body.newPassword)) {
+        return rep.code(400).send({ message: "password must be at least 8 characters", code: "weak_password" })
+      }
+      passwordHash = await bcrypt.hash(body.newPassword, 10)
+    } else if (creds.password_hash) {
+      passwordHash = creds.password_hash
+    } else {
+      return rep.code(400).send({ message: "set a password for this level", code: "weak_password" })
+    }
+  }
+  let certificate = null
+  if (modeNeedsCertificate(body.authMode)) {
+    if (body.publicKey) {
+      if (!parseEd25519PublicKey(body.publicKey)) return rep.code(400).send({ message: "invalid public key", code: "invalid_public_key" })
+      certificate = issueCertificate(params.serverId, auth.clientId, body.publicKey)
+    } else if (activeCertificateCount(params.serverId, auth.clientId) === 0) {
+      return rep.code(400).send({ message: "this level needs a certificate", code: "certificate_required" })
+    }
+  }
+  db.prepare(
+    "UPDATE member_credentials SET auth_mode = ?, password_hash = ?, updated_at = datetime('now') WHERE server_id = ? AND client_id = ?"
+  ).run(body.authMode, passwordHash, params.serverId, auth.clientId)
+  return rep.send({ authMode: body.authMode, certificate })
 })
 
 app.post("/v1/servers/:serverId/me/certificates/:certId/revoke", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), certId: z.string().min(1) }).parse(req.params)
   const auth = (req as any).auth as { serverId: string; clientId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const creds = getCredentials(params.serverId, auth.clientId)
+  // Revoking the last certificate of a certificate level would lock the member out for good.
+  if (
+    creds &&
+    modeNeedsCertificate(credentialsMode(creds)) &&
+    isCertificateActive(params.certId) &&
+    activeCertificateCount(params.serverId, auth.clientId) <= 1
+  ) {
+    return rep.code(409).send({ message: "this is your last certificate; change the protection level first", code: "last_certificate" })
+  }
   if (!revokeCertificate(params.serverId, auth.clientId, params.certId, auth.clientId)) {
     return rep.code(404).send({ message: "certificate not found or already revoked" })
   }
@@ -1142,7 +1337,7 @@ app.post("/v1/servers/:serverId/me/password", async (req, rep) => {
   const auth = (req as any).auth as { serverId: string; clientId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   const creds = getCredentials(params.serverId, auth.clientId)
-  if (!creds) return rep.code(409).send({ message: "this profile has no password yet", code: "profile_not_protected" })
+  if (!creds?.password_hash) return rep.code(409).send({ message: "this profile has no password", code: "no_password" })
   const limiterKey = `${params.serverId}:${creds.nick_key}`
   if (loginFailuresByNick.blocked(limiterKey)) {
     return rep.code(429).send({ message: "too many attempts, try again later", code: "too_many_attempts" })
@@ -1163,17 +1358,51 @@ app.post("/v1/servers/:serverId/me/password", async (req, rep) => {
   return rep.send({ ok: true })
 })
 
+app.get("/v1/servers/:serverId/security-policy", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  return rep.send({ minAuthLevel: serverMinLevel(params.serverId) })
+})
+
+/** Admin: minimum protection level to enter (0 none, 1 password, 2 certificate, 3 both). */
+app.patch("/v1/servers/:serverId/security-policy", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const body = z.object({ minAuthLevel: z.number().int().min(0).max(3) }).parse(req.body)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
+  const own = getCredentials(params.serverId, auth.clientId)
+  const ownLevel = authLevel(own ? credentialsMode(own) : null)
+  if (ownLevel < body.minAuthLevel) {
+    return rep.code(409).send({
+      message: "raise your own protection level first, or you would lock yourself out",
+      code: "own_level_too_low",
+      ownLevel
+    })
+  }
+  db.prepare("UPDATE servers SET min_auth_level = ? WHERE id = ?").run(body.minAuthLevel, params.serverId)
+  // Members now below the minimum are disconnected; signing in again asks them to raise their level.
+  for (const [ws, meta] of wsClientMeta) {
+    if (meta.serverId !== params.serverId) continue
+    const creds = getCredentials(params.serverId, meta.clientId)
+    if (authLevel(creds ? credentialsMode(creds) : null) < body.minAuthLevel) {
+      try {
+        ws.close(4004, "protection level too low")
+      } catch {
+        // already closing
+      }
+    }
+  }
+  return rep.send({ minAuthLevel: body.minAuthLevel })
+})
+
 app.get("/v1/servers/:serverId/members/:clientId/security", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), clientId: z.string().min(1) }).parse(req.params)
   const auth = (req as any).auth as { serverId: string; clientId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
-  const creds = getCredentials(params.serverId, params.clientId)
-  return rep.send({
-    protected: Boolean(creds),
-    nick: creds?.nick ?? null,
-    certificates: listCertificates(params.serverId, params.clientId)
-  })
+  return rep.send(securitySummary(params.serverId, params.clientId))
 })
 
 app.post("/v1/servers/:serverId/members/:clientId/certificates/:certId/revoke", async (req, rep) => {
@@ -1627,6 +1856,8 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   const auth = verifyToken(token, config.tokenSecret)
   if (!auth || auth.sub !== "auth") return socket.close(4002, "invalid token")
   if (auth.certId && !isCertificateActive(auth.certId)) return socket.close(4003, "certificate revoked")
+  if (auth.credentialed && !getCredentials(auth.serverId, auth.clientId)) return socket.close(4003, "session ended")
+  if (auth.limited) return socket.close(4004, "protection level too low")
 
   const key = auth.serverId
   const set = clients.get(key) ?? new Set<WebSocket>()

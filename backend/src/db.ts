@@ -187,7 +187,17 @@ export function initDb(dbPath: string) {
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_member_state_server_room ON member_state(server_id, room_id)")
 
+  const credentialColumns = db.prepare("PRAGMA table_info(member_credentials)").all() as Array<{ name: string }>
+  if (!credentialColumns.some((c) => c.name === "auth_mode")) {
+    // Profiles protected before levels existed used certificate + nick + password.
+    db.exec("ALTER TABLE member_credentials ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'password_certificate'")
+  }
+
   const serverColumns = db.prepare("PRAGMA table_info(servers)").all() as Array<{ name: string }>
+  if (!serverColumns.some((c) => c.name === "min_auth_level")) {
+    // 0 = no requirement; 1..3 = minimum protection level a member needs to enter.
+    db.exec("ALTER TABLE servers ADD COLUMN min_auth_level INTEGER NOT NULL DEFAULT 0")
+  }
   if (!serverColumns.some((c) => c.name === "banner_url")) {
     db.exec("ALTER TABLE servers ADD COLUMN banner_url TEXT")
   }

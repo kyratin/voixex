@@ -8,6 +8,10 @@ type Payload = {
   mediaSeed?: string
   /** Device certificate the session was opened with; checked against revocation on every request. */
   certId?: string
+  /** Session of a protected profile; ends when an admin resets the member's credentials. */
+  credentialed?: boolean
+  /** Below the server's minimum level: the session may only raise its own protection level. */
+  limited?: boolean
   exp: number
 }
 
