@@ -420,6 +420,9 @@ export class WebRtcMediaSession {
   }
 
   private attachRemoteTrack(track: RemoteTrack, publication: RemoteTrackPublication, participantIdentity: string) {
+    // Our own phone screen share (a separate participant "<identity>:screen") is not a remote stream.
+    const self = this.room?.localParticipant.identity
+    if (self && participantIdentity === `${self}:screen`) return
     const localIdentity = this.room?.localParticipant.identity
     if (localIdentity && participantIdentity === localIdentity) return
 

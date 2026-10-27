@@ -520,9 +520,11 @@ export class VoipClient {
     return body.rooms
   }
 
-  async getSfuToken(serverId: string, roomId: string): Promise<SfuTokenResult> {
+  /** purpose "screen": a publish-only token for the phone's native screen-share participant. */
+  async getSfuToken(serverId: string, roomId: string, purpose: "media" | "screen" = "media"): Promise<SfuTokenResult> {
     if (!this.authToken) throw new Error("not authorized")
-    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/rooms/${roomId}/sfu-token`, {
+    const query = purpose === "screen" ? "?purpose=screen" : ""
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/rooms/${roomId}/sfu-token${query}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.authToken}` }
     })

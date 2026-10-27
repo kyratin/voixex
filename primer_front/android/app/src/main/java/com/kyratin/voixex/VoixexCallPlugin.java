@@ -70,6 +70,20 @@ public class VoixexCallPlugin extends Plugin {
         }
     }
 
+    /** Stream fullscreen: "landscape" turns the screen sideways, "auto" gives rotation back. */
+    @PluginMethod
+    public void setOrientation(PluginCall call) {
+        String mode = call.getString("mode", "auto");
+        getActivity().runOnUiThread(() -> {
+            getActivity().setRequestedOrientation(
+                "landscape".equals(mode)
+                    ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            );
+            call.resolve();
+        });
+    }
+
     @PluginMethod
     public void stop(PluginCall call) {
         inCall = false;

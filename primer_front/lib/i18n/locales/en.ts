@@ -91,6 +91,7 @@ export const en = {
     undeafen: "Undeafen"
   },
   voice: {
+    sharingFromPhone: "You are sharing your phone screen",
     backToChat: "Back to chat",
     participantsCount: "In voice: {n}",
     connected: "Connected",

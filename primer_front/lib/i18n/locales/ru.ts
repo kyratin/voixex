@@ -93,6 +93,7 @@ export const ru: TranslationDict = {
     undeafen: "Слышать снова"
   },
   voice: {
+    sharingFromPhone: "Вы показываете экран телефона",
     backToChat: "Вернуться к чату",
     participantsCount: "В канале: {n}",
     connected: "Подключён",

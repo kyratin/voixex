@@ -1,7 +1,7 @@
 "use client"
 
 // Android app: installs the voice/identity bridges before anything reads them.
-import "@/lib/mobile-bridge"
+import { onNativeScreenShareStopped, setScreenOrientation, startNativeScreenShare, stopNativeScreenShare } from "@/lib/mobile-bridge"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useExitSnapshot } from "@/lib/use-exit-snapshot"
@@ -148,6 +148,9 @@ type ConnectionPrefs = {
 }
 
 const CONNECTION_PREFS_KEY = "voixex-connection-prefs"
+/** Phone layout: narrow screens, and phones held sideways (short and touch-only). */
+const NARROW_QUERY = "(max-width: 767px), (pointer: coarse) and (max-height: 520px)"
+
 /** Member-list group id for admins (the only role the UI manages). */
 const ADMIN_ROLE_GROUP = "admin"
 
@@ -315,9 +318,12 @@ export default function VoIPApp() {
   /** Phones: the call screen is open (covers the app), or collapsed to a bar above the chat. */
   const [voiceViewOpen, setVoiceViewOpen] = useState(false)
   const [isMobileApp, setIsMobileApp] = useState(false)
+  const isMobileAppRef = useRef(false)
+  isMobileAppRef.current = isMobileApp
   useEffect(() => {
     setIsMobileApp(window.voixexWindow?.platform === "android")
-    const mq = window.matchMedia("(max-width: 767px)")
+    // Phones in landscape are wider than 767 px but still phones: keep the phone layout.
+    const mq = window.matchMedia(NARROW_QUERY)
     const apply = () => {
       setIsNarrow(mq.matches)
       if (mq.matches) setShowMemberList(false)
@@ -1300,7 +1306,9 @@ export default function VoIPApp() {
     void webRtcSessionRef.current.setMuted(mutedRef.current)
   }
 
-  const resolveRosterDisplayName = (clientId: string) => {
+  const resolveRosterDisplayName = (identity: string) => {
+    // A phone shares its screen as a second LiveKit participant "<clientId>:screen".
+    const clientId = identity.endsWith(":screen") ? identity.slice(0, -":screen".length) : identity
     const rt = latestVoiceStateRef.current ?? latestUiStateRef.current
     if (!rt) return clientId
     for (const users of Object.values(rt.rosterByRoom)) {
@@ -1377,6 +1385,8 @@ export default function VoIPApp() {
       renderStreamWindowRef.current()
     }
   }
+  const rebindViewerStreamElementsRef = useRef(rebindViewerStreamElements)
+  rebindViewerStreamElementsRef.current = rebindViewerStreamElements
 
   const catchUpViewerStreamAfterJoin = async (serverId: string, roomId: string) => {
     if (streamHiddenByUserRef.current) return
@@ -2556,6 +2566,7 @@ export default function VoIPApp() {
   }
 
   const stopScreenShare = async () => {
+    if (isMobileAppRef.current && isScreenSharingRef.current) await stopNativeScreenShare()
     try {
       await webRtcSessionRef.current?.stopScreenShare()
     } catch {
@@ -2596,6 +2607,8 @@ export default function VoIPApp() {
       return null
     })
   }
+  const stopScreenShareRef = useRef(stopScreenShare)
+  stopScreenShareRef.current = stopScreenShare
 
   const resyncScreenForLateViewers = useCallback(() => {
     if (!isScreenSharingRef.current) return
@@ -2951,6 +2964,14 @@ export default function VoIPApp() {
   }
 
   const toggleStreamVideoFullscreen = async () => {
+    // Android app: element fullscreen in the WebView shows an empty player. Maximize the stream
+    // in the call screen instead and turn the phone sideways.
+    if (isMobileApp) {
+      const next = !streamVideoFullscreen
+      setStreamVideoFullscreen(next)
+      setScreenOrientation(next ? "landscape" : "auto")
+      return
+    }
     const el = remoteStreamVideoRef.current
     if (!el) return
     try {
@@ -2966,15 +2987,56 @@ export default function VoIPApp() {
     }
   }
 
+  // Leaving the call, collapsing the call screen or the stream ending ends the maximized view.
   useEffect(() => {
+    if (!isMobileApp || !streamVideoFullscreen) return
+    if (!isInVoice || !voiceViewOpen || (!activeScreenSharerName && !isScreenSharing)) {
+      setStreamVideoFullscreen(false)
+      setScreenOrientation("auto")
+    }
+  }, [isMobileApp, streamVideoFullscreen, isInVoice, voiceViewOpen, activeScreenSharerName, isScreenSharing])
+
+  /** Every new stream <video> (rotation, collapse/expand, layout switch) gets the stream at once. */
+  const attachRemoteStreamVideo = useCallback((el: HTMLVideoElement | null) => {
+    remoteStreamVideoRef.current = el
+    if (el) window.requestAnimationFrame(() => rebindViewerStreamElementsRef.current())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (isMobileApp) return
     const onFullscreenChange = () => {
       setStreamVideoFullscreen(document.fullscreenElement === remoteStreamVideoRef.current)
     }
     document.addEventListener("fullscreenchange", onFullscreenChange)
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange)
-  }, [])
+  }, [isMobileApp])
+
+  // Android ended the capture (notification, quick settings): stop sharing here too.
+  useEffect(() => {
+    if (!isMobileApp) return
+    return onNativeScreenShareStopped(() => {
+      if (isScreenSharingRef.current) void stopScreenShareRef.current()
+    })
+  }, [isMobileApp])
+
+  /** Phone: capture natively and publish as "<clientId>:screen" in the same LiveKit room. */
+  const startMobileScreenShare = async () => {
+    if (!isInVoice || !currentVoiceChannel || !voiceServerIdRef.current) throw new Error(t("notices.joinVoiceFirst"))
+    if (isScreenSharingRef.current) return
+    const token = await getVoiceWsClientRef.current().getSfuToken(voiceServerIdRef.current, currentVoiceChannel, "screen")
+    const result = await startNativeScreenShare(token.url, token.token)
+    if (!result.started) {
+      if (result.reason === "denied") return
+      throw new Error(result.reason || t("notices.toggleScreenShareFailed"))
+    }
+    setIsScreenSharing(true)
+    isScreenSharingRef.current = true
+    getVoiceWsClientRef.current().setScreenShare(true)
+  }
 
   const startScreenShare = async () => {
+    if (isMobileApp) return startMobileScreenShare()
     if (!hasDesktopBridge || !window.electronVoice) {
       throw new Error(t("notices.screenShareDesktopOnly"))
     }
@@ -4317,10 +4379,70 @@ export default function VoIPApp() {
     await refreshDeviceIdentities()
   }
 
+  // Phones: swipes like Discord. In the chat: right opens channels, left opens members; the
+  // opposite swipe closes an open panel; on the call screen a swipe down goes back to the chat.
+  const swipeStateRef = useRef({ mobileNavOpen, showMemberList, callScreenOpen: false, immersive: false })
+  swipeStateRef.current = {
+    mobileNavOpen,
+    showMemberList,
+    callScreenOpen: isNarrow && isInVoice && Boolean(currentVoiceChannel) && voiceViewOpen,
+    immersive: streamVideoFullscreen
+  }
+  useEffect(() => {
+    if (!isNarrow || !activeServerId) return
+    let start: { x: number; y: number; t: number } | null = null
+    const onStart = (e: TouchEvent) => {
+      const target = e.target as HTMLElement | null
+      // Text fields, dialogs and sideways-scrolling lists keep their own gestures.
+      if (e.touches.length !== 1 || target?.closest("input, textarea, [role=dialog], [role=slider], [data-noswipe]")) {
+        start = null
+        return
+      }
+      for (let el = target; el && el !== document.body; el = el.parentElement) {
+        if (el.scrollWidth > el.clientWidth + 2 && getComputedStyle(el).overflowX !== "visible") {
+          start = null
+          return
+        }
+      }
+      start = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() }
+    }
+    const onEnd = (e: TouchEvent) => {
+      if (!start) return
+      const dx = e.changedTouches[0].clientX - start.x
+      const dy = e.changedTouches[0].clientY - start.y
+      const quick = Date.now() - start.t < 700
+      start = null
+      if (!quick) return
+      const st = swipeStateRef.current
+      const horizontal = Math.abs(dx) > 60 && Math.abs(dy) < Math.abs(dx) * 0.6
+      const down = dy > 80 && Math.abs(dx) < dy * 0.6
+      if (st.callScreenOpen) {
+        if (down && !st.immersive) setVoiceViewOpen(false)
+        return
+      }
+      if (!horizontal) return
+      if (st.mobileNavOpen) {
+        if (dx < 0) setMobileNavOpen(false)
+      } else if (st.showMemberList) {
+        if (dx > 0) setShowMemberList(false)
+      } else if (dx > 0) {
+        setMobileNavOpen(true)
+      } else {
+        setShowMemberList(true)
+      }
+    }
+    document.addEventListener("touchstart", onStart, { passive: true })
+    document.addEventListener("touchend", onEnd, { passive: true })
+    return () => {
+      document.removeEventListener("touchstart", onStart)
+      document.removeEventListener("touchend", onEnd)
+    }
+  }, [isNarrow, activeServerId])
+
   // Phones: joining a voice channel opens the call screen; leaving closes it.
   useEffect(() => {
     if (!isInVoice) setVoiceViewOpen(false)
-    else if (window.matchMedia("(max-width: 767px)").matches) setVoiceViewOpen(true)
+    else if (window.matchMedia(NARROW_QUERY).matches) setVoiceViewOpen(true)
   }, [isInVoice, currentVoiceChannel])
   // The stream <video> is a new element each time the call screen opens: attach the stream to it.
   useEffect(() => {
@@ -4359,7 +4481,7 @@ export default function VoIPApp() {
                   showingStreamWindow={showingStreamWindow}
                   hasDesktopBridge={hasDesktopBridge}
                   canStartScreenShare={canStartScreenShare}
-                  screenShareSupported={!isMobileApp}
+                  desktopControls={!isMobileApp}
                   screenShareWithAudio={screenShareWithAudio}
                   screenSources={screenSources}
                   selectedScreenSourceId={selectedScreenSourceId}
@@ -4367,7 +4489,7 @@ export default function VoIPApp() {
                   screenFps={screenFps}
                   screenBitrateKbps={screenBitrateKbps}
                   localPreviewVideoRef={localPreviewVideoRef}
-                  remoteStreamVideoRef={remoteStreamVideoRef}
+                  remoteStreamVideoRef={attachRemoteStreamVideo}
                   onScreenSourceChange={setSelectedScreenSourceId}
                   onScreenResolutionChange={setScreenResolution}
                   onScreenFpsChange={setScreenFps}

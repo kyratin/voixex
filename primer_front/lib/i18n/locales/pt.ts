@@ -93,6 +93,7 @@ export const pt: TranslationDict = {
     undeafen: "Ouvir novamente"
   },
   voice: {
+    sharingFromPhone: "Você está compartilhando a tela do celular",
     backToChat: "Voltar ao chat",
     participantsCount: "No canal: {n}",
     connected: "Ligado",

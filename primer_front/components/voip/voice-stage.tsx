@@ -1,6 +1,6 @@
 "use client"
 
-import type { ReactNode, RefObject } from "react"
+import type { ReactNode, Ref, RefObject } from "react"
 import {
   Eye,
   EyeOff,
@@ -60,8 +60,8 @@ type VoiceStageProps = {
   showingStreamWindow: boolean
   hasDesktopBridge: boolean
   canStartScreenShare?: boolean
-  /** False on phones: no screen capture there, and pop-out windows do not exist. */
-  screenShareSupported?: boolean
+  /** False on phones: no pop-out windows, no capture source/quality settings, no local preview. */
+  desktopControls?: boolean
   /** Phones: the stage covers the whole screen (like a call screen); onCollapse goes back to chat. */
   fullscreen?: boolean
   onCollapse?: () => void
@@ -72,7 +72,8 @@ type VoiceStageProps = {
   screenFps: number
   screenBitrateKbps: number
   localPreviewVideoRef: RefObject<HTMLVideoElement | null>
-  remoteStreamVideoRef: RefObject<HTMLVideoElement | null>
+  /** A callback ref in practice: every new <video> (rotation, collapse, fullscreen) must get the stream. */
+  remoteStreamVideoRef: Ref<HTMLVideoElement>
   onScreenSourceChange: (id: string | null) => void
   onScreenResolutionChange: (value: string) => void
   onScreenFpsChange: (fps: number) => void
@@ -239,7 +240,7 @@ export function VoiceStage({
   showingStreamWindow,
   hasDesktopBridge,
   canStartScreenShare = true,
-  screenShareSupported = true,
+  desktopControls = true,
   screenShareWithAudio,
   screenSources,
   selectedScreenSourceId,
@@ -279,6 +280,8 @@ export function VoiceStage({
   const showsVideo = isScreenSharing || hasStream || expectingStream
   const live = Boolean(activeScreenSharerName || isScreenSharing)
   const largeTiles = participants.length <= 2
+  /** Phone call screen with the stream maximized: only the video (landscape), plus an exit button. */
+  const immersive = fullscreen && streamVideoFullscreen && (hasStream || expectingStream)
 
   return (
     <section
@@ -298,7 +301,8 @@ export function VoiceStage({
       <div
         className={cn(
           "z-10 flex min-w-0 items-center gap-2 text-xs text-muted-foreground",
-          fullscreen ? "shrink-0 px-3 pb-1 pt-3" : "absolute left-4 top-3 max-w-[60%]"
+          fullscreen ? "shrink-0 px-3 pb-1 pt-3" : "absolute left-4 top-3 max-w-[60%]",
+          immersive && "hidden"
         )}
       >
         {fullscreen && onCollapse ? (
@@ -328,7 +332,13 @@ export function VoiceStage({
         ) : null}
       </div>
 
-      <div className={cn("z-10 flex items-center gap-2", fullscreen ? "absolute right-14 top-[calc(env(safe-area-inset-top)+0.75rem)]" : "absolute right-3 top-3")}>
+      <div
+        className={cn(
+          "z-10 flex items-center gap-2",
+          fullscreen ? "absolute right-14 top-[calc(env(safe-area-inset-top)+0.75rem)]" : "absolute right-3 top-3",
+          immersive && "hidden"
+        )}
+      >
         {live && viewerQuality !== "original" && !isScreenSharing ? (
           <span className="rounded-md bg-secondary px-2 py-1 text-[10px] font-semibold text-foreground">
             {viewerQuality === "medium" ? "720p" : "360p"}
@@ -380,7 +390,7 @@ export function VoiceStage({
                 </p>
               </div>
             ) : null}
-            {screenShareSupported ? (
+            {desktopControls ? (
             <>
             <p className="text-xs font-medium text-foreground">{t("voice.streamQuality")}</p>
             {isScreenSharing ? <p className="text-[11px] text-muted-foreground">{t("voice.restartHint")}</p> : null}
@@ -482,8 +492,13 @@ export function VoiceStage({
         </div>
       ) : null}
 
-      <div className={cn("flex min-h-0 flex-1 items-center justify-center", fullscreen ? "px-3 py-3" : "px-4 pb-16 pt-10")}>
-        {isScreenSharing ? (
+      <div className={cn("flex min-h-0 flex-1 items-center justify-center", immersive ? "bg-black p-0" : fullscreen ? "px-3 py-3" : "px-4 pb-16 pt-10")}>
+        {isScreenSharing && !desktopControls ? (
+          <div className="flex flex-col items-center gap-2 text-center animate-in fade-in zoom-in-95 duration-300">
+            <Monitor className="h-8 w-8 text-accent" />
+            <p className="text-sm font-medium text-foreground">{t("voice.sharingFromPhone")}</p>
+          </div>
+        ) : isScreenSharing ? (
           <video
             ref={localPreviewVideoRef}
             autoPlay
@@ -505,8 +520,18 @@ export function VoiceStage({
               autoPlay
               muted={viewingWebRtcStream ? true : isDeafened}
               playsInline
-              className="max-h-full max-w-full rounded-lg bg-black object-contain shadow-2xl"
+              className={cn("bg-black object-contain", immersive ? "h-full w-full" : "max-h-full max-w-full rounded-lg shadow-2xl")}
             />
+            {immersive ? (
+              <button
+                type="button"
+                onClick={onToggleStreamFullscreen}
+                aria-label={t("voice.exitFullscreen")}
+                className="absolute right-3 top-3 z-20 flex size-10 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur"
+              >
+                <Minimize2 className="h-5 w-5" />
+              </button>
+            ) : null}
           </div>
         ) : streamHiddenByUser && activeScreenSharerName ? (
           <div className="flex flex-col items-center gap-2 text-center animate-in fade-in zoom-in-95 duration-300">
@@ -553,6 +578,7 @@ export function VoiceStage({
       <div
         className={cn(
           "z-10 flex items-center rounded-xl bg-popover/95 shadow-xl",
+          immersive && "hidden",
           fullscreen
             ? "mx-3 mb-3 shrink-0 justify-around gap-2 rounded-2xl p-2"
             : "absolute bottom-3 left-1/2 -translate-x-1/2 gap-1 p-1.5"
@@ -565,7 +591,7 @@ export function VoiceStage({
           {isDeafened ? <HeadphoneOff className="h-4 w-4" /> : <Headphones className="h-4 w-4" />}
         </DockButton>
         {fullscreen ? null : <span className="mx-1 h-5 w-px bg-border" />}
-        {screenShareSupported ? (
+        {(
         <DockButton
           large={fullscreen}
           label={
@@ -581,13 +607,13 @@ export function VoiceStage({
         >
           {isScreenSharing ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
         </DockButton>
-        ) : null}
+        )}
         {canHideStream && onHideStream ? (
           <DockButton large={fullscreen} label={t("voice.hideStreamTooltip")} onClick={onHideStream}>
             <EyeOff className="h-4 w-4" />
           </DockButton>
         ) : null}
-        {canPopOut && screenShareSupported ? (
+        {canPopOut && desktopControls ? (
           <DockButton large={fullscreen} label={showingStreamWindow ? t("voice.closePopOutBtn") : t("voice.popOutTooltip")} active={showingStreamWindow} onClick={onToggleStreamWindow}>
             <ExternalLink className="h-4 w-4" />
           </DockButton>

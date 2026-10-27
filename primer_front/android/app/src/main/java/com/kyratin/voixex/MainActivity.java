@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(VoixexCallPlugin.class);
+        registerPlugin(VoixexScreenSharePlugin.class);
         super.onCreate(savedInstanceState);
     }
 

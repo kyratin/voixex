@@ -9,7 +9,40 @@ import { webIdentity } from "@/lib/web-identity"
  */
 
 /** Native side (android/.../VoixexCallPlugin.kt): call audio mode + foreground service. */
-const VoixexCall = registerPlugin<{ start(options: { title: string; text: string }): Promise<void>; stop(): Promise<void> }>("VoixexCall")
+const VoixexCall = registerPlugin<{
+  start(options: { title: string; text: string }): Promise<void>
+  stop(): Promise<void>
+  setOrientation(options: { mode: "landscape" | "auto" }): Promise<void>
+}>("VoixexCall")
+
+/** Native screen capture published to LiveKit (the WebView has no getDisplayMedia). */
+const VoixexScreenShare = registerPlugin<{
+  start(options: { url: string; token: string }): Promise<{ started: boolean; reason?: string }>
+  stop(): Promise<void>
+  addListener(event: "stopped", listener: () => void): Promise<{ remove: () => Promise<void> }>
+}>("VoixexScreenShare")
+
+export async function startNativeScreenShare(url: string, token: string) {
+  return VoixexScreenShare.start({ url, token })
+}
+
+export async function stopNativeScreenShare() {
+  await VoixexScreenShare.stop().catch(() => {})
+}
+
+/** The capture ended from Android (notification, quick settings, projection revoked). */
+export function onNativeScreenShareStopped(listener: () => void) {
+  const handle = VoixexScreenShare.addListener("stopped", listener)
+  return () => {
+    void handle.then((h) => h.remove())
+  }
+}
+
+/** Android app: turn the screen sideways for a maximized stream, or give rotation back. */
+export function setScreenOrientation(mode: "landscape" | "auto") {
+  if (!isNativeApp()) return
+  void VoixexCall.setOrientation({ mode }).catch(() => {})
+}
 
 type CapacitorGlobal = { isNativePlatform?: () => boolean; getPlatform?: () => string }
 
