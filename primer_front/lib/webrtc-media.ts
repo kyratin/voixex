@@ -190,6 +190,33 @@ export class WebRtcMediaSession {
       }
     }
     void this.applyOutputDeviceToElements()
+    // Moving a media element to another document (pop-out ↔ main window) pauses it.
+    this.resumeScreenAudio()
+  }
+
+  /**
+   * (Re)starts stream sound playback. A play() refused by the autoplay policy is retried on the
+   * next click or key press in the app, instead of leaving the stream silent.
+   */
+  resumeScreenAudio() {
+    for (const element of this.screenAudioElements) {
+      void element.play?.().catch(() => this.retryScreenAudioOnGesture())
+    }
+  }
+
+  private gestureRetryArmed = false
+
+  private retryScreenAudioOnGesture() {
+    if (this.gestureRetryArmed) return
+    this.gestureRetryArmed = true
+    const retry = () => {
+      this.gestureRetryArmed = false
+      window.removeEventListener("pointerdown", retry, true)
+      window.removeEventListener("keydown", retry, true)
+      for (const element of this.screenAudioElements) void element.play?.().catch(() => {})
+    }
+    window.addEventListener("pointerdown", retry, true)
+    window.addEventListener("keydown", retry, true)
   }
 
   async publishMicTrack(track: MediaStreamTrack) {
@@ -469,7 +496,7 @@ export class WebRtcMediaSession {
       const container = this.screenAudioContainer ?? this.opts.audioSink
       container.appendChild(element)
       void this.applyOutputDeviceToElements()
-      void element.play?.().catch(() => {})
+      void element.play?.().catch(() => this.retryScreenAudioOnGesture())
       return
     }
     if (track.kind !== Track.Kind.Video || publication.source !== Track.Source.ScreenShare) return

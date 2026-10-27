@@ -1,6 +1,6 @@
 "use client"
 
-import type { ReactNode, Ref, RefObject } from "react"
+import { useEffect, useState, type ReactNode, type Ref, type RefObject } from "react"
 import {
   Eye,
   EyeOff,
@@ -280,6 +280,45 @@ export function VoiceStage({
   const showsVideo = isScreenSharing || hasStream || expectingStream
   const live = Boolean(activeScreenSharerName || isScreenSharing)
   const largeTiles = participants.length <= 2
+  // "Stream hidden" shows for 1.5 s after hiding, then only the participants remain.
+  const [hiddenNotice, setHiddenNotice] = useState(false)
+  useEffect(() => {
+    if (!streamHiddenByUser) {
+      setHiddenNotice(false)
+      return
+    }
+    setHiddenNotice(true)
+    const timer = setTimeout(() => setHiddenNotice(false), 1500)
+    return () => clearTimeout(timer)
+  }, [streamHiddenByUser])
+  const participantsGrid = (          <div
+            className={cn(
+              fullscreen
+                ? cn("grid w-full gap-3 overflow-y-auto", participants.length > 1 ? "grid-cols-2" : "max-w-xs grid-cols-1")
+                : "flex max-w-full items-center gap-3 overflow-x-auto px-2 pb-1"
+            )}
+          >
+            {participants.map((user) => {
+              const canAdjust = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
+              return (
+                <ParticipantTile
+                  key={user.id}
+                  user={user}
+                  large={largeTiles}
+                  fill={fullscreen}
+                  volume={
+                    canAdjust
+                      ? {
+                          pct: peerVolumePct[`${roomId}:${user.id}`] ?? 100,
+                          onChange: (pct) => onPeerVolumeChange(roomId, user.id, user.name, pct)
+                        }
+                      : undefined
+                  }
+                />
+              )
+            })}
+          </div>
+  )
   /** Phone call screen with the stream maximized: only the video (landscape), plus an exit button. */
   const immersive = fullscreen && streamVideoFullscreen && (hasStream || expectingStream)
 
@@ -534,44 +573,20 @@ export function VoiceStage({
             ) : null}
           </div>
         ) : streamHiddenByUser && activeScreenSharerName ? (
-          <div className="flex flex-col items-center gap-2 text-center animate-in fade-in zoom-in-95 duration-300">
-            <EyeOff className="h-6 w-6 text-muted-foreground" />
-            <p className="text-sm font-medium text-foreground">{t("voice.streamHiddenTitle")}</p>
-            {onShowStream ? (
-              <Button size="sm" variant="secondary" className="gap-1.5" onClick={onShowStream}>
-                <Eye className="h-3.5 w-3.5" />
-                {t("voice.showStream")}
-              </Button>
+          // Hidden stream: the call looks like there is no stream; a short notice says so.
+          <>
+            {participantsGrid}
+            {hiddenNotice ? (
+              <div className="pointer-events-none absolute inset-x-0 top-12 z-10 flex justify-center animate-in fade-in slide-in-from-top-2 duration-300">
+                <span className="flex items-center gap-2 rounded-full bg-popover/95 px-3 py-1.5 text-xs font-medium text-foreground shadow-lg">
+                  <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />
+                  {t("voice.streamHiddenTitle")}
+                </span>
+              </div>
             ) : null}
-          </div>
+          </>
         ) : (
-          <div
-            className={cn(
-              fullscreen
-                ? cn("grid w-full gap-3 overflow-y-auto", participants.length > 1 ? "grid-cols-2" : "max-w-xs grid-cols-1")
-                : "flex max-w-full items-center gap-3 overflow-x-auto px-2 pb-1"
-            )}
-          >
-            {participants.map((user) => {
-              const canAdjust = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
-              return (
-                <ParticipantTile
-                  key={user.id}
-                  user={user}
-                  large={largeTiles}
-                  fill={fullscreen}
-                  volume={
-                    canAdjust
-                      ? {
-                          pct: peerVolumePct[`${roomId}:${user.id}`] ?? 100,
-                          onChange: (pct) => onPeerVolumeChange(roomId, user.id, user.name, pct)
-                        }
-                      : undefined
-                  }
-                />
-              )
-            })}
-          </div>
+          participantsGrid
         )}
       </div>
 
@@ -608,6 +623,11 @@ export function VoiceStage({
           {isScreenSharing ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
         </DockButton>
         )}
+        {streamHiddenByUser && activeScreenSharerName && onShowStream ? (
+          <DockButton large={fullscreen} label={t("voice.showStream")} onClick={onShowStream}>
+            <Eye className="h-4 w-4" />
+          </DockButton>
+        ) : null}
         {canHideStream && onHideStream ? (
           <DockButton large={fullscreen} label={t("voice.hideStreamTooltip")} onClick={onHideStream}>
             <EyeOff className="h-4 w-4" />

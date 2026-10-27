@@ -1392,6 +1392,7 @@ export default function VoIPApp() {
 
   const rebindViewerStreamElements = () => {
     webRtcSessionRef.current?.rebindRemoteScreenVideo(remoteStreamVideoRef.current)
+    webRtcSessionRef.current?.resumeScreenAudio()
     const v = remoteStreamVideoRef.current
     if (legacyStreamHasBufferedRef.current && screenVideoUrlRef.current && v) {
       void v.play().catch(() => {})
