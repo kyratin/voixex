@@ -2,6 +2,7 @@ import {
   FRAME_MS,
   FRAME_SAMPLES,
   KIND_OPUS2,
+  KIND_PCM,
   KIND_PROBE,
   KIND_PROBE_ACK,
   OPUS2_FLAG_TALKSPURT,
@@ -47,6 +48,10 @@ export type WebVoiceStats = {
   jitter1PctMs: number
   jitterBufferMs: number
   concealedFrames: number
+  /** How the microphone goes out: Opus via WebCodecs, raw PCM when the WebView cannot encode Opus. */
+  uplinkCodec: "opus" | "pcm" | "pending"
+  captureFrames: number
+  uplinkError: string | null
 }
 
 /**
@@ -72,6 +77,11 @@ export class WebVoiceEngine {
 
   // uplink
   private encoder: AudioEncoder | null = null
+  /** Decided once per connection by probing WebCodecs (see prepareUplink). */
+  private uplinkCodec: "opus" | "pcm" | "pending" = "pending"
+  private uplinkConfig: AudioEncoderConfig | null = null
+  private uplinkError: string | null = null
+  private captureFrames = 0
   private bitrate = BITRATE_GOOD
   private txFrameNo = 0
   private lastSendMs = 0
@@ -126,6 +136,7 @@ export class WebVoiceEngine {
     this.wsUrl = `${input.apiBase.replace(/^http/, "ws").replace(/\/+$/, "")}/v1/media/ws`
     this.key = await deriveMediaKey(mediaSeedOf(input.mediaToken))
     await this.open()
+    await this.prepareUplink()
     this.connected = true
     this.startClock()
     this.probeTimer = setInterval(() => void this.sendProbe(), 1000)
@@ -214,6 +225,7 @@ export class WebVoiceEngine {
     }
     this.encoder = null
     this.decoder = null
+    this.uplinkCodec = "pending"
     this.resetDownlink()
   }
 
@@ -228,6 +240,13 @@ export class WebVoiceEngine {
     }
     this.lastSendMs = now
     const frameNo = this.txFrameNo++
+    this.captureFrames += 1
+    if (this.uplinkCodec === "pcm") {
+      // No Opus encoder in this WebView: raw 48 kHz PCM (the server accepts it from any client).
+      void this.send(KIND_PCM, new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength).slice())
+      return
+    }
+    if (this.uplinkCodec !== "opus") return
     this.pendingFlags.set(frameNo, flags)
     const f32 = new Float32Array(FRAME_SAMPLES)
     for (let i = 0; i < FRAME_SAMPLES; i += 1) f32[i] = (frame[i] ?? 0) / 32768
@@ -243,9 +262,54 @@ export class WebVoiceEngine {
     })
     try {
       encoder.encode(data)
+    } catch (e) {
+      this.failOpus(e)
     } finally {
       data.close()
     }
+  }
+
+  /**
+   * Picks the uplink codec: the full Opus config, a minimal one, or raw PCM. Android WebViews
+   * differ in what WebCodecs accepts, and a rejected config used to fail silently (no audio out).
+   */
+  private async prepareUplink() {
+    if (this.uplinkCodec !== "pending") return
+    const base = { codec: "opus", sampleRate: SAMPLE_RATE, numberOfChannels: 1 }
+    const candidates: AudioEncoderConfig[] = [
+      { ...base, bitrate: this.bitrate, opus: { frameDuration: FRAME_MS * 1000, complexity: 5, format: "opus" } } as AudioEncoderConfig,
+      { ...base, bitrate: this.bitrate } as AudioEncoderConfig,
+      base as AudioEncoderConfig
+    ]
+    if (typeof AudioEncoder !== "undefined" && typeof AudioData !== "undefined") {
+      for (const config of candidates) {
+        try {
+          const support = await AudioEncoder.isConfigSupported(config)
+          if (support.supported) {
+            this.uplinkConfig = config
+            this.uplinkCodec = "opus"
+            return
+          }
+        } catch (e) {
+          this.uplinkError = String(e)
+        }
+      }
+      this.uplinkError ??= "Opus encoding is not supported by this WebView"
+    } else {
+      this.uplinkError = "WebCodecs AudioEncoder is unavailable"
+    }
+    this.uplinkCodec = "pcm"
+  }
+
+  private failOpus(e: unknown) {
+    this.uplinkError = e instanceof Error ? e.message : String(e)
+    this.uplinkCodec = "pcm"
+    try {
+      if (this.encoder && this.encoder.state !== "closed") this.encoder.close()
+    } catch {
+      /* already closed */
+    }
+    this.encoder = null
   }
 
   getStats(): WebVoiceStats {
@@ -267,7 +331,10 @@ export class WebVoiceEngine {
       jitterNowMs: Number(this.jitterMs.toFixed(2)),
       jitter1PctMs: percentile(this.jitterSamples, 0.99),
       jitterBufferMs: this.targetFrames * FRAME_MS,
-      concealedFrames: this.concealed
+      concealedFrames: this.concealed,
+      uplinkCodec: this.uplinkCodec,
+      captureFrames: this.captureFrames,
+      uplinkError: this.uplinkError
     }
   }
 
@@ -276,26 +343,21 @@ export class WebVoiceEngine {
     try {
       const enc = new AudioEncoder({
         output: (chunk) => this.onEncoded(chunk),
-        error: () => {
-          this.encoder = null
-        }
+        // An encoder that errors out once (e.g. a config the platform rejects late) is not retried.
+        error: (e) => this.failOpus(e)
       })
       enc.configure(this.encoderConfig())
       this.encoder = enc
       return enc
-    } catch {
+    } catch (e) {
+      this.failOpus(e)
       return null
     }
   }
 
   private encoderConfig(): AudioEncoderConfig {
-    return {
-      codec: "opus",
-      sampleRate: SAMPLE_RATE,
-      numberOfChannels: 1,
-      bitrate: this.bitrate,
-      opus: { frameDuration: FRAME_MS * 1000, complexity: 5, format: "opus" }
-    } as AudioEncoderConfig
+    const config = this.uplinkConfig ?? ({ codec: "opus", sampleRate: SAMPLE_RATE, numberOfChannels: 1 } as AudioEncoderConfig)
+    return "bitrate" in config ? { ...config, bitrate: this.bitrate } : config
   }
 
   private onEncoded(chunk: EncodedAudioChunk) {

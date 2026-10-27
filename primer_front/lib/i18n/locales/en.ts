@@ -277,6 +277,7 @@ export const en = {
     tabMembers: "Members"
   },
   stats: {
+    mic: "Microphone",
     noStats: "No stats yet. Join a voice channel.",
     title: "Voice connection",
     status: "Status",

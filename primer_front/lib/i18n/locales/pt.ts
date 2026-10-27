@@ -278,6 +278,7 @@ export const pt: TranslationDict = {
     tabMembers: "Membros"
   },
   stats: {
+    mic: "Microfone",
     noStats: "Ainda sem estatísticas. Entre num canal de voz.",
     title: "Ligação de voz",
     status: "Estado",

@@ -279,6 +279,7 @@ export const ru: TranslationDict = {
     tabMembers: "Участники"
   },
   stats: {
+    mic: "Микрофон",
     noStats: "Статистики пока нет. Зайдите в голосовой канал.",
     title: "Голосовое соединение",
     status: "Статус",

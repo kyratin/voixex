@@ -16,6 +16,10 @@ export type VoiceStatsData = {
   jitterNowMs?: number
   jitter1PctMs?: number
   jitter01PctMs?: number
+  /** Android app (WebSocket engine): how many mic frames went out and with which codec. */
+  captureFrames?: number
+  uplinkCodec?: "opus" | "pcm" | "pending"
+  uplinkError?: string | null
 }
 
 export type AudioPipelineDiag = {
@@ -63,6 +67,15 @@ export function VoiceStatsPanel({ voiceStats, audioPipelineDiag, qualityClass, i
             {voiceStats.rxLostEstimated ?? 0} ({voiceStats.packetLossPct ?? 0}%)
           </span>
         </div>
+        {voiceStats.captureFrames !== undefined ? (
+          <div className="flex justify-between gap-4">
+            <span>{t("stats.mic")}</span>
+            <span className="text-right tabular-nums" title={voiceStats.uplinkError ?? undefined}>
+              {voiceStats.captureFrames} · {voiceStats.uplinkCodec ?? "?"}
+              {voiceStats.uplinkError ? ` · ${voiceStats.uplinkError.slice(0, 60)}` : ""}
+            </span>
+          </div>
+        ) : null}
         <Separator />
         <div className={`flex justify-between gap-4 ${qualityClass}`}>
           <span>{t("stats.ping")}</span>
