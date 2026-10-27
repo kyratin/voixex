@@ -15,6 +15,8 @@ import {
   Monitor,
   MonitorOff,
   MoreHorizontal,
+  ChevronDown,
+  MessageSquare,
   PhoneOff,
   Volume2
 } from "lucide-react"
@@ -60,6 +62,9 @@ type VoiceStageProps = {
   canStartScreenShare?: boolean
   /** False on phones: no screen capture there, and pop-out windows do not exist. */
   screenShareSupported?: boolean
+  /** Phones: the stage covers the whole screen (like a call screen); onCollapse goes back to chat. */
+  fullscreen?: boolean
+  onCollapse?: () => void
   screenShareWithAudio: boolean
   screenSources: ScreenSource[]
   selectedScreenSourceId: string | null
@@ -98,6 +103,7 @@ function DockButton({
   active = false,
   destructive = false,
   disabled = false,
+  large = false,
   children
 }: {
   label: string
@@ -105,6 +111,8 @@ function DockButton({
   active?: boolean
   destructive?: boolean
   disabled?: boolean
+  /** Touch-sized (phones). */
+  large?: boolean
   children: ReactNode
 }) {
   return (
@@ -116,8 +124,11 @@ function DockButton({
           onClick={onClick}
           disabled={disabled}
           className={cn(
-            "flex size-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
-            destructive
+            "flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
+            large ? "size-12 rounded-xl [&_svg]:size-5" : "size-9 rounded-lg",
+            destructive && large
+              ? "bg-destructive text-white hover:bg-destructive/90"
+              : destructive
               ? "bg-destructive/15 text-destructive hover:bg-destructive/25"
               : active
                 ? "bg-primary text-primary-foreground hover:bg-primary/90"
@@ -135,10 +146,13 @@ function DockButton({
 function ParticipantTile({
   user,
   large,
+  fill = false,
   volume
 }: {
   user: VoiceUser
   large: boolean
+  /** Phone call screen: the tile takes its whole grid cell. */
+  fill?: boolean
   volume?: { pct: number; onChange: (pct: number) => void }
 }) {
   const { t } = useI18n()
@@ -146,7 +160,7 @@ function ParticipantTile({
     <div
       className={cn(
         "relative flex shrink-0 flex-col items-center justify-center gap-2 rounded-xl bg-card/80 transition-colors",
-        large ? "h-32 w-40" : "h-28 w-[7.5rem]",
+        fill ? "aspect-square w-full" : large ? "h-32 w-40" : "h-28 w-[7.5rem]",
         volume && "cursor-pointer hover:bg-card"
       )}
     >
@@ -156,7 +170,7 @@ function ParticipantTile({
       <div
         className={cn(
           "flex items-center justify-center rounded-full font-bold text-white transition-shadow",
-          large ? "size-14 text-lg" : "size-11 text-base",
+          fill ? "size-20 text-2xl" : large ? "size-14 text-lg" : "size-11 text-base",
           user.isSpeaking && "ring-2 ring-accent ring-offset-2 ring-offset-card"
         )}
         style={{ background: avatarGradient(user.id || user.name) }}
@@ -255,7 +269,9 @@ export function VoiceStage({
   selfClientId = null,
   peerVolumePct = {},
   enablePeerVolume = false,
-  onPeerVolumeChange
+  onPeerVolumeChange,
+  fullscreen = false,
+  onCollapse
 }: VoiceStageProps) {
   const { t } = useI18n()
   const hasStream = (viewingLegacyStream || viewingWebRtcStream) && !streamHiddenByUser
@@ -269,20 +285,47 @@ export function VoiceStage({
   return (
     <section
       className={cn(
-        "relative mx-4 mt-4 flex shrink-0 flex-col overflow-hidden rounded-xl bg-stage transition-[height] duration-200",
-        showsVideo ? "h-[min(58vh,620px)]" : "h-64"
+        "flex flex-col overflow-hidden bg-stage",
+        fullscreen
+          ? "fixed inset-0 z-50 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]"
+          : cn("relative mx-4 mt-4 shrink-0 rounded-xl transition-[height] duration-200", showsVideo ? "h-[min(58vh,620px)]" : "h-64")
       )}
       aria-label={channelName}
     >
-      <div className="absolute left-4 top-3 z-10 flex min-w-0 max-w-[60%] items-center gap-2 text-xs text-muted-foreground">
-        <Volume2 className="h-3.5 w-3.5 shrink-0 text-accent" />
-        <span className="truncate font-semibold text-foreground">{channelName}</span>
+      <div
+        className={cn(
+          "z-10 flex min-w-0 items-center gap-2 text-xs text-muted-foreground",
+          fullscreen ? "shrink-0 px-3 pb-1 pt-3" : "absolute left-4 top-3 max-w-[60%]"
+        )}
+      >
+        {fullscreen && onCollapse ? (
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label={t("voice.backToChat")}
+            className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary/80 text-foreground"
+          >
+            <ChevronDown className="h-5 w-5" />
+          </button>
+        ) : null}
+        <Volume2 className={cn("h-3.5 w-3.5 shrink-0 text-accent", fullscreen && "h-4 w-4")} />
+        <span className={cn("truncate font-semibold text-foreground", fullscreen && "text-base")}>{channelName}</span>
         {activeScreenSharerName ? (
           <span className="truncate">· {t("voice.isSharing", { name: activeScreenSharerName })}</span>
         ) : null}
+        {fullscreen && onCollapse ? (
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label={t("voice.backToChat")}
+            className="ml-auto flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary/80 text-foreground"
+          >
+            <MessageSquare className="h-4 w-4" />
+          </button>
+        ) : null}
       </div>
 
-      <div className="absolute right-3 top-3 z-10 flex items-center gap-2">
+      <div className={cn("z-10 flex items-center gap-2", fullscreen ? "absolute right-14 top-[calc(env(safe-area-inset-top)+0.75rem)]" : "absolute right-3 top-3")}>
         {live && viewerQuality !== "original" && !isScreenSharing ? (
           <span className="rounded-md bg-secondary px-2 py-1 text-[10px] font-semibold text-foreground">
             {viewerQuality === "medium" ? "720p" : "360p"}
@@ -334,6 +377,8 @@ export function VoiceStage({
                 </p>
               </div>
             ) : null}
+            {screenShareSupported ? (
+            <>
             <p className="text-xs font-medium text-foreground">{t("voice.streamQuality")}</p>
             {isScreenSharing ? <p className="text-[11px] text-muted-foreground">{t("voice.restartHint")}</p> : null}
             <div className="space-y-1.5">
@@ -411,6 +456,8 @@ export function VoiceStage({
                 disabled={isScreenSharing}
               />
             </div>
+            </>
+            ) : null}
             {hasStream ? (
               <div className="space-y-1.5 border-t border-border pt-3">
                 <StreamVolumeControl value={streamVolumePct} onLiveChange={onStreamVolumeLiveChange} onCommit={onStreamVolumeCommit} />
@@ -432,7 +479,7 @@ export function VoiceStage({
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 pb-16 pt-10">
+      <div className={cn("flex min-h-0 flex-1 items-center justify-center", fullscreen ? "px-3 py-3" : "px-4 pb-16 pt-10")}>
         {isScreenSharing ? (
           <video
             ref={localPreviewVideoRef}
@@ -470,7 +517,13 @@ export function VoiceStage({
             ) : null}
           </div>
         ) : (
-          <div className="flex max-w-full items-center gap-3 overflow-x-auto px-2 pb-1">
+          <div
+            className={cn(
+              fullscreen
+                ? cn("grid w-full gap-3 overflow-y-auto", participants.length > 1 ? "grid-cols-2" : "max-w-xs grid-cols-1")
+                : "flex max-w-full items-center gap-3 overflow-x-auto px-2 pb-1"
+            )}
+          >
             {participants.map((user) => {
               const canAdjust = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
               return (
@@ -478,6 +531,7 @@ export function VoiceStage({
                   key={user.id}
                   user={user}
                   large={largeTiles}
+                  fill={fullscreen}
                   volume={
                     canAdjust
                       ? {
@@ -493,16 +547,24 @@ export function VoiceStage({
         )}
       </div>
 
-      <div className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-xl bg-popover/95 p-1.5 shadow-xl">
-        <DockButton label={isMuted ? t("userPanel.unmute") : t("userPanel.mute")} active={isMuted} onClick={onToggleMute}>
+      <div
+        className={cn(
+          "z-10 flex items-center rounded-xl bg-popover/95 shadow-xl",
+          fullscreen
+            ? "mx-3 mb-3 shrink-0 justify-around gap-2 rounded-2xl p-2"
+            : "absolute bottom-3 left-1/2 -translate-x-1/2 gap-1 p-1.5"
+        )}
+      >
+        <DockButton large={fullscreen} label={isMuted ? t("userPanel.unmute") : t("userPanel.mute")} active={isMuted} onClick={onToggleMute}>
           {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
         </DockButton>
-        <DockButton label={isDeafened ? t("userPanel.undeafen") : t("userPanel.deafen")} active={isDeafened} onClick={onToggleDeafen}>
+        <DockButton large={fullscreen} label={isDeafened ? t("userPanel.undeafen") : t("userPanel.deafen")} active={isDeafened} onClick={onToggleDeafen}>
           {isDeafened ? <HeadphoneOff className="h-4 w-4" /> : <Headphones className="h-4 w-4" />}
         </DockButton>
-        <span className="mx-1 h-5 w-px bg-border" />
+        {fullscreen ? null : <span className="mx-1 h-5 w-px bg-border" />}
         {screenShareSupported ? (
         <DockButton
+          large={fullscreen}
           label={
             !isScreenSharing && !canStartScreenShare
               ? t("voice.streamBusyTooltip")
@@ -518,25 +580,72 @@ export function VoiceStage({
         </DockButton>
         ) : null}
         {canHideStream && onHideStream ? (
-          <DockButton label={t("voice.hideStreamTooltip")} onClick={onHideStream}>
+          <DockButton large={fullscreen} label={t("voice.hideStreamTooltip")} onClick={onHideStream}>
             <EyeOff className="h-4 w-4" />
           </DockButton>
         ) : null}
         {canPopOut && screenShareSupported ? (
-          <DockButton label={showingStreamWindow ? t("voice.closePopOutBtn") : t("voice.popOutTooltip")} active={showingStreamWindow} onClick={onToggleStreamWindow}>
+          <DockButton large={fullscreen} label={showingStreamWindow ? t("voice.closePopOutBtn") : t("voice.popOutTooltip")} active={showingStreamWindow} onClick={onToggleStreamWindow}>
             <ExternalLink className="h-4 w-4" />
           </DockButton>
         ) : null}
         {hasStream ? (
-          <DockButton label={streamVideoFullscreen ? t("voice.exitFullscreen") : t("voice.fullscreen")} onClick={onToggleStreamFullscreen}>
+          <DockButton large={fullscreen} label={streamVideoFullscreen ? t("voice.exitFullscreen") : t("voice.fullscreen")} onClick={onToggleStreamFullscreen}>
             {streamVideoFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </DockButton>
         ) : null}
-        <span className="mx-1 h-5 w-px bg-border" />
-        <DockButton label={t("userPanel.leaveVoiceChannel")} destructive onClick={onLeaveVoice}>
+        {fullscreen ? null : <span className="mx-1 h-5 w-px bg-border" />}
+        <DockButton large={fullscreen} label={t("userPanel.leaveVoiceChannel")} destructive onClick={onLeaveVoice}>
           <PhoneOff className="h-4 w-4" />
         </DockButton>
       </div>
     </section>
+  )
+}
+
+/**
+ * Phones, with the call screen collapsed: a slim bar above the chat that brings the call screen
+ * back, plus mute and leave.
+ */
+export function VoiceMiniBar({
+  channelName,
+  participants,
+  live,
+  isMuted,
+  onToggleMute,
+  onLeave,
+  onOpen
+}: {
+  channelName: string
+  participants: VoiceUser[]
+  live: boolean
+  isMuted: boolean
+  onToggleMute: () => void
+  onLeave: () => void
+  onOpen: () => void
+}) {
+  const { t } = useI18n()
+  const speaking = participants.filter((u) => u.isSpeaking).map((u) => u.name)
+  return (
+    <div className="mx-3 mt-3 flex shrink-0 items-center gap-2 rounded-xl bg-stage px-3 py-2">
+      <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <Volume2 className="h-4 w-4 shrink-0 text-accent" />
+        <span className="min-w-0">
+          <span className="block truncate text-sm font-semibold text-foreground">
+            {channelName}
+            {live ? <span className="ml-2 rounded bg-destructive px-1 py-px text-[9px] font-bold uppercase text-white">Live</span> : null}
+          </span>
+          <span className="block truncate text-[11px] text-muted-foreground">
+            {speaking.length > 0 ? speaking.join(", ") : t("voice.participantsCount", { n: participants.length })}
+          </span>
+        </span>
+      </button>
+      <DockButton label={isMuted ? t("userPanel.unmute") : t("userPanel.mute")} active={isMuted} onClick={onToggleMute}>
+        {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+      </DockButton>
+      <DockButton label={t("userPanel.leaveVoiceChannel")} destructive onClick={onLeave}>
+        <PhoneOff className="h-4 w-4" />
+      </DockButton>
+    </div>
   )
 }

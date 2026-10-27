@@ -93,6 +93,8 @@ export const pt: TranslationDict = {
     undeafen: "Ouvir novamente"
   },
   voice: {
+    backToChat: "Voltar ao chat",
+    participantsCount: "No canal: {n}",
     connected: "Ligado",
     joinVoice: "Entrar na voz",
     stream: "Stream",
@@ -385,6 +387,14 @@ export const pt: TranslationDict = {
     closedText: "Nada deles é visível até iniciar sessão. Adicione o endereço de um servidor ou importe um certificado para começar."
   },
   access: {
+    stepAddress: "Endereço do servidor",
+    stepAddressHint: "Por exemplo voip.example.com — ou cole um link: protocolo e porta são detectados sozinhos.",
+    addressMore: "Porta, protocolo e nome",
+    stepNick: "Como devem chamar você aqui?",
+    stepNickHint: "Seu nick é visível para os outros membros, 2–32 caracteres.",
+    stepProtection: "Como proteger seu perfil?",
+    stepPassword: "Escolha uma senha",
+    wizardDescription: "Alguns passos rápidos: primeiro o servidor, depois seu perfil.",
     fromStorage: "Do armazenamento",
     storedChosen: "O certificado já está neste dispositivo: a senha do arquivo não é necessária.",
     passwordTooShort: "A palavra-passe deve ter pelo menos {n} caracteres",

@@ -39,10 +39,17 @@ public class VoixexCallService extends Service {
             .setContentIntent(contentIntent)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .build();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (RuntimeException e) {
+            // Not allowed right now (permission missing, app not in the foreground): the call keeps
+            // working while the app is open, so stop instead of crashing the whole app.
+            stopSelf();
+            return START_NOT_STICKY;
         }
         if (wakeLock == null) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);

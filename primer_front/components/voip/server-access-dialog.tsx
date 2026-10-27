@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Archive, FileKey, KeyRound, Lock, LockOpen, ShieldCheck } from "lucide-react"
+import { Archive, ArrowRight, Check, FileKey, KeyRound, Lock, LockOpen, ShieldCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -82,6 +82,29 @@ interface ServerAccessDialogProps {
 }
 
 const MIN_PASSWORD = 8
+
+/** "First time here" is a wizard: one question per step. */
+type NewStep = "address" | "serverPassword" | "nick" | "protection" | "password"
+
+/** Accepts "host", "host:port" or a pasted URL; the scheme decides HTTPS. */
+function parseAddressInput(raw: string, current: ServerAddress): ServerAddress {
+  let text = raw.trim()
+  let apiUseHttps = current.apiUseHttps
+  let apiPort = current.apiPort
+  const scheme = /^(https?|wss?):\/\//i.exec(text)
+  if (scheme) {
+    apiUseHttps = /^(https|wss)$/i.test(scheme[1])
+    text = text.slice(scheme[0].length)
+    if (!/:\d+/.test(text.split("/")[0])) apiPort = apiUseHttps ? "443" : "80"
+  }
+  text = text.split("/")[0]
+  const port = /:(\d{1,5})$/.exec(text)
+  if (port) {
+    apiPort = port[1]
+    text = text.slice(0, -port[0].length)
+  }
+  return { apiHost: text, apiPort, apiUseHttps }
+}
 
 /** HTTPS vs plain HTTP: the server's own protection level, independent of the profile. */
 export function ConnectionSecurityBadge({ secure, className }: { secure: boolean; className?: string }) {
@@ -179,7 +202,7 @@ export function ServerAccessDialog({
   const stored = storedCertificates.find((c) => c.ref === storedRef) ?? null
   const [filePassphrase, setFilePassphrase] = useState("")
   const [addTab, setAddTab] = useState<"new" | "certificate">("new")
-  const [step, setStep] = useState<"server" | "protection">("server")
+  const [step, setStep] = useState<NewStep>("address")
   const [level, setLevel] = useState<AuthMode>("password_certificate")
   const [minLevel, setMinLevel] = useState(0)
   const [busy, setBusy] = useState(false)
@@ -200,7 +223,7 @@ export function ServerAccessDialog({
     setStoredRef(null)
     setFilePassphrase("")
     setAddTab(mode.kind === "import" ? "certificate" : "new")
-    setStep("server")
+    setStep("address")
     setMinLevel(mode.kind === "upgrade" ? mode.minLevel : 0)
     setLevel(mode.kind === "upgrade" && mode.minLevel >= 3 ? "password_certificate" : "password_certificate")
     setError(null)
@@ -225,9 +248,10 @@ export function ServerAccessDialog({
         if (authLevel(level) < min) setLevel(AUTH_MODES_BY_LEVEL[Math.min(min, 3) - 1])
         if (kind === "add") setStep("protection")
       }
-      if (described.code === "invalidServerPassword" || described.code === "nickTaken" || described.code === "invalidNick") {
-        if (kind === "add") setStep("server")
-      }
+      // Send the wizard back to the step whose answer the server rejected.
+      if (kind === "add" && described.code === "invalidServerPassword") setStep("serverPassword")
+      if (kind === "add" && (described.code === "nickTaken" || described.code === "invalidNick")) setStep("nick")
+      if (kind === "add" && described.code === "serverNotFound") setStep("address")
       setError(described)
     } finally {
       setBusy(false)
@@ -273,14 +297,26 @@ export function ServerAccessDialog({
       return void run(() => onUpgrade({ authMode: level, newPassword: needsNewPassword(level) ? password : "" }))
     }
     if (addTab === "new") {
-      if (step === "server") {
-        if (!address.apiHost.trim()) return setError({ text: t("access.fillAddress") })
+      const next = (to: NewStep) => {
+        setError(null)
+        setStep(to)
+      }
+      if (step === "address") {
+        const parsed = parseAddressInput(address.apiHost, address)
+        if (!parsed.apiHost) return setError({ text: t("access.fillAddress") })
+        setAddress(parsed)
+        return next("serverPassword")
+      }
+      if (step === "serverPassword") {
         if (!serverPassword) return setError({ text: t("access.fillServerPassword") })
+        return next("nick")
+      }
+      if (step === "nick") {
         const problem = checkNick()
         if (problem) return setError({ text: problem })
-        setError(null)
-        return setStep("protection")
+        return next("protection")
       }
+      if (step === "protection" && needsNewPassword(level)) return next("password")
       const problem = needsNewPassword(level) ? checkNewPassword() : null
       if (problem) return setError({ text: problem })
       return void run(() =>
@@ -348,8 +384,8 @@ export function ServerAccessDialog({
         ? t("access.claimDescription")
         : kind === "upgrade"
           ? t("access.upgradeDescription", { level: mode && mode.kind === "upgrade" ? mode.minLevel : 0 })
-          : step === "protection" && addTab === "new"
-            ? t("access.protectionDescription")
+          : addTab === "new"
+            ? t("access.wizardDescription")
             : t("access.addDescription")
 
   const addressFields = (optional: boolean) => (
@@ -468,6 +504,130 @@ export function ServerAccessDialog({
     </details>
   )
 
+  const newSteps: NewStep[] = ["address", "serverPassword", "nick", "protection", ...(needsNewPassword(level) ? (["password"] as const) : [])]
+  const stepIndex = Math.max(0, newSteps.indexOf(step))
+  const lastStep = stepIndex === newSteps.length - 1
+  const onEnter = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault()
+      submit()
+    }
+  }
+  const nextButton = (
+    <Button
+      type="button"
+      size="icon"
+      onClick={submit}
+      disabled={busy || !hasDesktopBridge}
+      aria-label={lastStep ? t("access.createAndSignIn") : t("access.next")}
+      className="size-11 shrink-0 rounded-full"
+    >
+      {busy ? <Spinner className="h-4 w-4" /> : lastStep ? <Check className="h-5 w-5" /> : <ArrowRight className="h-5 w-5" />}
+    </Button>
+  )
+  const wizardInput = (props: React.ComponentProps<typeof Input>) => (
+    <div className="flex items-center gap-2">
+      <Input {...props} autoFocus onKeyDown={onEnter} className="h-11 min-w-0 flex-1 text-base" />
+      {nextButton}
+    </div>
+  )
+  const stepTitle: Record<NewStep, string> = {
+    address: t("access.stepAddress"),
+    serverPassword: t("access.serverPassword"),
+    nick: t("access.stepNick"),
+    protection: t("access.stepProtection"),
+    password: t("access.stepPassword")
+  }
+  const stepHint: Record<NewStep, string> = {
+    address: t("access.stepAddressHint"),
+    serverPassword: t("access.serverPasswordHint"),
+    nick: t("access.stepNickHint"),
+    protection: t("access.protectionDescription"),
+    password: t("access.passwordTooShort", { n: MIN_PASSWORD })
+  }
+  const wizard = (
+    <div className="flex min-h-[17rem] flex-col">
+      <div className="flex justify-center gap-1.5 pb-4" aria-hidden>
+        {newSteps.map((s, i) => (
+          <span key={s} className={cn("h-1.5 rounded-full transition-all", i === stepIndex ? "w-6 bg-primary" : i < stepIndex ? "w-1.5 bg-primary/60" : "w-1.5 bg-secondary")} />
+        ))}
+      </div>
+      <div className="flex flex-1 flex-col justify-center gap-4">
+        <div className="text-center">
+          <p className="text-lg font-semibold text-foreground">{stepTitle[step]}</p>
+          <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">{stepHint[step]}</p>
+        </div>
+        {step === "address" ? (
+          <div className="space-y-3">
+            {wizardInput({
+              value: address.apiHost,
+              onChange: (e) => setAddress((a) => ({ ...a, apiHost: e.target.value })),
+              placeholder: "voip.example.com",
+              autoComplete: "off",
+              inputMode: "url",
+              autoCapitalize: "none"
+            })}
+            <details className="rounded-lg bg-secondary/50 px-3 py-2">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">{t("access.addressMore")}</summary>
+              <div className="mt-3 grid grid-cols-[5.5rem_1fr] gap-3 pb-1">
+                <div className="space-y-1.5">
+                  <Label htmlFor="access-port">{t("connect.port")}</Label>
+                  <Input id="access-port" value={address.apiPort} onChange={(e) => setAddress((a) => ({ ...a, apiPort: e.target.value }))} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>{t("connect.apiWs")}</Label>
+                  <Select value={address.apiUseHttps ? "https" : "http"} onValueChange={(v) => setAddress((a) => ({ ...a, apiUseHttps: v === "https" }))}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="https">{t("connect.httpsWss")}</SelectItem>
+                      <SelectItem value="http">{t("connect.httpWs")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="col-span-2 space-y-1.5">
+                  <Label htmlFor="access-label">{t("access.label")}</Label>
+                  <Input id="access-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("access.labelPlaceholder")} />
+                </div>
+              </div>
+            </details>
+          </div>
+        ) : step === "serverPassword" ? (
+          wizardInput({ type: "password", value: serverPassword, onChange: (e) => setServerPassword(e.target.value), autoComplete: "off" })
+        ) : step === "nick" ? (
+          wizardInput({ value: nick, onChange: (e) => setNick(e.target.value), autoComplete: "off", maxLength: 32 })
+        ) : step === "protection" ? (
+          <div className="space-y-4">
+            <ProtectionLevelPicker value={level} onChange={setLevel} minLevel={minLevel} />
+            {httpWarning}
+            <div className="flex justify-end">{nextButton}</div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+              autoFocus
+              placeholder={t("access.password")}
+              className="h-11 text-base"
+            />
+            {wizardInput({
+              type: "password",
+              value: passwordRepeat,
+              onChange: (e) => setPasswordRepeat(e.target.value),
+              autoComplete: "new-password",
+              placeholder: t("access.passwordRepeat")
+            })}
+            {httpWarning}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
   let body: React.ReactNode
   if (!hasDesktopBridge) {
     body = <p className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{t("access.desktopOnly")}</p>
@@ -505,20 +665,8 @@ export function ServerAccessDialog({
           <TabsTrigger value="new">{t("access.tabNew")}</TabsTrigger>
           <TabsTrigger value="certificate">{t("access.tabCertificate")}</TabsTrigger>
         </TabsList>
-        <TabsContent value="new" className="mt-0 space-y-4">
-          {step === "server" ? (
-            <>
-              {addressFields(false)}
-              <div className="space-y-1.5">
-                <Label htmlFor="access-server-password">{t("access.serverPassword")}</Label>
-                <Input id="access-server-password" type="password" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)} />
-                <p className="text-[11px] text-muted-foreground">{t("access.serverPasswordHint")}</p>
-              </div>
-              {nickField(false)}
-            </>
-          ) : (
-            protectionStep
-          )}
+        <TabsContent value="new" className="mt-0">
+          {wizard}
         </TabsContent>
         <TabsContent value="certificate" className="mt-0 space-y-4">
           <div className="space-y-1.5">
@@ -601,11 +749,9 @@ export function ServerAccessDialog({
         ? t("access.protectAndSignIn")
         : kind === "upgrade"
           ? t("access.raiseAndSignIn")
-          : addTab === "new"
-            ? step === "server"
-              ? t("access.next")
-              : t("access.createAndSignIn")
-            : t("access.importAndSignIn")
+          : t("access.importAndSignIn")
+
+  const wizardActive = kind === "add" && addTab === "new" && hasDesktopBridge
 
   return (
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
@@ -618,7 +764,11 @@ export function ServerAccessDialog({
               <KeyRound className="h-5 w-5 text-primary" />
             )}
             <DialogTitle className="min-w-0 flex-1 truncate">{title}</DialogTitle>
-            {kind && kind !== "import" && !(kind === "add" && addTab === "certificate") ? <ConnectionSecurityBadge secure={secure} /> : null}
+            {kind && kind !== "import" && !(kind === "add" && addTab === "certificate") ? (
+              <span className="mr-6">
+                <ConnectionSecurityBadge secure={secure} />
+              </span>
+            ) : null}
           </div>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
@@ -630,17 +780,28 @@ export function ServerAccessDialog({
         </div>
 
         <div className="flex shrink-0 justify-end gap-2 px-6 pb-5 pt-3">
-          {kind === "add" && addTab === "new" && step === "protection" ? (
-            <Button variant="ghost" onClick={() => setStep("server")} disabled={busy} className="mr-auto">
+          {wizardActive && stepIndex > 0 ? (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setError(null)
+                setStep(newSteps[stepIndex - 1])
+              }}
+              disabled={busy}
+              className="mr-auto"
+            >
               {t("access.back")}
             </Button>
           ) : null}
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
             {t("access.cancel")}
           </Button>
-          <Button onClick={submit} disabled={busy || !hasDesktopBridge} className="min-w-32">
-            {busy ? <Spinner className="h-4 w-4" /> : submitLabel}
-          </Button>
+          {/* The wizard moves on with its own arrow button. */}
+          {wizardActive ? null : (
+            <Button onClick={submit} disabled={busy || !hasDesktopBridge} className="min-w-32">
+              {busy ? <Spinner className="h-4 w-4" /> : submitLabel}
+            </Button>
+          )}
         </div>
       </DialogContent>
     </Dialog>

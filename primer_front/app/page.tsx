@@ -56,7 +56,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { MicLevelMeter, type MicLevelMeterSample } from "@/components/voip/mic-level-meter"
 import { ConnectServerDialog, type ConnectionDraft } from "@/components/voip/connect-server-dialog"
 import { LanguageSelector } from "@/components/voip/language-selector"
-import { VoiceStage } from "@/components/voip/voice-stage"
+import { VoiceMiniBar, VoiceStage } from "@/components/voip/voice-stage"
 import { TitleBar } from "@/components/voip/title-bar"
 import { useI18n } from "@/lib/i18n/provider"
 import { Headphones, Server } from "lucide-react"
@@ -311,6 +311,8 @@ export default function VoIPApp() {
   /** Narrow screens (phones): channel list and member list are drawers over the chat. */
   const [isNarrow, setIsNarrow] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  /** Phones: the call screen is open (covers the app), or collapsed to a bar above the chat. */
+  const [voiceViewOpen, setVoiceViewOpen] = useState(false)
   const [isMobileApp, setIsMobileApp] = useState(false)
   useEffect(() => {
     setIsMobileApp(window.voixexWindow?.platform === "android")
@@ -2663,6 +2665,9 @@ export default function VoIPApp() {
     if (!hasDesktopBridge || !currentVoiceChannel || isScreenSharing || !activeScreenSharerName || !isInVoice || streamHiddenByUser) return
     setStreamLoading(true)
     const room = currentVoiceChannel
+    // A stream started: make sure we are in its LiveKit room (the session may have dropped).
+    const serverId = voiceServerIdRef.current
+    if (serverId) void ensureLiveKitForVoiceRoom(serverId, room)
     // Refreshes the WebM header if the WS stream runs; the 5 s check below asks for it otherwise.
     const timer = window.setTimeout(() => requestViewerStreamResync(room, true, false), 350)
     return () => clearTimeout(timer)
@@ -3044,6 +3049,9 @@ export default function VoIPApp() {
 
     let viaLiveKit = false
     try {
+      // The LiveKit session may be gone (dropped, or never started for this room): without it the
+      // video only went out as the WebSocket copy, which phones could not play.
+      if (activeServerId) await ensureLiveKitForVoiceRoom(activeServerId, currentVoiceChannel)
       viaLiveKit = Boolean(await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps }))
     } catch {
       viaLiveKit = false
@@ -4308,6 +4316,82 @@ export default function VoIPApp() {
     await refreshDeviceIdentities()
   }
 
+  // Phones: joining a voice channel opens the call screen; leaving closes it.
+  useEffect(() => {
+    if (!isInVoice) setVoiceViewOpen(false)
+    else if (window.matchMedia("(max-width: 767px)").matches) setVoiceViewOpen(true)
+  }, [isInVoice, currentVoiceChannel])
+  // The stream <video> is a new element each time the call screen opens: attach the stream to it.
+  useEffect(() => {
+    if (!voiceViewOpen) return
+    const raf = window.requestAnimationFrame(() => rebindViewerStreamElements())
+    return () => window.cancelAnimationFrame(raf)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceViewOpen])
+
+  /** The voice stage: inline above the chat on wide screens, a full call screen on phones. */
+  const renderVoiceStage = (fullscreen: boolean) => (
+    <VoiceStage
+                  roomId={currentVoiceChannel}
+                  channelName={voiceChannelName}
+                  participants={voiceUsers[currentVoiceChannel] ?? []}
+                  error={error}
+                  isMuted={isMuted}
+                  isDeafened={isDeafened}
+                  onToggleMute={() => {
+                    if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+                    applyMute(!isMuted)
+                  }}
+                  onToggleDeafen={() => applyDeafen(!isDeafened)}
+                  onLeaveVoice={handleDisconnect}
+                  activeScreenSharerName={activeScreenSharerName}
+                  watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || t("common.none")}
+                  isScreenSharing={isScreenSharing}
+                  viewingLegacyStream={viewingLegacyStream}
+                  viewingWebRtcStream={viewingWebRtcStream}
+                  streamLoading={streamLoading}
+                  streamPathLabel={streamPathLabel}
+                  screenVideoUrl={screenVideoUrl}
+                  screenImageUrl={screenImageUrl}
+                  streamVolumePct={streamVolumePct}
+                  streamVideoFullscreen={streamVideoFullscreen}
+                  showingStreamWindow={showingStreamWindow}
+                  hasDesktopBridge={hasDesktopBridge}
+                  canStartScreenShare={canStartScreenShare}
+                  screenShareSupported={!isMobileApp}
+                  screenShareWithAudio={screenShareWithAudio}
+                  screenSources={screenSources}
+                  selectedScreenSourceId={selectedScreenSourceId}
+                  screenResolution={screenResolution}
+                  screenFps={screenFps}
+                  screenBitrateKbps={screenBitrateKbps}
+                  localPreviewVideoRef={localPreviewVideoRef}
+                  remoteStreamVideoRef={remoteStreamVideoRef}
+                  onScreenSourceChange={setSelectedScreenSourceId}
+                  onScreenResolutionChange={setScreenResolution}
+                  onScreenFpsChange={setScreenFps}
+                  onScreenBitrateChange={setScreenBitrateKbps}
+                  onScreenShareWithAudioToggle={() => setScreenShareWithAudio((v) => !v)}
+                  onScreenShareToggle={() => void handleScreenShareToggle()}
+                  onToggleStreamWindow={toggleStreamWindow}
+                  onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
+                  onStreamVolumeLiveChange={applyStreamVolumeLive}
+                  onStreamVolumeCommit={handleStreamVolumeCommit}
+                  streamHiddenByUser={streamHiddenByUser}
+                  onHideStream={handleHideStream}
+                  onShowStream={handleShowStream}
+                  viewerQuality={viewerStreamQuality}
+                  onViewerQualityChange={handleViewerStreamQualityChange}
+                  viewerQualityAvailable={hasRemoteWebRtcVideo}
+                  selfClientId={myVoiceClientId}
+                  peerVolumePct={peerVolumePct}
+                  enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
+                  onPeerVolumeChange={handlePeerVolumeChange}
+                  fullscreen={fullscreen}
+                  onCollapse={() => setVoiceViewOpen(false)}
+                />
+  )
+
   return (
     <>
       <div className="flex h-dvh flex-col bg-background">
@@ -4423,63 +4507,24 @@ export default function VoIPApp() {
             onOpenNavigation={() => setMobileNavOpen(true)}
             stage={
               isInVoice && currentVoiceChannel ? (
-                <VoiceStage
-                  roomId={currentVoiceChannel}
-                  channelName={voiceChannelName}
-                  participants={voiceUsers[currentVoiceChannel] ?? []}
-                  error={error}
-                  isMuted={isMuted}
-                  isDeafened={isDeafened}
-                  onToggleMute={() => {
-                    if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
-                    applyMute(!isMuted)
-                  }}
-                  onToggleDeafen={() => applyDeafen(!isDeafened)}
-                  onLeaveVoice={handleDisconnect}
-                  activeScreenSharerName={activeScreenSharerName}
-                  watchingNames={(voiceUsers[currentVoiceChannel] ?? []).map((u) => u.name).join(", ") || t("common.none")}
-                  isScreenSharing={isScreenSharing}
-                  viewingLegacyStream={viewingLegacyStream}
-                  viewingWebRtcStream={viewingWebRtcStream}
-                  streamLoading={streamLoading}
-                  streamPathLabel={streamPathLabel}
-                  screenVideoUrl={screenVideoUrl}
-                  screenImageUrl={screenImageUrl}
-                  streamVolumePct={streamVolumePct}
-                  streamVideoFullscreen={streamVideoFullscreen}
-                  showingStreamWindow={showingStreamWindow}
-                  hasDesktopBridge={hasDesktopBridge}
-                  canStartScreenShare={canStartScreenShare}
-                  screenShareSupported={!isMobileApp}
-                  screenShareWithAudio={screenShareWithAudio}
-                  screenSources={screenSources}
-                  selectedScreenSourceId={selectedScreenSourceId}
-                  screenResolution={screenResolution}
-                  screenFps={screenFps}
-                  screenBitrateKbps={screenBitrateKbps}
-                  localPreviewVideoRef={localPreviewVideoRef}
-                  remoteStreamVideoRef={remoteStreamVideoRef}
-                  onScreenSourceChange={setSelectedScreenSourceId}
-                  onScreenResolutionChange={setScreenResolution}
-                  onScreenFpsChange={setScreenFps}
-                  onScreenBitrateChange={setScreenBitrateKbps}
-                  onScreenShareWithAudioToggle={() => setScreenShareWithAudio((v) => !v)}
-                  onScreenShareToggle={() => void handleScreenShareToggle()}
-                  onToggleStreamWindow={toggleStreamWindow}
-                  onToggleStreamFullscreen={() => void toggleStreamVideoFullscreen()}
-                  onStreamVolumeLiveChange={applyStreamVolumeLive}
-                  onStreamVolumeCommit={handleStreamVolumeCommit}
-                  streamHiddenByUser={streamHiddenByUser}
-                  onHideStream={handleHideStream}
-                  onShowStream={handleShowStream}
-                  viewerQuality={viewerStreamQuality}
-                  onViewerQualityChange={handleViewerStreamQualityChange}
-                  viewerQualityAvailable={hasRemoteWebRtcVideo}
-                  selfClientId={myVoiceClientId}
-                  peerVolumePct={peerVolumePct}
-                  enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
-                  onPeerVolumeChange={handlePeerVolumeChange}
-                />
+                isNarrow ? (
+                  voiceViewOpen ? null : (
+                    <VoiceMiniBar
+                      channelName={voiceChannelName}
+                      participants={voiceUsers[currentVoiceChannel] ?? []}
+                      live={Boolean(activeScreenSharerName || isScreenSharing)}
+                      isMuted={isMuted}
+                      onToggleMute={() => {
+                        if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+                        applyMute(!isMuted)
+                      }}
+                      onLeave={handleDisconnect}
+                      onOpen={() => setVoiceViewOpen(true)}
+                    />
+                  )
+                ) : (
+                  renderVoiceStage(false)
+                )
               ) : null
             }
           />
@@ -4498,6 +4543,7 @@ export default function VoIPApp() {
         ) : null}
       </main>
       </div>
+      {isNarrow && isInVoice && currentVoiceChannel && voiceViewOpen ? renderVoiceStage(true) : null}
 
       <ConnectServerDialog
         draft={editDraft?.draft ?? null}

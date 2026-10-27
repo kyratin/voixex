@@ -93,6 +93,8 @@ export const ru: TranslationDict = {
     undeafen: "Слышать снова"
   },
   voice: {
+    backToChat: "Вернуться к чату",
+    participantsCount: "В канале: {n}",
     connected: "Подключён",
     joinVoice: "Войти в голос",
     stream: "Стрим",
@@ -386,6 +388,14 @@ export const ru: TranslationDict = {
     closedText: "Пока вы не вошли, о них ничего не видно. Добавьте адрес сервера или импортируйте сертификат, чтобы начать."
   },
   access: {
+    stepAddress: "Адрес сервера",
+    stepAddressHint: "Например, voip.example.com — или вставьте ссылку: протокол и порт определятся сами.",
+    addressMore: "Порт, протокол и название",
+    stepNick: "Как вас называть на этом сервере?",
+    stepNickHint: "Ник видят другие участники, 2–32 символа.",
+    stepProtection: "Как защитить профиль?",
+    stepPassword: "Придумайте пароль",
+    wizardDescription: "Пара шагов: сначала сервер, потом ваш профиль на нём.",
     fromStorage: "Из хранилища",
     storedChosen: "Сертификат уже на этом устройстве: пароль файла не нужен.",
     passwordTooShort: "Пароль должен быть не короче {n} символов",

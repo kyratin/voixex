@@ -16,7 +16,10 @@ import com.getcapacitor.annotation.PermissionCallback;
 /** JS: registerPlugin("VoixexCall").start({ title, text }) / stop(), see lib/mobile-bridge.ts. */
 @CapacitorPlugin(
     name = "VoixexCall",
-    permissions = { @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS }) }
+    permissions = {
+        @Permission(alias = "microphone", strings = { Manifest.permission.RECORD_AUDIO }),
+        @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
+    }
 )
 public class VoixexCallPlugin extends Plugin {
     /** Read by MainActivity: keep the WebView running in the background during a call. */
@@ -24,6 +27,21 @@ public class VoixexCallPlugin extends Plugin {
 
     @PluginMethod
     public void start(PluginCall call) {
+        // A microphone-type foreground service may only start once RECORD_AUDIO is granted
+        // (Android 14+ throws SecurityException otherwise, which crashed the app on joining).
+        if (getPermissionState("microphone") != PermissionState.GRANTED) {
+            requestPermissionForAlias("microphone", call, "afterMicrophonePermission");
+            return;
+        }
+        afterMicrophonePermission(call);
+    }
+
+    @PermissionCallback
+    private void afterMicrophonePermission(PluginCall call) {
+        if (getPermissionState("microphone") != PermissionState.GRANTED) {
+            call.resolve(new JSObject().put("started", false).put("reason", "microphone permission denied"));
+            return;
+        }
         // Android 13+: ask once for the notification the foreground service shows.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && getPermissionState("notifications") == PermissionState.PROMPT) {
             requestPermissionForAlias("notifications", call, "afterNotificationPermission");

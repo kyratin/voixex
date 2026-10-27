@@ -91,6 +91,8 @@ export const en = {
     undeafen: "Undeafen"
   },
   voice: {
+    backToChat: "Back to chat",
+    participantsCount: "In voice: {n}",
     connected: "Connected",
     joinVoice: "Join voice",
     stream: "Stream",
@@ -384,6 +386,14 @@ export const en = {
     closedText: "Nothing about them is visible until you sign in. Add a server address or import a certificate to start."
   },
   access: {
+    stepAddress: "Server address",
+    stepAddressHint: "For example voip.example.com — or paste a link; protocol and port are picked up automatically.",
+    addressMore: "Port, protocol and name",
+    stepNick: "What should people call you here?",
+    stepNickHint: "Your nick is visible to other members, 2–32 characters.",
+    stepProtection: "How to protect your profile?",
+    stepPassword: "Choose a password",
+    wizardDescription: "A few quick steps: the server, then your profile on it.",
     fromStorage: "From storage",
     storedChosen: "The certificate is already on this device: no file password needed.",
     passwordTooShort: "Password must be at least {n} characters",
