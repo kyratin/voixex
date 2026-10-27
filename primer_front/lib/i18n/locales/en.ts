@@ -1,5 +1,6 @@
 export const en = {
   common: {
+    close: "Close",
     default: "Default",
     connect: "Connect",
     connecting: "Connecting…",
@@ -63,6 +64,7 @@ export const en = {
     noDesktopBridge: "Desktop voice bridge not detected."
   },
   sidebar: {
+    openChannels: "Channels",
     editConnection: "Edit connection",
     addServer: "Add server",
     removeServer: "Remove from list",

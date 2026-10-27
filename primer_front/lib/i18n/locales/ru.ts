@@ -2,6 +2,7 @@ import type { TranslationDict } from "../types"
 
 export const ru: TranslationDict = {
   common: {
+    close: "Закрыть",
     default: "По умолчанию",
     connect: "Подключиться",
     connecting: "Подключение…",
@@ -65,6 +66,7 @@ export const ru: TranslationDict = {
     noDesktopBridge: "Голосовой мост десктопа не обнаружен."
   },
   sidebar: {
+    openChannels: "Каналы",
     editConnection: "Изменить подключение",
     addServer: "Добавить сервер",
     removeServer: "Удалить из списка",

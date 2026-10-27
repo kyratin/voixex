@@ -1,6 +1,9 @@
 "use client"
 
+// Android app: installs the voice/identity bridges before anything reads them.
+import "@/lib/mobile-bridge"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { cn } from "@/lib/utils"
 import { Buffer } from "buffer"
 import { ServerHome, type ServerCardInfo } from "@/components/voip/server-home"
 import {
@@ -305,6 +308,21 @@ export default function VoIPApp() {
   const [activeServerId, setActiveServerId] = useState("")
   const [activeChannelId, setActiveChannelId] = useState("")
   const [showMemberList, setShowMemberList] = useState(true)
+  /** Narrow screens (phones): channel list and member list are drawers over the chat. */
+  const [isNarrow, setIsNarrow] = useState(false)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [isMobileApp, setIsMobileApp] = useState(false)
+  useEffect(() => {
+    setIsMobileApp(window.voixexWindow?.platform === "android")
+    const mq = window.matchMedia("(max-width: 767px)")
+    const apply = () => {
+      setIsNarrow(mq.matches)
+      if (mq.matches) setShowMemberList(false)
+    }
+    apply()
+    mq.addEventListener("change", apply)
+    return () => mq.removeEventListener("change", apply)
+  }, [])
   const [isMuted, setIsMuted] = useState(false)
   const [isDeafened, setIsDeafened] = useState(false)
   const [isInVoice, setIsInVoice] = useState(false)
@@ -3166,6 +3184,7 @@ export default function VoIPApp() {
           host: vopts.host,
           port: splitUdp,
           mediaToken: vopts.mediaToken,
+          apiBase: uiClient.getApiBase(),
           transport: voiceTransport
         })
         applyVoiceEnginePresenceFlags()
@@ -3517,6 +3536,7 @@ export default function VoIPApp() {
               host: vopts.host,
               port: udpPort,
               mediaToken: vopts.mediaToken,
+              apiBase: uiClient.getApiBase(),
               transport: effectiveVoiceTransport
             })
             applyVoiceEnginePresenceFlags()
@@ -3531,6 +3551,7 @@ export default function VoIPApp() {
                   host: vopts.host,
                   port: udpPort,
                   mediaToken: vopts.mediaToken,
+                  apiBase: uiClient.getApiBase(),
                   transport: fallbackTransport
                 })
                 applyVoiceEnginePresenceFlags()
@@ -4294,8 +4315,25 @@ export default function VoIPApp() {
       <main className="flex min-h-0 flex-1 overflow-hidden bg-background">
         <div ref={webRtcAudioSinkRef} className="hidden" aria-hidden="true" />
 
+        {activeServerId && isNarrow && (mobileNavOpen || showMemberList) ? (
+          <button
+            type="button"
+            aria-label={t("common.close")}
+            className="fixed inset-0 z-30 bg-black/60 md:hidden"
+            onClick={() => {
+              setMobileNavOpen(false)
+              setShowMemberList(false)
+            }}
+          />
+        ) : null}
         {activeServerId ? (
-          <aside className="flex h-full min-h-0 w-60 shrink-0 flex-col bg-card">
+          <aside
+            className={cn(
+              "flex h-full min-h-0 shrink-0 flex-col bg-card",
+              "fixed inset-y-0 left-0 z-40 w-[min(85vw,20rem)] pt-[env(safe-area-inset-top)] transition-transform duration-200 md:static md:z-auto md:w-60 md:translate-x-0 md:pt-0 md:transition-none",
+              mobileNavOpen ? "translate-x-0" : "-translate-x-full"
+            )}
+          >
             <ChannelSidebar
               serverName={servers.find((s) => s.id === activeServerId)?.name || t("common.noServer")}
               serverAddress={activeProfile ? (activeProfile.apiPort ? `${activeProfile.apiHost}:${activeProfile.apiPort}` : activeProfile.apiHost) : undefined}
@@ -4319,7 +4357,10 @@ export default function VoIPApp() {
               activeChannelId={activeChannelId}
               currentVoiceChannelId={currentVoiceChannel}
               isInVoice={isInVoice}
-              onChannelSelect={handleChannelSelect}
+              onChannelSelect={(id) => {
+                setMobileNavOpen(false)
+                void handleChannelSelect(id)
+              }}
               voiceUsers={voiceUsers}
             />
             <UserPanel
@@ -4379,6 +4420,7 @@ export default function VoIPApp() {
             canSend={Boolean(activeServerId && activeChannelId && isTextChannel)}
             showMemberList={showMemberList}
             onToggleMemberList={() => setShowMemberList(!showMemberList)}
+            onOpenNavigation={() => setMobileNavOpen(true)}
             stage={
               isInVoice && currentVoiceChannel ? (
                 <VoiceStage
@@ -4408,6 +4450,7 @@ export default function VoIPApp() {
                   showingStreamWindow={showingStreamWindow}
                   hasDesktopBridge={hasDesktopBridge}
                   canStartScreenShare={canStartScreenShare}
+                  screenShareSupported={!isMobileApp}
                   screenShareWithAudio={screenShareWithAudio}
                   screenSources={screenSources}
                   selectedScreenSourceId={selectedScreenSourceId}
@@ -4443,6 +4486,7 @@ export default function VoIPApp() {
         )}
 
         {showMemberList && activeServerId ? (
+          <div className="fixed inset-y-0 right-0 z-40 pt-[env(safe-area-inset-top)] md:static md:z-auto md:pt-0">
           <MemberList
             members={members}
             roles={[{ id: ADMIN_ROLE_GROUP, name: t("members.admins"), color: "#8b87f5" }]}
@@ -4450,6 +4494,7 @@ export default function VoIPApp() {
             inVoiceIds={Object.values(voiceUsers).flat().map((u) => u.id)}
             speakingIds={Object.values(voiceUsers).flat().filter((u) => u.isSpeaking).map((u) => u.id)}
           />
+          </div>
         ) : null}
       </main>
       </div>
@@ -4514,38 +4559,38 @@ export default function VoIPApp() {
             onValueChange={(v) => setAppSettingsTab(v as AppSettingsTab)}
             className="flex min-h-0 flex-1 flex-col gap-0"
           >
-            <div className="flex min-h-0 flex-1">
-              <TabsList className="flex h-auto w-44 shrink-0 flex-col items-stretch justify-start gap-1 rounded-none border-r border-border bg-muted/20 p-2">
+            <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+              <TabsList className="flex h-auto w-full shrink-0 flex-row items-stretch justify-start gap-1 overflow-x-auto rounded-none border-b border-border bg-muted/20 p-2 sm:w-44 sm:flex-col sm:overflow-visible sm:border-b-0 sm:border-r">
                 {!serverSettingsScope ? (
                   <>
-                    <TabsTrigger value="language" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="language" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabLanguage")}
                     </TabsTrigger>
-                    <TabsTrigger value="voice" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="voice" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabVoice")}
                     </TabsTrigger>
-                    <TabsTrigger value="keybinds" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="keybinds" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabKeybinds")}
                     </TabsTrigger>
                   </>
                 ) : null}
                 {!serverSettingsScope && activeServerId && activeProfile?.authMode ? (
-                  <TabsTrigger value="security" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                  <TabsTrigger value="security" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                     {t("settings.tabSecurity")}
                   </TabsTrigger>
                 ) : null}
                 {serverSettingsScope && canOpenServerSettings ? (
                   <>
-                    <TabsTrigger value="server_general" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="server_general" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabServer")}
                     </TabsTrigger>
-                    <TabsTrigger value="server_channels" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="server_channels" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabChannels")}
                     </TabsTrigger>
-                    <TabsTrigger value="server_roles" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="server_roles" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabRoles")}
                     </TabsTrigger>
-                    <TabsTrigger value="server_members" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    <TabsTrigger value="server_members" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabMembers")}
                     </TabsTrigger>
                   </>

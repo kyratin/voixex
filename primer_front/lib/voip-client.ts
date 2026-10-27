@@ -985,6 +985,10 @@ export class VoipClient {
     return out
   }
 
+  getApiBase() {
+    return this.apiBase
+  }
+
   getMediaToken() {
     return this.mediaToken
   }

@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Paperclip, Send, Users } from "lucide-react"
+import { Hash, Menu, Paperclip, Send, Users } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { Badge } from "@/components/ui/badge"
@@ -41,6 +41,8 @@ interface ChatAreaProps {
   canSend?: boolean
   /** Shown between the header and the messages, e.g. the voice stage while in voice. */
   stage?: ReactNode
+  /** Narrow screens: opens the channel list drawer. */
+  onOpenNavigation?: () => void
 }
 
 /** Messages of one author closer than this are shown as one group. */
@@ -75,7 +77,8 @@ export function ChatArea({
   showMemberList,
   onToggleMemberList,
   canSend = true,
-  stage
+  stage,
+  onOpenNavigation
 }: ChatAreaProps) {
   const { t, dict } = useI18n()
   const [messageInput, setMessageInput] = useState("")
@@ -154,7 +157,17 @@ export function ChatArea({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
-      <header className="flex h-14 shrink-0 items-center gap-3 bg-card px-5">
+      <header className="flex h-14 shrink-0 items-center gap-3 bg-card px-3 sm:px-5">
+        {onOpenNavigation ? (
+          <button
+            type="button"
+            onClick={onOpenNavigation}
+            aria-label={t("sidebar.openChannels")}
+            className="-ml-1 rounded-md p-2 text-muted-foreground hover:bg-secondary hover:text-foreground md:hidden"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+        ) : null}
         <Hash className="h-5 w-5 shrink-0 text-muted-foreground" />
         <h1 className="truncate text-sm font-bold text-foreground">{channelName}</h1>
         <div className="ml-auto flex items-center gap-1">
@@ -166,7 +179,7 @@ export function ChatArea({
 
       {stage}
 
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-5 sm:py-5">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
             <div className="flex size-14 items-center justify-center rounded-full bg-secondary">

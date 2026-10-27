@@ -58,6 +58,8 @@ type VoiceStageProps = {
   showingStreamWindow: boolean
   hasDesktopBridge: boolean
   canStartScreenShare?: boolean
+  /** False on phones: no screen capture there, and pop-out windows do not exist. */
+  screenShareSupported?: boolean
   screenShareWithAudio: boolean
   screenSources: ScreenSource[]
   selectedScreenSourceId: string | null
@@ -225,6 +227,7 @@ export function VoiceStage({
   showingStreamWindow,
   hasDesktopBridge,
   canStartScreenShare = true,
+  screenShareSupported = true,
   screenShareWithAudio,
   screenSources,
   selectedScreenSourceId,
@@ -498,6 +501,7 @@ export function VoiceStage({
           {isDeafened ? <HeadphoneOff className="h-4 w-4" /> : <Headphones className="h-4 w-4" />}
         </DockButton>
         <span className="mx-1 h-5 w-px bg-border" />
+        {screenShareSupported ? (
         <DockButton
           label={
             !isScreenSharing && !canStartScreenShare
@@ -512,12 +516,13 @@ export function VoiceStage({
         >
           {isScreenSharing ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
         </DockButton>
+        ) : null}
         {canHideStream && onHideStream ? (
           <DockButton label={t("voice.hideStreamTooltip")} onClick={onHideStream}>
             <EyeOff className="h-4 w-4" />
           </DockButton>
         ) : null}
-        {canPopOut ? (
+        {canPopOut && screenShareSupported ? (
           <DockButton label={showingStreamWindow ? t("voice.closePopOutBtn") : t("voice.popOutTooltip")} active={showingStreamWindow} onClick={onToggleStreamWindow}>
             <ExternalLink className="h-4 w-4" />
           </DockButton>

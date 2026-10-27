@@ -75,7 +75,7 @@ export function ServerHome({
   const { t } = useI18n()
 
   return (
-    <main className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-background p-8">
+    <main className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-background px-4 pb-8 pt-[max(1rem,env(safe-area-inset-top))] sm:p-8">
       <header className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-3">
@@ -90,15 +90,16 @@ export function ServerHome({
           <button
             type="button"
             onClick={onOpenDeviceSettings}
+            aria-label={t("home.deviceSettings")}
             className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Settings className="h-4 w-4" />
-            {t("home.deviceSettings")}
+            <span className="hidden sm:inline">{t("home.deviceSettings")}</span>
           </button>
           <button
             type="button"
             onClick={onAdd}
-            className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex items-center gap-2 whitespace-nowrap rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Plus className="h-4 w-4" />
             {t("home.addServer")}
@@ -106,7 +107,7 @@ export function ServerHome({
         </div>
       </header>
 
-      <section className="mx-auto mt-12 max-w-5xl">
+      <section className="mx-auto mt-8 max-w-5xl sm:mt-12">
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{t("home.eyebrow")}</p>
@@ -139,7 +140,7 @@ export function ServerHome({
           </DropdownMenu>
         </div>
 
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {servers.map((server) => {
             const busy = busyServerId === server.id
             const offline = server.reachable === "offline"
