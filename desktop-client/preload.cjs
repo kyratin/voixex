@@ -38,4 +38,17 @@ const electronVoice = {
   }
 }
 
+/** Per-server device certificates; private keys stay in the main process. */
+const voixexIdentity = {
+  create: () => ipcRenderer.invoke("identity:create"),
+  setCertificate: (ref, certificate) => ipcRenderer.invoke("identity:setCertificate", ref, certificate),
+  get: (ref) => ipcRenderer.invoke("identity:get", ref),
+  sign: (ref, message) => ipcRenderer.invoke("identity:sign", ref, message),
+  remove: (ref) => ipcRenderer.invoke("identity:remove", ref),
+  exportToFile: (ref, passphrase, server) => ipcRenderer.invoke("identity:export", ref, passphrase, server),
+  pickImportFile: () => ipcRenderer.invoke("identity:pickImportFile"),
+  importFromFile: (contents, passphrase) => ipcRenderer.invoke("identity:import", contents, passphrase)
+}
+
 contextBridge.exposeInMainWorld("electronVoice", electronVoice)
+contextBridge.exposeInMainWorld("voixexIdentity", voixexIdentity)

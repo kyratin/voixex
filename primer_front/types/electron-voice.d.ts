@@ -1,7 +1,33 @@
 export {}
 
+type VoixexServerCertificate = {
+  v: 1
+  certId: string
+  serverId: string
+  clientId: string
+  publicKey: string
+  issuedAt: string
+  sig: string
+}
+
+type VoixexIdentityServerInfo = { label?: string; apiHost?: string; apiPort?: string; apiUseHttps?: boolean; authMode?: string }
+
 declare global {
   interface Window {
+    /** Per-server device certificates (desktop only). Private keys never leave the main process. */
+    voixexIdentity?: {
+      create: () => Promise<{ ref: string; publicKey: string }>
+      setCertificate: (ref: string, certificate: VoixexServerCertificate) => Promise<void>
+      get: (ref: string) => Promise<{ publicKey: string; certificate: VoixexServerCertificate | null } | null>
+      sign: (ref: string, message: string) => Promise<string>
+      remove: (ref: string) => Promise<void>
+      exportToFile: (ref: string, passphrase: string, server: VoixexIdentityServerInfo) => Promise<string | null>
+      pickImportFile: () => Promise<{ path: string; contents: string } | null>
+      importFromFile: (
+        contents: string,
+        passphrase: string
+      ) => Promise<{ ref: string; publicKey: string; certificate: VoixexServerCertificate; server: VoixexIdentityServerInfo }>
+    }
     electronVoice?: {
       /** macOS 10.15+: triggers system mic permission dialog from the main process (required alongside Info.plist). */
       requestMicrophoneAccess?: () => Promise<{ granted: boolean }>

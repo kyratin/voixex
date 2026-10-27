@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Eye, LogOut } from "lucide-react"
+import { ArrowLeft, Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Eye, LogOut } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -10,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
 import { useI18n } from "@/lib/i18n/provider"
+import { ConnectionSecurityBadge } from "@/components/voip/server-access-dialog"
 import { avatarGradient } from "@/lib/avatar-colors"
 
 export interface Channel {
@@ -40,6 +41,10 @@ export interface VoiceUser {
 
 interface ChannelSidebarProps {
   serverName: string
+  /** Leave this server and go back to the server list. */
+  onLeaveServer?: () => void
+  /** Connection (HTTPS/HTTP) and the member's protection level on this server. */
+  security?: { secure: boolean; levelLabel: string }
   serverBannerUrl?: string | null
   categories: ChannelCategory[]
   activeChannelId: string
@@ -57,6 +62,8 @@ interface ChannelSidebarProps {
 
 export function ChannelSidebar({ 
   serverName,
+  onLeaveServer,
+  security,
   serverBannerUrl,
   categories, 
   activeChannelId,
@@ -87,6 +94,22 @@ export function ChannelSidebar({
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col bg-card">
+      {onLeaveServer ? (
+        <button
+          type="button"
+          onClick={onLeaveServer}
+          className="flex h-9 shrink-0 items-center gap-1.5 px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          {t("sidebar.backToServers")}
+        </button>
+      ) : null}
+      {security ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 px-3 pb-1.5 text-[11px] text-muted-foreground">
+          <ConnectionSecurityBadge secure={security.secure} />
+          <span className="truncate">{security.levelLabel}</span>
+        </div>
+      ) : null}
       {serverBannerUrl ? (
         <div className="relative h-20 shrink-0 overflow-hidden">
           {/* eslint-disable-next-line @next/next/no-img-element */}

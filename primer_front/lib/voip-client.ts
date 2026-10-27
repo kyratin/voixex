@@ -6,6 +6,8 @@ const DEFAULT_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:1
 
 export type JoinResult = {
   serverId: string
+  /** Set when the member is below the server's minimum protection level: raise it before entering. */
+  upgradeRequired?: { minLevel: number }
   serverName?: string
   bannerUrl?: string | null
   authToken: string
@@ -53,7 +55,11 @@ export type RealtimeState = {
       manage_chat: boolean
     }
   } | null
-  connection: { wsConnected: boolean; reconnecting: boolean }
+  /**
+   * revoked: the server ended the session (certificate revoked or access reset);
+   * levelTooLow: the server now requires a higher protection level than this profile has.
+   */
+  connection: { wsConnected: boolean; reconnecting: boolean; revoked?: boolean; levelTooLow?: boolean }
 }
 
 export type ChatMessage = {
@@ -140,10 +146,89 @@ export function toHeaderSafeFileName(name: string): string {
 }
 
 export class ApiError extends Error {
-  constructor(readonly code: "apiUnreachable" | "serverUnavailable", message: string) {
+  /** camelCase code, e.g. "apiUnreachable" or a server auth code such as "invalidCredentials". */
+  constructor(
+    readonly code: string,
+    message: string,
+    /** Extra fields of the error response, e.g. `authMode` for auth_mode_mismatch. */
+    readonly details: Record<string, unknown> = {}
+  ) {
     super(message)
     this.name = "ApiError"
   }
+}
+
+/**
+ * Protection level a member chose on a server:
+ * 1 "password" — nick + password; 2 "certificate" — this device's certificate;
+ * 3 "password_certificate" — certificate + nick + password.
+ */
+export type AuthMode = "password" | "certificate" | "password_certificate"
+
+export const modeNeedsPassword = (mode: AuthMode) => mode !== "certificate"
+export const modeNeedsCertificate = (mode: AuthMode) => mode !== "password"
+
+/** 1 password, 2 certificate, 3 both; 0 for an unprotected profile. */
+export const authLevel = (mode: AuthMode | null | undefined) =>
+  mode === "password" ? 1 : mode === "certificate" ? 2 : mode === "password_certificate" ? 3 : 0
+
+export const AUTH_MODES_BY_LEVEL: readonly AuthMode[] = ["password", "certificate", "password_certificate"]
+
+/** Device certificate issued by a server (see backend auth.ts). */
+export type ServerCertificate = {
+  v: 1
+  certId: string
+  serverId: string
+  clientId: string
+  publicKey: string
+  issuedAt: string
+  sig: string
+}
+
+export type IssuedProfile = {
+  serverId: string
+  clientId: string
+  nick: string
+  authMode: AuthMode
+  certificate: ServerCertificate | null
+}
+
+export type CertificateInfo = {
+  certId: string
+  issuedAt: string
+  lastUsedAt: string | null
+  revokedAt: string | null
+  revokedByAdmin: boolean
+}
+
+export type SecurityInfo = {
+  /** Minimum protection level the server requires (0 none, 1..3). */
+  minAuthLevel?: number
+  protected: boolean
+  nick: string | null
+  authMode: AuthMode | null
+  hasPassword: boolean
+  currentCertId?: string | null
+  certificates: CertificateInfo[]
+}
+
+const snakeToCamel = (value: string) => value.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+
+/** Turns an error response into ApiError (server code) or a plain Error with the server message. */
+async function errorFromResponse(res: Response, fallback: string): Promise<Error> {
+  let message = `${fallback} (${res.status})`
+  try {
+    const payload = (await res.json()) as { message?: unknown; code?: unknown } & Record<string, unknown>
+    if (typeof payload.message === "string" && payload.message) message = payload.message
+    if (typeof payload.code === "string" && payload.code && !payload.code.startsWith("FST_")) {
+      return new ApiError(snakeToCamel(payload.code), message, payload)
+    }
+    // Fastify's own 404 for an unknown route: the server is older than certificate login.
+    if (res.status === 404 && /^Route \w+:\/v1\/auth\//.test(message)) return new ApiError("authNotSupported", message)
+  } catch {
+    /* non-JSON body */
+  }
+  return new Error(message)
 }
 
 export class VoipClient {
@@ -210,6 +295,11 @@ export class VoipClient {
       throw new Error(details)
     }
     const out = (await res.json()) as JoinResult
+    this.applyJoinResult(out)
+    return out
+  }
+
+  private applyJoinResult(out: JoinResult) {
     this.authToken = out.authToken
     this.mediaToken = out.mediaToken
     this.currentServerId = out.serverId
@@ -225,7 +315,167 @@ export class VoipClient {
     }
     const voiceHost = out.udp.host === "backend" ? apiHostname : out.udp.host
     this.electronVoiceParams = { host: voiceHost, port: out.udp.port, mediaToken: out.mediaToken }
+  }
+
+  private async postJson<T>(path: string, body: unknown, fallback: string, auth = false): Promise<T> {
+    const res = await fetch(`${this.apiBase}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(auth && this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {})
+      },
+      body: JSON.stringify(body ?? {})
+    })
+    if (!res.ok) throw await errorFromResponse(res, fallback)
+    return (await res.json()) as T
+  }
+
+  /**
+   * First visit: the shared server password lets a new member create a profile at the chosen level
+   * (password and/or device public key, depending on `authMode`).
+   */
+  registerMember(input: { serverPassword: string; nick: string; authMode: AuthMode; password?: string; publicKey?: string }) {
+    return this.postJson<IssuedProfile>("/v1/auth/register", input, "registration failed")
+  }
+
+  /** Protects a profile created before protection existed; keeps its nick and history. */
+  claimMember(input: {
+    serverPassword: string
+    clientId: string
+    authMode: AuthMode
+    password?: string
+    publicKey?: string
+    nick?: string
+  }) {
+    return this.postJson<IssuedProfile>("/v1/auth/claim", input, "could not protect the profile")
+  }
+
+  /** Level 1: nick + personal password. */
+  async loginWithPassword(input: { nick: string; password: string; superuserPassword?: string }) {
+    const out = await this.postJson<JoinResult & { authMode: AuthMode }>(
+      "/v1/auth/password-login",
+      {
+        nick: input.nick,
+        password: input.password,
+        ...(input.superuserPassword ? { superuserPassword: input.superuserPassword } : {})
+      },
+      "login failed"
+    )
+    this.applyJoinResult(out)
     return out
+  }
+
+  async getSecurityPolicy(serverId: string): Promise<{ minAuthLevel: number }> {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/security-policy`, {
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!res.ok) throw await errorFromResponse(res, "security policy failed")
+    return (await res.json()) as { minAuthLevel: number }
+  }
+
+  /** Admin: minimum protection level to enter (0 none, 1..3). */
+  async setSecurityPolicy(serverId: string, minAuthLevel: number): Promise<{ minAuthLevel: number }> {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/security-policy`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.authToken}` },
+      body: JSON.stringify({ minAuthLevel })
+    })
+    if (!res.ok) throw await errorFromResponse(res, "security policy update failed")
+    return (await res.json()) as { minAuthLevel: number }
+  }
+
+  /** Changes the protection level; returns a certificate when a new device key was sent. */
+  setAuthMode(
+    serverId: string,
+    input: { authMode: AuthMode; currentPassword?: string; newPassword?: string; publicKey?: string }
+  ) {
+    return this.postJson<{ authMode: AuthMode; certificate: ServerCertificate | null }>(
+      `/v1/servers/${serverId}/me/auth-mode`,
+      input,
+      "could not change the protection level",
+      true
+    )
+  }
+
+  /**
+   * Levels 2 and 3: the server sends a one-time challenge and the device key signs it (in the
+   * Electron main process); level 3 also checks nick + password.
+   */
+  async loginWithCertificate(input: {
+    certificate: ServerCertificate
+    nick?: string
+    password?: string
+    superuserPassword?: string
+    signLoginMessage: (message: string) => Promise<string>
+  }): Promise<JoinResult & { certId: string; authMode: AuthMode }> {
+    const { certificate } = input
+    const challenge = await this.postJson<{ nonce: string }>(
+      "/v1/auth/challenge",
+      { certId: certificate.certId },
+      "login failed"
+    )
+    const message = `voixex-login:v1\n${certificate.serverId}\n${certificate.certId}\n${challenge.nonce}`
+    const signature = await input.signLoginMessage(message)
+    const out = await this.postJson<JoinResult & { certId: string; authMode: AuthMode }>(
+      "/v1/auth/login",
+      {
+        certId: certificate.certId,
+        nonce: challenge.nonce,
+        signature,
+        ...(input.nick ? { nick: input.nick } : {}),
+        ...(input.password ? { password: input.password } : {}),
+        ...(input.superuserPassword ? { superuserPassword: input.superuserPassword } : {})
+      },
+      "login failed"
+    )
+    this.applyJoinResult(out)
+    return out
+  }
+
+  async getMySecurity(serverId: string): Promise<SecurityInfo> {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/me/security`, {
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!res.ok) throw await errorFromResponse(res, "security info failed")
+    return (await res.json()) as SecurityInfo
+  }
+
+  revokeMyCertificate(serverId: string, certId: string) {
+    return this.postJson<{ ok: true }>(`/v1/servers/${serverId}/me/certificates/${certId}/revoke`, {}, "revoke failed", true)
+  }
+
+  changeMyPassword(serverId: string, currentPassword: string, newPassword: string) {
+    return this.postJson<{ ok: true }>(
+      `/v1/servers/${serverId}/me/password`,
+      { currentPassword, newPassword },
+      "password change failed",
+      true
+    )
+  }
+
+  async getMemberSecurity(serverId: string, clientId: string): Promise<SecurityInfo> {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/members/${clientId}/security`, {
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!res.ok) throw await errorFromResponse(res, "security info failed")
+    return (await res.json()) as SecurityInfo
+  }
+
+  revokeMemberCertificate(serverId: string, clientId: string, certId: string) {
+    return this.postJson<{ ok: true }>(
+      `/v1/servers/${serverId}/members/${clientId}/certificates/${certId}/revoke`,
+      {},
+      "revoke failed",
+      true
+    )
+  }
+
+  resetMemberCredentials(serverId: string, clientId: string) {
+    return this.postJson<{ ok: true }>(`/v1/servers/${serverId}/members/${clientId}/reset-credentials`, {}, "reset failed", true)
   }
 
   async createRoom(serverId: string, name: string, kind: "voice" | "text") {
@@ -554,9 +804,20 @@ export class VoipClient {
       }
       this.emit()
     }
-    this.ws.onclose = () => {
+    this.ws.onclose = (event) => {
       this.ws = null
       this.stopPing()
+      // 4002 invalid token / 4003 session ended / 4004 level too low: retrying with the same token cannot succeed.
+      if (event.code === 4002 || event.code === 4003 || event.code === 4004) {
+        this.state.connection = {
+          wsConnected: false,
+          reconnecting: false,
+          revoked: event.code !== 4004,
+          levelTooLow: event.code === 4004
+        }
+        this.emit()
+        return
+      }
       this.state.connection = { wsConnected: false, reconnecting: true }
       this.emit()
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer)

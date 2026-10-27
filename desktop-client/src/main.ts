@@ -1,8 +1,9 @@
-import { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, Menu, nativeImage, net, protocol, session, systemPreferences } from "electron"
-import { existsSync } from "node:fs"
+import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, protocol, session, systemPreferences } from "electron"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { release } from "node:os"
 import { join, normalize, relative } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
+import { IdentityStore, type IdentityServerInfo, type ServerCertificate } from "./identity-store.js"
 import { VoiceService } from "./voice-service.js"
 
 const voice = new VoiceService()
@@ -236,6 +237,43 @@ app.whenReady().then(async () => {
       win.webContents.send("voice:screenChunk", chunkBase64)
     }
   })
+  const identities = new IdentityStore(join(app.getPath("userData"), "identities.json"))
+  ipcMain.handle("identity:create", () => identities.create())
+  ipcMain.handle("identity:setCertificate", (_event, ref: string, certificate: ServerCertificate) =>
+    identities.setCertificate(ref, certificate)
+  )
+  ipcMain.handle("identity:get", (_event, ref: string) => identities.get(ref))
+  ipcMain.handle("identity:sign", (_event, ref: string, message: string) => identities.sign(ref, message))
+  ipcMain.handle("identity:remove", (_event, ref: string) => identities.remove(ref))
+  ipcMain.handle("identity:export", async (event, ref: string, passphrase: string, server: IdentityServerInfo) => {
+    const contents = identities.exportEncrypted(ref, passphrase, server)
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const safeLabel = (server.label || "server").replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 40)
+    const options = {
+      title: "Export certificate",
+      defaultPath: `${safeLabel}.voixexkey`,
+      filters: [{ name: "Voixex certificate", extensions: ["voixexkey"] }]
+    }
+    const result = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return null
+    writeFileSync(result.filePath, contents, { mode: 0o600 })
+    return result.filePath
+  })
+  /** Step 1 of import: pick the file (the passphrase is asked for afterwards in the UI). */
+  ipcMain.handle("identity:pickImportFile", async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const options = {
+      title: "Import certificate",
+      properties: ["openFile" as const],
+      filters: [{ name: "Voixex certificate", extensions: ["voixexkey"] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return { path: result.filePaths[0], contents: readFileSync(result.filePaths[0], "utf8") }
+  })
+  ipcMain.handle("identity:import", (_event, contents: string, passphrase: string) =>
+    identities.importEncrypted(contents, passphrase)
+  )
   ipcMain.handle("voice:requestMicrophoneAccess", async () => {
     if (process.platform !== "darwin") {
       return { granted: true as const }

@@ -2,12 +2,32 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Buffer } from "buffer"
-import { ServerSidebar } from "@/components/voip/server-sidebar"
+import { ServerHome, type ServerCardInfo } from "@/components/voip/server-home"
+import {
+  ServerAccessDialog,
+  type AccessMode,
+  type ClaimInput,
+  type ImportInput,
+  type DescribedError,
+  type LoginInput,
+  type RegisterInput,
+  type UpgradeInput
+} from "@/components/voip/server-access-dialog"
+import { MemberSecurityAdmin, MySecurityPanel, ServerSecurityPolicy } from "@/components/voip/security-panel"
 import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-sidebar"
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
 import { MemberList, type Member } from "@/components/voip/member-list"
-import { ApiError, VoipClient, type RealtimeState } from "@/lib/voip-client"
+import {
+  ApiError,
+  VoipClient,
+  authLevel,
+  modeNeedsCertificate,
+  modeNeedsPassword,
+  type AuthMode,
+  type IssuedProfile,
+  type RealtimeState
+} from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
@@ -28,7 +48,7 @@ import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { MicLevelMeter, type MicLevelMeterSample } from "@/components/voip/mic-level-meter"
-import { ConnectServerDialog } from "@/components/voip/connect-server-dialog"
+import { ConnectServerDialog, type ConnectionDraft } from "@/components/voip/connect-server-dialog"
 import { LanguageSelector } from "@/components/voip/language-selector"
 import { VoiceChannelView } from "@/components/voip/voice-channel-view"
 import { useI18n } from "@/lib/i18n/provider"
@@ -174,7 +194,15 @@ export default function VoIPApp() {
   const { t } = useI18n()
   const errorText = (e: unknown, fallbackKey: string) =>
     e instanceof ApiError ? t(`notices.${e.code}`) : e instanceof Error ? e.message : t(fallbackKey)
-  type AppSettingsTab = "language" | "voice" | "keybinds" | "server_general" | "server_channels" | "server_roles"
+  type AppSettingsTab =
+    | "language"
+    | "voice"
+    | "keybinds"
+    | "security"
+    | "server_general"
+    | "server_channels"
+    | "server_roles"
+    | "server_members"
   type SavedServerProfile = {
     serverId: string
     serverName: string
@@ -191,6 +219,16 @@ export default function VoIPApp() {
     voiceTransport?: "udp" | "tcp"
     /** Voice/screen media path (legacy UDP chunks vs WebRTC/LiveKit). */
     mediaEngine?: "legacy" | "webrtc"
+    /**
+     * Device certificate for this server (key held by the Electron main process). When set, the
+     * profile keeps no passwords or nick: signing in needs certificate + nick + password.
+     */
+    identityRef?: string
+    certId?: string
+    /** Member id on this server (per server, so servers cannot correlate members). */
+    serverClientId?: string
+    /** Protection level chosen on this server; absent = old unprotected (server password only) profile. */
+    authMode?: AuthMode
   }
   type VoiceRuntimeStats = {
     connected?: boolean
@@ -282,10 +320,18 @@ export default function VoIPApp() {
   const [error, setError] = useState("")
   const [joining, setJoining] = useState(false)
   const [connectedToApi, setConnectedToApi] = useState(false)
-  const [showConnectPanel, setShowConnectPanel] = useState(false)
-  /** Saved profile being edited in the connect dialog (null = adding a new server). */
-  const [editingServerId, setEditingServerId] = useState<string | null>(null)
-  const editingServerIdRef = useRef<string | null>(null)
+  /** Sign-in / registration dialog for a server (null = closed). */
+  const [accessMode, setAccessMode] = useState<AccessMode | null>(null)
+  /** Saved server whose connection settings are being edited. */
+  const [editDraft, setEditDraft] = useState<{ serverId: string; draft: ConnectionDraft } | null>(null)
+  const [serverReachability, setServerReachability] = useState<Record<string, "online" | "offline">>({})
+  const [sessionRevoked, setSessionRevoked] = useState(false)
+  /** The server raised its minimum protection level above this profile's level. */
+  const [sessionLevelTooLow, setSessionLevelTooLow] = useState(false)
+  /** Level-2 card signing in with one click. */
+  const [busyServerId, setBusyServerId] = useState<string | null>(null)
+  /** Remembered between a sign-in that needs a higher level and the "raise level" step. */
+  const pendingLoginRef = useRef<{ nick: string; password: string; superuserPassword?: string } | null>(null)
   /** User-defined label in the server list (sidebar). Falls back to API server name if left empty when connecting. */
   const [connectServerListName, setConnectServerListName] = useState("")
   const [roomNameInput, setRoomNameInput] = useState("new-room")
@@ -460,9 +506,7 @@ export default function VoIPApp() {
   const playbackHighpassHzRef = useRef(playbackHighpassHz)
   const playbackLimiterEnabledRef = useRef(playbackLimiterEnabled)
   const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const autoConnectAttemptedRef = useRef(false)
   /** Serializes sidebar server switches so disconnect + connect never overlap. */
-  const serverSwitchChainRef = useRef<Promise<void>>(Promise.resolve())
   const connectedToApiRef = useRef(false)
   const wsConnectedRef = useRef(false)
 
@@ -616,6 +660,8 @@ export default function VoIPApp() {
 
       setWsConnected(u.connection.wsConnected)
       setWsReconnecting(u.connection.reconnecting)
+      setSessionRevoked(Boolean(u.connection.revoked))
+      setSessionLevelTooLow(Boolean(u.connection.levelTooLow))
       if (split && v) {
         setVoiceSigWsConnected(v.connection.wsConnected)
       } else {
@@ -839,29 +885,13 @@ export default function VoIPApp() {
           typeof s.displayName === "string"
       )
       if (valid.length === 0) return
+      // Profiles saved by 0.3.0 had a certificate and always used level 3.
+      for (const s of valid) {
+        if (s.identityRef && !s.authMode) s.authMode = "password_certificate"
+      }
+      // The app starts on the server list: a server stays closed until you sign in to it.
       setSavedServers(valid)
       setServers(valid.map((s) => ({ id: s.serverId, name: s.serverName, icon: s.serverName.slice(0, 1).toUpperCase() || "S" })))
-      const lastServerId = localStorage.getItem("voixex-last-server-id")
-      const preferred = valid.find((s) => s.serverId === lastServerId) ?? valid[0]
-      const globalPrefs = loadGlobalConnectionPrefs()
-      setActiveServerId(preferred.serverId)
-      setApiHost(preferred.apiHost)
-      setApiPort(preferred.apiPort)
-      setServerPassword(preferred.serverPassword)
-      applyConnectionPrefsToState(
-        {
-          apiUseHttps: typeof preferred.apiUseHttps === "boolean" ? preferred.apiUseHttps : globalPrefs.apiUseHttps,
-          udpPortOverride:
-            typeof preferred.udpPortOverride === "string" ? preferred.udpPortOverride : (globalPrefs.udpPortOverride ?? ""),
-          voiceTransport: preferred.voiceTransport ?? globalPrefs.voiceTransport,
-          mediaEngine: preferred.mediaEngine ?? globalPrefs.mediaEngine
-        },
-        { setMediaEngine, setVoiceTransport, setApiUseHttps, setUdpPortOverride, mediaEngineRef }
-      )
-      setDisplayNameInput(preferred.displayName)
-      setProfileDisplayName(preferred.displayName)
-      setSuperuserPasswordInput(preferred.superuserPassword ?? "")
-      setConnectServerListName(preferred.serverName)
     } catch {
       // ignore malformed saved server payload
     }
@@ -871,15 +901,34 @@ export default function VoIPApp() {
     setHasDesktopBridge(Boolean(window.electronVoice))
   }, [])
 
+  // Reachability of saved servers for the server list (only /health, nothing behind sign-in).
   useEffect(() => {
-    if (!hasDesktopBridge) return
-    if (autoConnectAttemptedRef.current) return
-    if (savedServers.length === 0) return
-    const lastServerId = localStorage.getItem("voixex-last-server-id")
-    const preferred = savedServers.find((s) => s.serverId === lastServerId) ?? savedServers[0]
-    autoConnectAttemptedRef.current = true
-    void connectAndJoin(preferred)
-  }, [hasDesktopBridge, savedServers])
+    if (activeServerId || savedServers.length === 0) return
+    let cancelled = false
+    const check = async () => {
+      const results = await Promise.all(
+        savedServers.map(async (s) => {
+          const ctrl = new AbortController()
+          const timer = setTimeout(() => ctrl.abort(), 5000)
+          try {
+            const res = await fetch(`${buildApiBaseUrl(s.apiHost, s.apiPort, Boolean(s.apiUseHttps))}/health`, { signal: ctrl.signal })
+            return [s.serverId, res.ok ? "online" : "offline"] as const
+          } catch {
+            return [s.serverId, "offline"] as const
+          } finally {
+            clearTimeout(timer)
+          }
+        })
+      )
+      if (!cancelled) setServerReachability(Object.fromEntries(results))
+    }
+    void check()
+    const id = setInterval(() => void check(), 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [activeServerId, savedServers])
 
   useEffect(() => {
     const raw = localStorage.getItem("voip-audio-settings")
@@ -1804,11 +1853,18 @@ export default function VoIPApp() {
     rt.playoutPrefetch.reconfigure(startMs, maxQueuedSec)
   }, [voiceStats])
 
+  // Outside a voice channel the pipeline also runs while the Voice settings tab is open, so the mic
+  // can be tested (level meter, monitor, volume sliders) without sending anything to the server.
+  const micTestActive = hasDesktopBridge && showAppSettings && appSettingsTab === "voice" && !isInVoice
+  const voicePipelineMode: "voice" | "test" | null =
+    hasDesktopBridge && isInVoice && currentVoiceChannel ? "voice" : micTestActive ? "test" : null
+
   useEffect(() => {
-    if (!hasDesktopBridge || !isInVoice || !currentVoiceChannel) {
+    if (!voicePipelineMode) {
       stopVoicePipeline()
       return
     }
+    const sendsToServer = voicePipelineMode === "voice"
 
     let cancelled = false
 
@@ -1982,7 +2038,7 @@ export default function VoIPApp() {
         }
         voicePipelineRef.current = runtime
         voicePlayoutBufferedRef.current = 0
-        republishWebRtcMicFromPipeline()
+        if (sendsToServer) republishWebRtcMicFromPipeline()
         setAudioPipelineDiag({
           captureSampleRate: captureCtx.sampleRate,
           playbackSampleRate: playbackCtx.sampleRate,
@@ -1998,7 +2054,7 @@ export default function VoIPApp() {
         // transport is already reliable and bandwidth is acceptable for desktop.
         const shouldUseOpusUplink = useOpusUplink && voiceTransport !== "tcp"
         let opusEncoder: unknown = null
-        if (shouldUseOpusUplink && window.electronVoice?.sendOpusFrame) {
+        if (sendsToServer && shouldUseOpusUplink && window.electronVoice?.sendOpusFrame) {
           try {
             const mod = await import("opusscript")
             const OpusScript = (mod as unknown as { default: typeof import("opusscript") }).default
@@ -2016,7 +2072,7 @@ export default function VoIPApp() {
             setDeviceError(t("notices.opusFailed"))
             opusEncoder = null
           }
-        } else if (voiceTransport === "tcp") {
+        } else if (sendsToServer && voiceTransport === "tcp") {
           setDeviceError(t("notices.tcpPcmUplink"))
         }
         let lastMeterEmitAt = 0
@@ -2037,7 +2093,9 @@ export default function VoIPApp() {
           const gatedPcm = gateEnabledRef.current
             ? applyUplinkNoiseGate(pcm, muteAmp, openAmp, gateFloorRatio)
             : pcm
-          const txPcm = mutedRef.current ? new Int16Array(gatedPcm.length) : gatedPcm
+          // The mute button applies to the call; a mic test should still show and play the mic.
+          const muted = sendsToServer && mutedRef.current
+          const txPcm = muted ? new Int16Array(gatedPcm.length) : gatedPcm
 
           const now = Date.now()
           if (now - lastMeterEmitAt >= 80) {
@@ -2060,7 +2118,7 @@ export default function VoIPApp() {
           const merged = concatInt16(runtime.txRemainder, txPcm)
           let offset = 0
           while (offset + frameSize <= merged.length) {
-            if (!mutedRef.current) {
+            if (sendsToServer && !mutedRef.current) {
               const frame = merged.subarray(offset, offset + frameSize)
               if (opusEncoder && window.electronVoice?.sendOpusFrame) {
                 try {
@@ -2100,7 +2158,7 @@ export default function VoIPApp() {
           }
         }
 
-        runtime.unsubscribeIncoming = window.electronVoice?.onPcm16Frame((pcm16Base64) => {
+        runtime.unsubscribeIncoming = !sendsToServer ? null : window.electronVoice?.onPcm16Frame((pcm16Base64) => {
           if (mediaEngineRef.current === "webrtc") return
           if (deafenedRef.current) return
           const frame48k = decodePcm16Base64(pcm16Base64)
@@ -2175,10 +2233,12 @@ export default function VoIPApp() {
         } else {
           await playbackCtx.suspend()
         }
-        setStatus((prev) => {
-          if (prev.includes("Voice I/O active")) return prev
-          return prev.includes("In room:") ? `${prev} | Voice I/O active` : "Voice I/O active"
-        })
+        if (sendsToServer) {
+          setStatus((prev) => {
+            if (prev.includes("Voice I/O active")) return prev
+            return prev.includes("In room:") ? `${prev} | Voice I/O active` : "Voice I/O active"
+          })
+        }
       } catch (e) {
         setDeviceError(errorText(e, "notices.audioStartFailed"))
       }
@@ -2190,8 +2250,7 @@ export default function VoIPApp() {
       stopVoicePipeline()
     }
   }, [
-    hasDesktopBridge,
-    isInVoice,
+    voicePipelineMode,
     currentVoiceChannel,
     audioDevicesRevision,
     noiseSuppressionEnabled,
@@ -3047,11 +3106,10 @@ export default function VoIPApp() {
   const handleRemoveSavedServer = async (serverId: string) => {
     const entry = savedServers.find((s) => s.serverId === serverId)
     if (!entry) return
-    if (
-      !window.confirm(t("notices.confirmRemoveServer", { name: entry.serverName }))
-    ) {
-      return
-    }
+    const removeText = entry.identityRef
+      ? t("notices.confirmRemoveProtected", { name: entry.serverName || entry.apiHost })
+      : t("notices.confirmRemoveServer", { name: entry.serverName || entry.apiHost })
+    if (!window.confirm(removeText)) return
     const touchesUi = connectedToApi && uiClient.getCurrentServerId() === serverId
     const touchesVoice = isInVoice && voiceServerId === serverId
     if (touchesUi || touchesVoice) {
@@ -3067,8 +3125,8 @@ export default function VoIPApp() {
         icon: s.serverName.slice(0, 1).toUpperCase() || "S"
       }))
     )
+    if (entry.identityRef) void window.voixexIdentity?.remove(entry.identityRef)
     if (next.length === 0) {
-      autoConnectAttemptedRef.current = false
       localStorage.removeItem("voixex-last-server-id")
       setActiveServerId("")
       // Don't leave the removed profile's credentials in the connect form.
@@ -3078,20 +3136,12 @@ export default function VoIPApp() {
       setSuperuserPasswordInput("")
       setConnectServerListName("")
       setError("")
-      setShowConnectPanel(true)
       toast.success(t("notices.serverRemoved"))
       return
     }
     if (activeServerId === serverId) {
-      const pick = next[0]
-      setActiveServerId(pick.serverId)
-      localStorage.setItem("voixex-last-server-id", pick.serverId)
-      setApiHost(pick.apiHost)
-      setApiPort(pick.apiPort)
-      setServerPassword(pick.serverPassword)
-      setDisplayNameInput(pick.displayName)
-      setSuperuserPasswordInput(pick.superuserPassword ?? "")
-      setProfileDisplayName(pick.displayName)
+      setActiveServerId("")
+      activeServerIdRef.current = ""
     }
     toast.success(t("notices.serverRemoved"))
   }
@@ -3125,7 +3175,7 @@ export default function VoIPApp() {
     const host = apiHost.trim()
     const port = apiPort.trim()
     const match = savedServers.find((s) => s.apiHost === host && s.apiPort === port)
-    const serverId = patch.serverId ?? match?.serverId ?? editingServerIdRef.current ?? activeServerIdRef.current
+    const serverId = patch.serverId ?? match?.serverId ?? activeServerIdRef.current
     if (!serverId) return
     setSavedServers((prev) => {
       const idx = prev.findIndex((s) => s.serverId === serverId)
@@ -3158,7 +3208,17 @@ export default function VoIPApp() {
     persistConnectionSettings({ udpPortOverride: value })
   }
 
-  const connectAndJoin = async (preset?: SavedServerProfile) => {
+  /**
+   * Connects to a server. With `auth` (and a profile holding a device certificate) it signs in with
+   * certificate + nick + password; otherwise it uses the old password-only join. Errors are thrown
+   * to the caller when `auth` or `opts.rethrow` is set (dialogs show them), else shown in `error`.
+   */
+  const connectAndJoin = async (
+    preset?: SavedServerProfile,
+    auth?: { nick: string; password: string; superuserPassword?: string },
+    opts: { rethrow?: boolean } = {}
+  ) => {
+    const protectedLogin = Boolean(auth && preset?.authMode)
     try {
       setJoining(true)
       uiClient.disconnect()
@@ -3172,11 +3232,7 @@ export default function VoIPApp() {
       const superPassword = preset?.superuserPassword ?? superuserPasswordInput
       const normalizedDisplayName = (preset?.displayName ?? displayNameInput).trim() || "User"
       const globalPrefs = loadGlobalConnectionPrefs()
-      const editingId = editingServerIdRef.current
-      // When the port/host was edited there is no host match; fall back to the profile being edited.
-      const matchByHost =
-        savedServers.find((s) => s.apiHost === host && s.apiPort === port) ??
-        (editingId ? savedServers.find((s) => s.serverId === editingId) : undefined)
+      const matchByHost = savedServers.find((s) => s.apiHost === host && s.apiPort === port)
       const resolvedUseHttps =
         typeof preset?.apiUseHttps === "boolean"
           ? preset.apiUseHttps
@@ -3216,9 +3272,7 @@ export default function VoIPApp() {
       if (!preset) {
         const earlyLabel = connectServerListName.trim()
         if (earlyLabel) {
-          const others = savedServers.filter(
-            (s) => !(s.apiHost === host && s.apiPort === port) && s.serverId !== editingId
-          )
+          const others = savedServers.filter((s) => !(s.apiHost === host && s.apiPort === port))
           if (others.some((s) => s.serverName.trim().toLowerCase() === earlyLabel.toLowerCase())) {
             toast.error(t("notices.duplicateServerName"))
             setJoining(false)
@@ -3226,8 +3280,10 @@ export default function VoIPApp() {
           }
         }
       }
-      setDisplayNameInput(normalizedDisplayName)
-      localStorage.setItem("voip-last-display-name", normalizedDisplayName)
+      if (!protectedLogin) {
+        setDisplayNameInput(normalizedDisplayName)
+        localStorage.setItem("voip-last-display-name", normalizedDisplayName)
+      }
       uiClient.setApiBase(buildApiBaseUrl(host, port, resolvedUseHttps))
       setError("")
       setStatus(`Connecting API: ${host}:${port}`)
@@ -3235,20 +3291,46 @@ export default function VoIPApp() {
       if (!health.ok) throw new Error(t("notices.serverNotHealthy"))
       setConnectedToApi(true)
       setStatus("Joining server...")
-      const clientId = localStorage.getItem("voip-client-id") || crypto.randomUUID()
-      const join = await uiClient.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
+      let join: Awaited<ReturnType<typeof uiClient.joinServer>>
+      if (protectedLogin && auth && preset?.authMode) {
+        if (modeNeedsCertificate(preset.authMode)) {
+          const identityRef = preset.identityRef
+          const identity = identityRef ? await window.voixexIdentity?.get(identityRef) : null
+          if (!identityRef || !identity?.certificate) throw new ApiError("certificateMissing", "certificate missing on this device")
+          join = await uiClient.loginWithCertificate({
+            certificate: identity.certificate,
+            ...(modeNeedsPassword(preset.authMode) ? { nick: auth.nick, password: auth.password } : {}),
+            superuserPassword: auth.superuserPassword,
+            signLoginMessage: (message) => window.voixexIdentity!.sign(identityRef, message)
+          })
+        } else {
+          join = await uiClient.loginWithPassword({
+            nick: auth.nick,
+            password: auth.password,
+            superuserPassword: auth.superuserPassword
+          })
+        }
+        if (join.upgradeRequired) {
+          // The limited session stays in uiClient so the member can raise the level right away.
+          throw new ApiError("upgradeRequired", "protection level below the server minimum", {
+            minLevel: join.upgradeRequired.minLevel
+          })
+        }
+      } else {
+        const clientId = localStorage.getItem("voip-client-id") || crypto.randomUUID()
+        join = await uiClient.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
+      }
       const joinedServerId = join.serverId
       const joinedServerName = join.serverName ?? "Server"
-      const effectiveListName = (
-        preset?.serverName ?? (connectServerListName.trim() || joinedServerName)
-      ).trim() || "Server"
-      // Drop the old entry for this server (same host:port, same server id, or the profile being edited)
-      // so changing the port or password replaces the profile instead of adding a duplicate.
+      const effectiveListName =
+        (preset?.serverName?.trim() || connectServerListName.trim() || joinedServerName).trim() || "Server"
+      // Drop the old entry for this server (same host:port or same server id) so it is replaced, not duplicated.
       const withoutSameHostForName = savedServers.filter(
-        (s) =>
-          !(s.apiHost === host && s.apiPort === port) && s.serverId !== joinedServerId && s.serverId !== editingId
+        (s) => !(s.apiHost === host && s.apiPort === port) && s.serverId !== joinedServerId
       )
+      // Labels are local; only the old add-by-form flow insisted on unique names.
       if (
+        !preset &&
         withoutSameHostForName.some(
           (s) => s.serverName.trim().toLowerCase() === effectiveListName.toLowerCase()
         )
@@ -3259,8 +3341,11 @@ export default function VoIPApp() {
         setJoining(false)
         return
       }
-      localStorage.setItem("voip-client-id", join.profile.clientId)
-      localStorage.setItem("voip-last-display-name", join.profile.displayName)
+      if (!protectedLogin) {
+        // Old password-only identity is shared by all servers; certificate logins have their own per server.
+        localStorage.setItem("voip-client-id", join.profile.clientId)
+        localStorage.setItem("voip-last-display-name", join.profile.displayName)
+      }
       localStorage.setItem("voixex-last-server-id", joinedServerId)
       setProfileDisplayName(join.profile.displayName)
       if (join.mediaToken) {
@@ -3334,19 +3419,37 @@ export default function VoIPApp() {
       await uiClient.getMe(joinedServerId)
       void uiClient.getServer(joinedServerId).catch(() => {})
       setActiveServerId(joinedServerId)
-      const updatedProfile: SavedServerProfile = {
-        serverId: joinedServerId,
-        serverName: effectiveListName,
-        apiHost: host,
-        apiPort: port,
-        apiUseHttps: resolvedUseHttps,
-        serverPassword: password,
-        displayName: join.profile.displayName,
-        mediaEngine: effectiveMediaEngine,
-        voiceTransport: effectiveVoiceTransport,
-        ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
-        ...(superPassword ? { superuserPassword: superPassword } : {})
-      }
+      const updatedProfile: SavedServerProfile = protectedLogin
+        ? {
+            // Nothing secret is kept for a protected profile: nick and password are typed each time.
+            serverId: joinedServerId,
+            serverName: effectiveListName,
+            apiHost: host,
+            apiPort: port,
+            apiUseHttps: resolvedUseHttps,
+            serverPassword: "",
+            displayName: "",
+            mediaEngine: effectiveMediaEngine,
+            voiceTransport: effectiveVoiceTransport,
+            ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
+            identityRef: preset?.identityRef,
+            certId: preset?.certId,
+            serverClientId: join.profile.clientId,
+            authMode: preset?.authMode
+          }
+        : {
+            serverId: joinedServerId,
+            serverName: effectiveListName,
+            apiHost: host,
+            apiPort: port,
+            apiUseHttps: resolvedUseHttps,
+            serverPassword: password,
+            displayName: join.profile.displayName,
+            mediaEngine: effectiveMediaEngine,
+            voiceTransport: effectiveVoiceTransport,
+            ...(resolvedUdpOverride.trim() ? { udpPortOverride: resolvedUdpOverride.trim() } : {}),
+            ...(superPassword ? { superuserPassword: superPassword } : {})
+          }
       saveGlobalConnectionPrefs({
         mediaEngine: effectiveMediaEngine,
         voiceTransport: effectiveVoiceTransport,
@@ -3375,13 +3478,12 @@ export default function VoIPApp() {
       setVoiceServerId("")
       voiceServerIdRef.current = ""
       setStatus("Connected to server")
-      if (editingId) {
-        setEditingServerId(null)
-        editingServerIdRef.current = null
-        setShowConnectPanel(false)
-      }
     } catch (e) {
       setConnectedToApi(false)
+      if (auth || opts.rethrow) {
+        if (!(e instanceof ApiError && e.code === "upgradeRequired")) uiClient.disconnect()
+        throw e
+      }
       setError(errorText(e, "notices.joinServerFailed"))
     } finally {
       setJoining(false)
@@ -3464,19 +3566,6 @@ export default function VoIPApp() {
     setKeybindDraft({ toggleMute: "", toggleDeafen: "", pushToTalk: "" })
   }
 
-  const saveProfile = async () => {
-    if (!activeServerId) return
-    await uiClient.updateProfile(activeServerId, profileDisplayName)
-    localStorage.setItem("voip-last-display-name", profileDisplayName)
-    setSavedServers((prev) => {
-      const next = prev.map((s) => (s.serverId === activeServerId ? { ...s, displayName: profileDisplayName } : s))
-      localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
-      return next
-    })
-    toast.success(t("notices.profileUpdated"))
-    setStatus("Profile updated")
-  }
-
   const createChannelFromSettings = async () => {
     if (!activeServerId || !canManageServer || creatingChannel) return
     const name = roomNameInput.trim()
@@ -3499,148 +3588,431 @@ export default function VoIPApp() {
     }
   }
 
-  const loadProfileIntoForm = (saved: SavedServerProfile) => {
-    setConnectServerListName(saved.serverName)
-    setApiHost(saved.apiHost)
-    setApiPort(saved.apiPort)
-    setServerPassword(saved.serverPassword)
-    applyConnectionPrefsToState(
-      {
-        apiUseHttps: saved.apiUseHttps,
-        udpPortOverride: saved.udpPortOverride ?? "",
-        voiceTransport: saved.voiceTransport,
-        mediaEngine: saved.mediaEngine
-      },
-      { setMediaEngine, setVoiceTransport, setApiUseHttps, setUdpPortOverride, mediaEngineRef }
-    )
-    setDisplayNameInput(saved.displayName)
-    setSuperuserPasswordInput(saved.superuserPassword ?? "")
+  const persistSavedServers = (next: SavedServerProfile[]) => {
+    setSavedServers(next)
+    localStorage.setItem("voixex-saved-servers", JSON.stringify(next))
+    setServers(next.map((s) => ({ id: s.serverId, name: s.serverName, icon: s.serverName.slice(0, 1).toUpperCase() || "S" })))
   }
+
+  /** Saves a profile right away, so a freshly issued certificate is not lost if sign-in then fails. */
+  const upsertSavedServer = (profile: SavedServerProfile) => {
+    persistSavedServers([profile, ...savedServers.filter((s) => s.serverId !== profile.serverId)])
+  }
+
+  const requireIdentityBridge = () => {
+    const bridge = window.voixexIdentity
+    if (!bridge) throw new Error(t("access.desktopOnly"))
+    return bridge
+  }
+
+  const describeAuthError = (e: unknown): DescribedError => {
+    if (e instanceof ApiError) {
+      const params = {
+        level: typeof e.details.minLevel === "number" ? e.details.minLevel : "",
+        own: typeof e.details.ownLevel === "number" ? e.details.ownLevel : ""
+      }
+      for (const key of [`authErrors.${e.code}`, `notices.${e.code}`]) {
+        const text = t(key, params)
+        if (text !== key) return { text, code: e.code, details: e.details }
+      }
+      return { text: e.message, code: e.code, details: e.details }
+    }
+    return { text: e instanceof Error ? e.message : String(e) }
+  }
+
+  const newServerMediaDefaults = () => {
+    const prefs = loadGlobalConnectionPrefs()
+    return {
+      mediaEngine: normalizeMediaEngine(prefs.mediaEngine ?? mediaEngine),
+      voiceTransport: normalizeVoiceTransport(prefs.voiceTransport ?? voiceTransport)
+    }
+  }
+
+  /**
+   * Creates the profile on the server. Levels 2 and 3 first create a device key whose certificate
+   * the server signs; it is stored on this device (and removed again if the server refuses).
+   */
+  const createProtectedProfile = async (
+    address: { apiHost: string; apiPort: string; apiUseHttps?: boolean },
+    authMode: AuthMode,
+    request: (publicKey: string | undefined) => Promise<IssuedProfile>
+  ) => {
+    uiClient.setApiBase(buildApiBaseUrl(address.apiHost.trim(), address.apiPort.trim(), Boolean(address.apiUseHttps)))
+    await uiClient.healthcheck()
+    if (!modeNeedsCertificate(authMode)) return { ref: undefined, issued: await request(undefined) }
+    const identity = requireIdentityBridge()
+    const { ref, publicKey } = await identity.create()
+    try {
+      const issued = await request(publicKey)
+      if (!issued.certificate) throw new Error("server issued no certificate")
+      await identity.setCertificate(ref, issued.certificate)
+      return { ref, issued }
+    } catch (e) {
+      await identity.remove(ref).catch(() => {})
+      throw e
+    }
+  }
+
+  const updateSavedServer = (serverId: string, patch: Partial<SavedServerProfile>) => {
+    const next = savedServers.map((s) => (s.serverId === serverId ? { ...s, ...patch } : s))
+    persistSavedServers(next)
+    return next.find((s) => s.serverId === serverId)
+  }
+
+  /**
+   * Signs in to a protected profile. A level below the server minimum turns into the "raise level"
+   * step; a level changed on another device is remembered so the next attempt asks the right thing.
+   */
+  const signInToProfile = async (
+    profile: SavedServerProfile,
+    credentials: { nick: string; password: string; superuserPassword?: string }
+  ) => {
+    try {
+      await connectAndJoin(profile, credentials)
+      pendingLoginRef.current = null
+      setAccessMode(null)
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "upgradeRequired" && profile.authMode) {
+        pendingLoginRef.current = credentials
+        setAccessMode({
+          kind: "upgrade",
+          serverId: profile.serverId,
+          label: profile.serverName || profile.apiHost,
+          minLevel: Number(e.details.minLevel) || 1,
+          currentMode: profile.authMode,
+          secure: Boolean(profile.apiUseHttps)
+        })
+        return
+      }
+      if (e instanceof ApiError && (e.code === "authModeMismatch" || e.code === "certificateRequired")) {
+        const mode = e.details.authMode
+        if (mode === "password" || mode === "certificate" || mode === "password_certificate") {
+          updateSavedServer(profile.serverId, { authMode: mode })
+          if (modeNeedsCertificate(mode) && !profile.identityRef) throw new ApiError("certificateMissing", e.message)
+        }
+      }
+      throw e
+    }
+  }
+
+  const handleRegister = async (input: RegisterInput) => {
+    const { ref, issued } = await createProtectedProfile(input, input.authMode, (publicKey) =>
+      uiClient.registerMember({
+        serverPassword: input.serverPassword,
+        nick: input.nick,
+        authMode: input.authMode,
+        ...(modeNeedsPassword(input.authMode) ? { password: input.password } : {}),
+        ...(publicKey ? { publicKey } : {})
+      })
+    )
+    const profile: SavedServerProfile = {
+      serverId: issued.serverId,
+      serverName: input.label,
+      apiHost: input.apiHost,
+      apiPort: input.apiPort,
+      apiUseHttps: input.apiUseHttps,
+      serverPassword: "",
+      displayName: "",
+      authMode: issued.authMode,
+      identityRef: ref,
+      certId: issued.certificate?.certId,
+      serverClientId: issued.clientId,
+      ...newServerMediaDefaults()
+    }
+    upsertSavedServer(profile)
+    await signInToProfile(profile, { nick: input.nick, password: input.password })
+  }
+
+  const handleImportCertificate = async (input: ImportInput) => {
+    const identity = requireIdentityBridge()
+    const imported = await identity.importFromFile(input.file.contents, input.filePassphrase)
+    const fromFile = imported.server
+    const address = input.apiHost
+      ? { apiHost: input.apiHost, apiPort: input.apiPort ?? "", apiUseHttps: Boolean(input.apiUseHttps) }
+      : { apiHost: fromFile.apiHost ?? "", apiPort: fromFile.apiPort ?? "", apiUseHttps: Boolean(fromFile.apiUseHttps) }
+    if (!address.apiHost) {
+      await identity.remove(imported.ref).catch(() => {})
+      throw new Error(t("access.fillAddress"))
+    }
+    const authMode: AuthMode =
+      fromFile.authMode === "certificate" || fromFile.authMode === "password_certificate"
+        ? fromFile.authMode
+        : "password_certificate"
+    const existing = savedServers.find((s) => s.serverId === imported.certificate.serverId)
+    if (existing?.identityRef && existing.identityRef !== imported.ref) {
+      await identity.remove(existing.identityRef).catch(() => {})
+    }
+    const profile: SavedServerProfile = {
+      ...newServerMediaDefaults(),
+      ...(existing ?? {}),
+      serverId: imported.certificate.serverId,
+      serverName: input.label || existing?.serverName || fromFile.label || "",
+      ...address,
+      serverPassword: "",
+      displayName: "",
+      superuserPassword: undefined,
+      authMode,
+      identityRef: imported.ref,
+      certId: imported.certificate.certId,
+      serverClientId: imported.certificate.clientId
+    }
+    upsertSavedServer(profile)
+    if (modeNeedsPassword(authMode) && (!input.nick || !input.password)) throw new Error(t("access.fillNickPassword"))
+    await signInToProfile(profile, { nick: input.nick, password: input.password })
+  }
+
+  const handleLogin = async (input: LoginInput) => {
+    if (accessMode?.kind !== "login") return
+    const profile = savedServers.find((s) => s.serverId === accessMode.serverId)
+    if (!profile) return
+    await signInToProfile(profile, {
+      nick: input.nick,
+      password: input.password,
+      superuserPassword: input.superuserPassword || undefined
+    })
+  }
+
+  /** Old profile (server password only): pick a protection level and keep nick + history. */
+  const handleClaim = async (input: ClaimInput) => {
+    if (accessMode?.kind !== "claim") return
+    const saved = savedServers.find((s) => s.serverId === accessMode.serverId)
+    if (!saved) return
+    const legacyClientId = localStorage.getItem("voip-client-id") ?? ""
+    const { ref, issued } = await createProtectedProfile(saved, input.authMode, (publicKey) =>
+      uiClient.claimMember({
+        serverPassword: saved.serverPassword,
+        clientId: legacyClientId,
+        authMode: input.authMode,
+        ...(modeNeedsPassword(input.authMode) ? { password: input.password } : {}),
+        ...(publicKey ? { publicKey } : {}),
+        nick: input.nick
+      })
+    )
+    const profile: SavedServerProfile = {
+      ...saved,
+      serverId: issued.serverId,
+      serverPassword: "",
+      displayName: "",
+      superuserPassword: undefined,
+      authMode: issued.authMode,
+      identityRef: ref,
+      certId: issued.certificate?.certId,
+      serverClientId: issued.clientId
+    }
+    upsertSavedServer(profile)
+    // Claiming drops roles; the superuser password saved by the old client restores admin once.
+    await signInToProfile(profile, { nick: issued.nick, password: input.password, superuserPassword: saved.superuserPassword })
+  }
+
+  /**
+   * Changes the protection level using the current session (full, or limited when the server
+   * minimum is higher). Creates a device certificate when the new level needs one and this device
+   * has none yet.
+   */
+  const changeProtectionLevel = async (
+    profile: SavedServerProfile,
+    authMode: AuthMode,
+    input: { currentPassword: string; newPassword: string }
+  ) => {
+    const needsNewKey = modeNeedsCertificate(authMode) && !profile.identityRef
+    const identity = needsNewKey ? requireIdentityBridge() : null
+    const key = identity ? await identity.create() : null
+    try {
+      const result = await uiClient.setAuthMode(profile.serverId, {
+        authMode,
+        ...(input.currentPassword ? { currentPassword: input.currentPassword } : {}),
+        ...(input.newPassword ? { newPassword: input.newPassword } : {}),
+        ...(key ? { publicKey: key.publicKey } : {})
+      })
+      if (key && identity) {
+        if (!result.certificate) throw new Error("server issued no certificate")
+        await identity.setCertificate(key.ref, result.certificate)
+      }
+      return (
+        updateSavedServer(profile.serverId, {
+          authMode: result.authMode,
+          ...(key && result.certificate ? { identityRef: key.ref, certId: result.certificate.certId } : {})
+        }) ?? { ...profile, authMode: result.authMode }
+      )
+    } catch (e) {
+      if (key && identity) await identity.remove(key.ref).catch(() => {})
+      throw e
+    }
+  }
+
+  /** Below the server minimum: raise the level with the limited session, then sign in again. */
+  const handleUpgrade = async (input: UpgradeInput) => {
+    if (accessMode?.kind !== "upgrade") return
+    const profile = savedServers.find((s) => s.serverId === accessMode.serverId)
+    const pending = pendingLoginRef.current
+    if (!profile || !pending) return
+    const updated = await changeProtectionLevel(profile, input.authMode, {
+      currentPassword: profile.authMode && modeNeedsPassword(profile.authMode) ? pending.password : "",
+      newPassword: input.newPassword
+    })
+    uiClient.disconnect()
+    await signInToProfile(updated, {
+      nick: pending.nick,
+      password: input.newPassword || pending.password,
+      superuserPassword: pending.superuserPassword
+    })
+  }
+
+  /** For servers that do not support protected profiles yet: the old shared-password join. */
+  const handleLegacyJoin = async (input: {
+    address?: { apiHost: string; apiPort: string; apiUseHttps: boolean }
+    label?: string
+    serverPassword?: string
+    nick?: string
+  }) => {
+    if (accessMode?.kind === "add" && input.address) {
+      if (!input.serverPassword || !input.nick) throw new Error(t("access.fillNickPassword"))
+      await connectAndJoin(
+        {
+          serverId: "",
+          serverName: input.label ?? "",
+          ...input.address,
+          serverPassword: input.serverPassword,
+          displayName: input.nick,
+          ...newServerMediaDefaults()
+        },
+        undefined,
+        { rethrow: true }
+      )
+    } else if (accessMode && "serverId" in accessMode) {
+      const saved = savedServers.find((s) => s.serverId === accessMode.serverId)
+      if (!saved) return
+      await connectAndJoin(saved, undefined, { rethrow: true })
+    }
+    setAccessMode(null)
+  }
+
+  const openLoginDialog = (saved: SavedServerProfile) => {
+    if (!saved.authMode) return
+    setAccessMode({
+      kind: "login",
+      serverId: saved.serverId,
+      label: saved.serverName || saved.apiHost,
+      authMode: saved.authMode,
+      secure: Boolean(saved.apiUseHttps)
+    })
+  }
+
+  const openServer = (serverId: string) => {
+    const saved = savedServers.find((s) => s.serverId === serverId)
+    if (!saved) return
+    const label = saved.serverName || saved.apiHost
+    if (!saved.authMode) {
+      setAccessMode({ kind: "claim", serverId, label, nick: saved.displayName, secure: Boolean(saved.apiUseHttps) })
+      return
+    }
+    if (saved.authMode !== "certificate") {
+      openLoginDialog(saved)
+      return
+    }
+    // Level 2: the certificate alone is enough, sign in with one click.
+    setBusyServerId(serverId)
+    void signInToProfile(saved, { nick: "", password: "" })
+      .catch((e) => {
+        toast.error(describeAuthError(e).text)
+        openLoginDialog(saved)
+      })
+      .finally(() => setBusyServerId(null))
+  }
+
+  /** Leaves the server completely: a server is a closed space, nothing of it stays on screen. */
+  const leaveServer = async () => {
+    if (isInVoiceRef.current && !window.confirm(t("notices.confirmLeaveServer"))) return
+    await fullyDisconnectFromApi()
+    setActiveServerId("")
+    activeServerIdRef.current = ""
+  }
+
+  useEffect(() => {
+    if (!(sessionRevoked || sessionLevelTooLow) || !activeServerIdRef.current) return
+    toast.error(sessionLevelTooLow ? t("notices.levelRaised") : t("notices.sessionRevoked"))
+    void (async () => {
+      await fullyDisconnectFromApi()
+      setActiveServerId("")
+      activeServerIdRef.current = ""
+    })()
+    // fullyDisconnectFromApi is recreated every render; the flags are what matter here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionRevoked, sessionLevelTooLow])
 
   const handleEditServer = (serverId: string) => {
-    const saved = savedServers.find((s) => s.serverId === serverId)
-    if (!saved) return
-    setEditingServerId(serverId)
-    editingServerIdRef.current = serverId
-    setError("")
-    loadProfileIntoForm(saved)
-    setShowConnectPanel(true)
+    const s = savedServers.find((x) => x.serverId === serverId)
+    if (!s) return
+    setEditDraft({
+      serverId,
+      draft: {
+        serverName: s.serverName,
+        apiHost: s.apiHost,
+        apiPort: s.apiPort,
+        apiUseHttps: Boolean(s.apiUseHttps),
+        udpPortOverride: s.udpPortOverride ?? "",
+        mediaEngine: normalizeMediaEngine(s.mediaEngine),
+        voiceTransport: normalizeVoiceTransport(s.voiceTransport)
+      }
+    })
   }
 
-  const handleAddServer = () => {
-    setEditingServerId(null)
-    editingServerIdRef.current = null
-    setConnectServerListName("")
-    setShowConnectPanel(true)
+  const handleSaveConnection = (draft: ConnectionDraft) => {
+    if (!editDraft) return
+    persistSavedServers(
+      savedServers.map((s) =>
+        s.serverId === editDraft.serverId
+          ? {
+              ...s,
+              serverName: draft.serverName.trim() || s.serverName,
+              apiHost: draft.apiHost.trim(),
+              apiPort: draft.apiPort.trim(),
+              apiUseHttps: draft.apiUseHttps,
+              udpPortOverride: draft.udpPortOverride.trim() || undefined,
+              mediaEngine: draft.mediaEngine,
+              voiceTransport: draft.voiceTransport
+            }
+          : s
+      )
+    )
+    setEditDraft(null)
+    toast.success(t("notices.connectionSaved"))
   }
 
-  const handleConnectPanelOpenChange = (open: boolean) => {
-    setShowConnectPanel(open)
-    if (open || !editingServerIdRef.current) return
-    // Edit cancelled: put the form back to the active server instead of leaving half-edited values.
-    setEditingServerId(null)
-    editingServerIdRef.current = null
-    const active = savedServers.find((s) => s.serverId === activeServerIdRef.current)
-    if (active) loadProfileIntoForm(active)
-  }
-
-  const handleServerSelect = (serverId: string) => {
-    const saved = savedServers.find((s) => s.serverId === serverId)
-    if (!saved) return
-
-    if (
-      isInVoiceRef.current &&
-      currentVoiceChannelRef.current &&
-      serverId !== activeServerIdRef.current
-    ) {
-      const ok = window.confirm(t("notices.confirmSwitchServer"))
-      if (!ok) return
-    }
-
-    serverSwitchChainRef.current = serverSwitchChainRef.current
-      .then(async () => {
-        setActiveServerId(serverId)
-        activeServerIdRef.current = serverId
-        localStorage.setItem("voixex-last-server-id", serverId)
-        setConnectServerListName(saved.serverName)
-        setApiHost(saved.apiHost)
-        setApiPort(saved.apiPort)
-        setServerPassword(saved.serverPassword)
-        applyConnectionPrefsToState(
-          {
-            apiUseHttps: saved.apiUseHttps,
-            udpPortOverride: saved.udpPortOverride ?? "",
-            voiceTransport: saved.voiceTransport,
-            mediaEngine: saved.mediaEngine
-          },
-          { setMediaEngine, setVoiceTransport, setApiUseHttps, setUdpPortOverride, mediaEngineRef }
-        )
-        setDisplayNameInput(saved.displayName)
-        setSuperuserPasswordInput(saved.superuserPassword ?? "")
-
-        const targetId = serverId
-        const inVoice = isInVoiceRef.current
-        let voiceSrv = voiceServerIdRef.current
-        if (inVoice && currentVoiceChannelRef.current && !voiceSrv) {
-          voiceSrv = voiceClient.getCurrentServerId() ?? uiClient.getCurrentServerId() ?? ""
-          if (voiceSrv) {
-            voiceServerIdRef.current = voiceSrv
-            setVoiceServerId(voiceSrv)
-          }
-        }
-
-        const uiOn = uiClient.getCurrentServerId()
-        if (uiOn === targetId && connectedToApiRef.current && wsConnectedRef.current) {
-          return
-        }
-
-        if (
-          inVoice &&
-          voiceSrv &&
-          voiceSrv === targetId &&
-          uiOn === targetId &&
-          connectedToApiRef.current &&
-          !wsConnectedRef.current
-        ) {
-          uiClient.connectWs()
-          return
-        }
-
-        if (uiOn !== null || connectedToApiRef.current || wsConnectedRef.current) {
-          await fullyDisconnectFromApi()
-        }
-        await connectAndJoin(saved)
-      })
-      .catch((err) => {
-        console.error(err)
-        toast.error(errorText(err, "notices.serverSwitchFailed"))
-      })
-
-    void serverSwitchChainRef.current
-  }
+  const serverCards = useMemo<ServerCardInfo[]>(
+    () =>
+      savedServers.map((s) => ({
+        id: s.serverId,
+        label: s.serverName || s.apiHost,
+        address: s.apiPort ? `${s.apiHost}:${s.apiPort}` : s.apiHost,
+        secure: Boolean(s.apiUseHttps),
+        authMode: s.authMode ?? null,
+        reachable: serverReachability[s.serverId] ?? "unknown"
+      })),
+    [savedServers, serverReachability]
+  )
+  const activeProfile = savedServers.find((s) => s.serverId === activeServerId)
 
   return (
     <>
       <main className="flex h-dvh overflow-hidden bg-background">
         <div ref={webRtcAudioSinkRef} className="hidden" aria-hidden="true" />
 
-        <ServerSidebar
-          servers={servers}
-          activeServerId={activeServerId}
-          onServerSelect={handleServerSelect}
-          onRemoveServer={handleRemoveSavedServer}
-          onAddServer={handleAddServer}
-          onEditServer={handleEditServer}
-          onOpenSettings={() => {
-            const initialTab = activeServerId && canManageServer ? "server_general" : "voice"
-            void openAppSettings(initialTab)
-          }}
-        />
-
         {activeServerId ? (
           <aside className="flex h-full min-h-0 w-60 shrink-0 flex-col bg-card">
             <ChannelSidebar
               serverName={servers.find((s) => s.id === activeServerId)?.name || t("common.noServer")}
+              onLeaveServer={() => void leaveServer()}
+              security={
+                activeProfile
+                  ? {
+                      secure: Boolean(activeProfile.apiUseHttps),
+                      levelLabel: activeProfile.authMode
+                        ? t("levels.short", { level: authLevel(activeProfile.authMode), name: t(`levels.${activeProfile.authMode}`) })
+                        : t("levels.unprotected")
+                    }
+                  : undefined
+              }
               serverBannerUrl={serverAppearance.serverBannerUrl}
               categories={categories}
               activeChannelId={activeChannelId}
@@ -3680,18 +4052,21 @@ export default function VoIPApp() {
         ) : null}
 
         {!activeServerId ? (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-4 bg-background p-8">
-            <div className="flex h-20 w-20 items-center justify-center rounded-2xl bg-muted">
-              <Headphones className="h-10 w-10 text-muted-foreground" />
-            </div>
-            <div className="max-w-sm text-center">
-              <h2 className="text-lg font-semibold text-foreground">{t("welcome.title")}</h2>
-              <p className="mt-1 text-sm text-muted-foreground">{t("welcome.subtitle")}</p>
-            </div>
-            <Button variant="outline" onClick={() => setShowConnectPanel(true)}>
-              <Server className="mr-2 h-4 w-4" /> {t("welcome.connectToServer")}
-            </Button>
-          </div>
+          <ServerHome
+            servers={serverCards}
+            busyServerId={busyServerId}
+            onSignInAsAdmin={(id) => {
+              const saved = savedServers.find((x) => x.serverId === id)
+              if (saved?.authMode) openLoginDialog(saved)
+              else if (saved) openServer(id)
+            }}
+            onOpen={openServer}
+            onAdd={() => setAccessMode({ kind: "add" })}
+            onImport={() => setAccessMode({ kind: "import" })}
+            onEdit={handleEditServer}
+            onRemove={(id) => void handleRemoveSavedServer(id)}
+            onOpenDeviceSettings={() => void openAppSettings("voice")}
+          />
         ) : activeChannel?.type === "voice" ? (
           <VoiceChannelView
             channelName={activeChannel.name}
@@ -3756,43 +4131,27 @@ export default function VoIPApp() {
       </main>
 
       <ConnectServerDialog
-        open={showConnectPanel}
-        onOpenChange={handleConnectPanelOpenChange}
-        editing={editingServerId !== null}
-        connectServerListName={connectServerListName}
-        onConnectServerListNameChange={setConnectServerListName}
-        apiHost={apiHost}
-        onApiHostChange={setApiHost}
-        apiPort={apiPort}
-        onApiPortChange={setApiPort}
-        apiUseHttps={apiUseHttps}
-        onApiUseHttpsChange={handleApiUseHttpsChange}
-        udpPortOverride={udpPortOverride}
-        onUdpPortOverrideChange={handleUdpPortOverrideChange}
-        mediaEngine={mediaEngine}
-        onMediaEngineChange={handleMediaEngineChange}
-        voiceTransport={voiceTransport}
-        onVoiceTransportChange={handleVoiceTransportChange}
-        serverPassword={serverPassword}
-        onServerPasswordChange={setServerPassword}
-        displayNameInput={displayNameInput}
-        onDisplayNameChange={setDisplayNameInput}
-        superuserPasswordInput={superuserPasswordInput}
-        onSuperuserPasswordChange={setSuperuserPasswordInput}
-        profileDisplayName={profileDisplayName}
-        onProfileDisplayNameChange={setProfileDisplayName}
-        onSaveProfile={saveProfile}
-        activeServerId={activeServerId}
-        canManageServer={canManageServer}
-        onOpenServerSettings={() => void openAppSettings("server_general")}
-        onConnect={() => void connectAndJoin()}
-        joining={joining}
-        connectedToApi={connectedToApi}
-        wsConnected={wsConnected}
-        wsReconnecting={wsReconnecting}
+        draft={editDraft?.draft ?? null}
+        onOpenChange={(open) => {
+          if (!open) setEditDraft(null)
+        }}
+        onSave={handleSaveConnection}
+      />
+      <ServerAccessDialog
+        mode={accessMode}
+        onOpenChange={(open) => {
+          if (!open) setAccessMode(null)
+        }}
+        defaultAddress={{ apiHost: "", apiPort: "443", apiUseHttps: true }}
+        onRegister={handleRegister}
+        onImport={handleImportCertificate}
+        onLogin={handleLogin}
+        onClaim={handleClaim}
+        onUpgrade={handleUpgrade}
+        onLegacyJoin={handleLegacyJoin}
+        pickCertificateFile={async () => (await window.voixexIdentity?.pickImportFile()) ?? null}
+        describeError={describeAuthError}
         hasDesktopBridge={hasDesktopBridge}
-        hasSavedServers={savedServers.length > 0}
-        error={error}
       />
       <Dialog open={showAppSettings} onOpenChange={setShowAppSettings}>
         <DialogContent className="flex h-[min(85vh,720px)] max-w-3xl flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
@@ -3816,6 +4175,11 @@ export default function VoIPApp() {
                 <TabsTrigger value="keybinds" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
                   {t("settings.tabKeybinds")}
                 </TabsTrigger>
+                {activeServerId && activeProfile?.authMode ? (
+                  <TabsTrigger value="security" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                    {t("settings.tabSecurity")}
+                  </TabsTrigger>
+                ) : null}
                 {canOpenServerSettings ? (
                   <>
                     <TabsTrigger value="server_general" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
@@ -3826,6 +4190,9 @@ export default function VoIPApp() {
                     </TabsTrigger>
                     <TabsTrigger value="server_roles" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
                       {t("settings.tabRoles")}
+                    </TabsTrigger>
+                    <TabsTrigger value="server_members" className="w-full justify-start px-3 py-2 text-xs sm:text-sm">
+                      {t("settings.tabMembers")}
                     </TabsTrigger>
                   </>
                 ) : null}
@@ -3891,7 +4258,7 @@ export default function VoIPApp() {
                   gateEnabled={gateEnabled}
                   gateMuteThreshold={gateMuteThreshold}
                   gateOpenThreshold={gateOpenThreshold}
-                  active={isInVoice && hasDesktopBridge}
+                  active={voicePipelineMode !== null}
                 />
               </div>
 
@@ -4087,6 +4454,15 @@ export default function VoIPApp() {
             </TabsContent>
 
             <TabsContent value="server_general" className="mt-0 space-y-4">
+              {canOpenServerSettings ? (
+                <ServerSecurityPolicy
+                  load={() => uiClient.getSecurityPolicy(activeServerId)}
+                  save={async (level) => {
+                    await uiClient.setSecurityPolicy(activeServerId, level)
+                  }}
+                  describeError={describeAuthError}
+                />
+              ) : null}
               <div className="rounded-lg border border-border p-4 space-y-2">
                 <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverLabel")}</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? t("common.unknown")}</span></div>
                 <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverId")}</span><span className="text-xs font-mono text-muted-foreground">{activeServerId}</span></div>
@@ -4168,6 +4544,53 @@ export default function VoIPApp() {
                   </div>
                 )}
               </div>
+            </TabsContent>
+
+            <TabsContent value="security" className="mt-0">
+              {activeServerId && activeProfile?.authMode ? (
+                <MySecurityPanel
+                  load={() => uiClient.getMySecurity(activeServerId)}
+                  secure={Boolean(activeProfile.apiUseHttps)}
+                  canExport={Boolean(activeProfile.identityRef)}
+                  onChangeLevel={async (mode, input) => {
+                    await changeProtectionLevel(activeProfile, mode, input)
+                  }}
+                  onRevoke={async (certId) => {
+                    await uiClient.revokeMyCertificate(activeServerId, certId)
+                    toast.success(t("security.revokedToast"))
+                  }}
+                  onChangePassword={async (current, next) => {
+                    await uiClient.changeMyPassword(activeServerId, current, next)
+                  }}
+                  onExport={async (passphrase) => {
+                    const identity = requireIdentityBridge()
+                    return identity.exportToFile(activeProfile.identityRef!, passphrase, {
+                      label: activeProfile.serverName,
+                      authMode: activeProfile.authMode,
+                      apiHost: activeProfile.apiHost,
+                      apiPort: activeProfile.apiPort,
+                      apiUseHttps: activeProfile.apiUseHttps
+                    })
+                  }}
+                  describeError={describeAuthError}
+                />
+              ) : null}
+            </TabsContent>
+
+            <TabsContent value="server_members" className="mt-0">
+              {canOpenServerSettings ? (
+                <MemberSecurityAdmin
+                  members={members.map((m) => ({ id: m.id, name: m.name }))}
+                  load={(clientId) => uiClient.getMemberSecurity(activeServerId, clientId)}
+                  onRevoke={async (clientId, certId) => {
+                    await uiClient.revokeMemberCertificate(activeServerId, clientId, certId)
+                  }}
+                  onReset={async (clientId) => {
+                    await uiClient.resetMemberCredentials(activeServerId, clientId)
+                  }}
+                  describeError={describeAuthError}
+                />
+              ) : null}
             </TabsContent>
 
             <TabsContent value="server_roles" className="mt-0">
