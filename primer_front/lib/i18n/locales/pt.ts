@@ -93,6 +93,11 @@ export const pt: TranslationDict = {
     undeafen: "Ouvir novamente"
   },
   voice: {
+    streamContent: "Conteúdo",
+    contentMotion: "Vídeo e jogos",
+    contentDetail: "Texto e código",
+    contentMotionHint: "Fluido: com rede lenta a imagem fica mais suave, mas não engasga.",
+    contentDetailHint: "Nítido: o texto fica legível; com rede lenta, menos quadros por segundo.",
     sharingFromPhone: "Você está compartilhando a tela do celular",
     backToChat: "Voltar ao chat",
     participantsCount: "No canal: {n}",

@@ -91,6 +91,11 @@ export const en = {
     undeafen: "Undeafen"
   },
   voice: {
+    streamContent: "Content",
+    contentMotion: "Video & games",
+    contentDetail: "Text & code",
+    contentMotionHint: "Smooth: on a slow network the picture gets softer, not choppy.",
+    contentDetailHint: "Sharp: text stays readable; on a slow network fewer frames per second.",
     sharingFromPhone: "You are sharing your phone screen",
     backToChat: "Back to chat",
     participantsCount: "In voice: {n}",

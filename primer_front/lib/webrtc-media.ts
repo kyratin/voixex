@@ -24,6 +24,11 @@ export type ScreenViewQuality = "high" | "medium" | "low"
 export type ScreenPublishOptions = {
   fps?: number
   bitrateKbps?: number
+  /**
+   * motion: videos and games — under a tight network keep the frame rate, lower the resolution;
+   * detail: text and code — keep it sharp, drop frames instead.
+   */
+  content?: "motion" | "detail"
 }
 
 type WebRtcMediaOptions = {
@@ -329,9 +334,9 @@ export class WebRtcMediaSession {
     const published: LocalTrack[] = []
     const video = stream.getVideoTracks()[0]
     if (video) {
-      video.contentHint = "detail"
-      const track = new LocalVideoTrack(video)
-      const maxBitrate = Math.max(600_000, Math.min(10_000_000, (encoding?.bitrateKbps ?? 3500) * 1000))
+      const content = encoding?.content ?? "motion"
+      video.contentHint = content
+      const maxBitrate = Math.max(600_000, Math.min(12_000_000, (encoding?.bitrateKbps ?? 6000) * 1000))
       const maxFramerate = Math.max(8, Math.min(60, encoding?.fps ?? 30))
       // Smaller simulcast layers (lowest first, as LiveKit expects) let each viewer pick a lower
       // quality when the stream stutters; the top layer is the captured original.
@@ -341,18 +346,30 @@ export class WebRtcMediaSession {
       const layer = (targetHeight: number, bitrate: number, fps: number) =>
         new VideoPreset(Math.round((width * targetHeight) / height), targetHeight, Math.min(bitrate, maxBitrate), Math.min(fps, maxFramerate))
       const layers: VideoPreset[] = []
-      if (height > 360) layers.push(layer(360, 500_000, 15))
-      if (height > 720) layers.push(layer(720, 1_800_000, 30))
-      await room.localParticipant.publishTrack(track, {
+      if (height > 360) layers.push(layer(360, 600_000, 15))
+      if (height > 720) layers.push(layer(720, 2_500_000, 30))
+      const base = {
         source: Track.Source.ScreenShare,
         simulcast: layers.length > 0,
-        screenShareEncoding: {
-          maxBitrate,
-          maxFramerate
-        },
+        // Screen video goes first when the uplink is contended (voice is separate anyway).
+        screenShareEncoding: { maxBitrate, maxFramerate, priority: "high" as const },
+        degradationPreference: (content === "motion" ? "maintain-framerate" : "maintain-resolution") as RTCDegradationPreference,
         ...(layers.length > 0 ? { screenShareSimulcastLayers: layers } : {})
-      })
-      published.push(track)
+      }
+      // H.264 is encoded by the GPU on Mac and Windows (high fps without eating the CPU, unlike
+      // VP8) and decoded in hardware by phones and browsers. VP8 when H.264 is unavailable.
+      let publishedVideo: LocalVideoTrack | null = null
+      for (const videoCodec of ["h264", "vp8"] as const) {
+        const track = new LocalVideoTrack(video)
+        try {
+          await room.localParticipant.publishTrack(track, { ...base, videoCodec })
+          publishedVideo = track
+          break
+        } catch (e) {
+          if (videoCodec === "vp8") throw e
+        }
+      }
+      if (publishedVideo) published.push(publishedVideo)
     }
     // The stream sound is published separately: a failure here must not take the picture down.
     let audioOk: boolean | null = null

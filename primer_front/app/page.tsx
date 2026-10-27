@@ -491,9 +491,11 @@ export default function VoIPApp() {
   const [localScreenPreviewUrl, setLocalScreenPreviewUrl] = useState<string | null>(null)
   const [screenSources, setScreenSources] = useState<Array<{ id: string; name: string }>>([])
   const [selectedScreenSourceId, setSelectedScreenSourceId] = useState<string | null>(null)
-  const [screenResolution, setScreenResolution] = useState("1280x720")
+  const [screenResolution, setScreenResolution] = useState("1920x1080")
   const [screenFps, setScreenFps] = useState(30)
-  const [screenBitrateKbps, setScreenBitrateKbps] = useState(3500)
+  const [screenBitrateKbps, setScreenBitrateKbps] = useState(6000)
+  /** motion: videos/games (keep fps); detail: text/code (keep sharpness). */
+  const [screenContent, setScreenContent] = useState<"motion" | "detail">("motion")
   // Stream sound on by default, like Discord.
   const [screenShareWithAudio, setScreenShareWithAudio] = useState(true)
   const screenShareWithAudioRef = useRef(false)
@@ -1315,8 +1317,15 @@ export default function VoIPApp() {
   }
 
   const republishWebRtcMicFromPipeline = () => {
+    if (!webRtcSessionRef.current?.connected) return
+    // UDP/WebSocket voice: nobody listens to the mic in LiveKit, and every republish renegotiates
+    // the whole connection, which stalls a screen share for a moment.
+    if (mediaEngineRef.current !== "webrtc") {
+      void webRtcSessionRef.current.unpublishMic()
+      return
+    }
     const mic = getWebRtcMicTrackFromPipeline()
-    if (!mic || !webRtcSessionRef.current?.connected) return
+    if (!mic) return
     void webRtcSessionRef.current.publishMicTrack(mic)
     void webRtcSessionRef.current.setMuted(mutedRef.current)
   }
@@ -1463,7 +1472,7 @@ export default function VoIPApp() {
         const devices = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
         await session.setOutputDevice(devices?.outputId ?? null)
         await session.setDeafened(deafenedRef.current)
-        const mic = getWebRtcMicTrackFromPipeline()
+        const mic = mediaEngineRef.current === "webrtc" ? getWebRtcMicTrackFromPipeline() : null
         if (mic) {
           await session.publishMicTrack(mic)
           await session.setMuted(mutedRef.current)
@@ -2346,9 +2355,12 @@ export default function VoIPApp() {
   }, [screenShareWithAudio])
 
   useEffect(() => {
-    const savedRes = localStorage.getItem("voixex-screen-resolution")
+    // v2 keys: the old ones stored the old defaults (720p, 3.5 Mbit/s) for everyone.
+    const savedRes = localStorage.getItem("voixex-screen-resolution-v2")
     const savedFps = Number(localStorage.getItem("voixex-screen-fps") || "30")
-    const savedBitrate = Number(localStorage.getItem("voixex-screen-bitrate-kbps") || "3500")
+    const savedBitrate = Number(localStorage.getItem("voixex-screen-bitrate-kbps-v2") || "6000")
+    const savedContent = localStorage.getItem("voixex-screen-content")
+    if (savedContent === "motion" || savedContent === "detail") setScreenContent(savedContent)
     const savedWithAudio = localStorage.getItem(SCREEN_AUDIO_KEY)
     if (savedRes && /^\d+x\d+$/.test(savedRes)) setScreenResolution(savedRes)
     if (Number.isFinite(savedFps) && savedFps > 0) setScreenFps(savedFps)
@@ -2357,7 +2369,7 @@ export default function VoIPApp() {
   }, [])
 
   useEffect(() => {
-    localStorage.setItem("voixex-screen-resolution", screenResolution)
+    localStorage.setItem("voixex-screen-resolution-v2", screenResolution)
   }, [screenResolution])
 
   useEffect(() => {
@@ -2365,8 +2377,12 @@ export default function VoIPApp() {
   }, [screenFps])
 
   useEffect(() => {
-    localStorage.setItem("voixex-screen-bitrate-kbps", String(screenBitrateKbps))
+    localStorage.setItem("voixex-screen-bitrate-kbps-v2", String(screenBitrateKbps))
   }, [screenBitrateKbps])
+
+  useEffect(() => {
+    localStorage.setItem("voixex-screen-content", screenContent)
+  }, [screenContent])
 
   useEffect(() => {
     localStorage.setItem(SCREEN_AUDIO_KEY, screenShareWithAudio ? "1" : "0")
@@ -2646,7 +2662,7 @@ export default function VoIPApp() {
 
     const mimeType =
       oldRec.mimeType && MediaRecorder.isTypeSupported(oldRec.mimeType) ? oldRec.mimeType : "video/webm"
-    const bps = Math.max(600_000, Math.min(10_000_000, screenBitrateKbps * 1000))
+    const bps = Math.max(600_000, Math.min(12_000_000, screenBitrateKbps * 1000))
 
     const onData = (event: BlobEvent) => {
       if (!event.data || event.data.size === 0) return
@@ -3076,7 +3092,7 @@ export default function VoIPApp() {
     const [targetWidthRaw, targetHeightRaw] = screenResolution.split("x").map((v) => Number(v))
     const targetWidth = Number.isFinite(targetWidthRaw) ? targetWidthRaw : 1280
     const targetHeight = Number.isFinite(targetHeightRaw) ? targetHeightRaw : 720
-    const bitrateKbps = Math.max(600, Math.min(10000, screenBitrateKbps))
+    const bitrateKbps = Math.max(600, Math.min(12000, screenBitrateKbps))
     await window.electronVoice.setScreenSource(selectedScreenSourceId)
 
     const wantAudio = screenShareWithAudioRef.current
@@ -3108,7 +3124,7 @@ export default function VoIPApp() {
     }
 
     const videoTrack = stream.getVideoTracks()[0]
-    if (videoTrack) videoTrack.contentHint = "detail"
+    if (videoTrack) videoTrack.contentHint = screenContent
 
     const mimeCandidates = wantAudio
       ? [
@@ -3139,7 +3155,7 @@ export default function VoIPApp() {
       // The LiveKit session may be gone (dropped, or never started for this room): without it the
       // video only went out as the WebSocket copy, which phones could not play.
       if (activeServerId) await ensureLiveKitForVoiceRoom(activeServerId, currentVoiceChannel)
-      const published = await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps })
+      const published = await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps, content: screenContent })
       viaLiveKit = Boolean(published?.video)
       if (published?.audio === false) {
         // Viewers on LiveKit (phones) would get no sound: say why, and keep the WebSocket copy
@@ -3199,7 +3215,7 @@ export default function VoIPApp() {
   }
 
   // Changing source/resolution/FPS/bitrate while sharing restarts the share with the new settings.
-  const shareSettingsKey = `${selectedScreenSourceId}|${screenResolution}|${screenFps}|${screenBitrateKbps}`
+  const shareSettingsKey = `${selectedScreenSourceId}|${screenResolution}|${screenFps}|${screenBitrateKbps}|${screenContent}`
   const appliedShareSettingsRef = useRef(shareSettingsKey)
   useEffect(() => {
     if (!isScreenSharing) {
@@ -4525,6 +4541,8 @@ export default function VoIPApp() {
                   onScreenResolutionChange={setScreenResolution}
                   onScreenFpsChange={setScreenFps}
                   onScreenBitrateChange={setScreenBitrateKbps}
+                  screenContent={screenContent}
+                  onScreenContentChange={setScreenContent}
                   onScreenShareWithAudioToggle={() => setScreenShareWithAudio((v) => !v)}
                   onScreenShareToggle={() => void handleScreenShareToggle()}
                   onToggleStreamWindow={toggleStreamWindow}

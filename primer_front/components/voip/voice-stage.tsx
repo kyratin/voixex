@@ -78,6 +78,8 @@ type VoiceStageProps = {
   onScreenResolutionChange: (value: string) => void
   onScreenFpsChange: (fps: number) => void
   onScreenBitrateChange: (kbps: number) => void
+  screenContent?: "motion" | "detail"
+  onScreenContentChange?: (content: "motion" | "detail") => void
   onScreenShareWithAudioToggle: () => void
   onScreenShareToggle: () => void
   onToggleStreamWindow: () => void
@@ -253,6 +255,8 @@ export function VoiceStage({
   onScreenResolutionChange,
   onScreenFpsChange,
   onScreenBitrateChange,
+  screenContent = "motion",
+  onScreenContentChange,
   onScreenShareWithAudioToggle,
   onScreenShareToggle,
   onToggleStreamWindow,
@@ -451,6 +455,29 @@ export function VoiceStage({
                 </SelectContent>
               </Select>
             </div>
+            {onScreenContentChange ? (
+              <div className="space-y-1.5">
+                <Label className="text-xs">{t("voice.streamContent")}</Label>
+                <div className="grid grid-cols-2 gap-1 rounded-lg bg-secondary p-1" role="radiogroup">
+                  {(["motion", "detail"] as const).map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      role="radio"
+                      aria-checked={screenContent === c}
+                      onClick={() => onScreenContentChange(c)}
+                      className={cn(
+                        "rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                        screenContent === c ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {c === "motion" ? t("voice.contentMotion") : t("voice.contentDetail")}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-muted-foreground">{screenContent === "motion" ? t("voice.contentMotionHint") : t("voice.contentDetailHint")}</p>
+              </div>
+            ) : null}
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1.5">
                 <Label className="text-xs">{t("voice.resolution")}</Label>
@@ -492,8 +519,9 @@ export function VoiceStage({
                   <SelectItem value="1200">1.2 Mbps</SelectItem>
                   <SelectItem value="2000">2.0 Mbps</SelectItem>
                   <SelectItem value="3500">3.5 Mbps</SelectItem>
-                  <SelectItem value="5000">5.0 Mbps</SelectItem>
+                  <SelectItem value="6000">6.0 Mbps</SelectItem>
                   <SelectItem value="8000">8.0 Mbps</SelectItem>
+                  <SelectItem value="12000">12 Mbps</SelectItem>
                 </SelectContent>
               </Select>
             </div>

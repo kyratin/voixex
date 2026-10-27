@@ -93,6 +93,11 @@ export const ru: TranslationDict = {
     undeafen: "Слышать снова"
   },
   voice: {
+    streamContent: "Что показываете",
+    contentMotion: "Видео и игры",
+    contentDetail: "Текст и код",
+    contentMotionHint: "Плавно: при слабой сети картинка станет мягче, но не будет дёргаться.",
+    contentDetailHint: "Чётко: текст остаётся читаемым, при слабой сети меньше кадров в секунду.",
     sharingFromPhone: "Вы показываете экран телефона",
     backToChat: "Вернуться к чату",
     participantsCount: "В канале: {n}",
