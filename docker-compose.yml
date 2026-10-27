@@ -9,6 +9,7 @@ services:
     ports:
       - "${HTTP_PORT:-18080}:8080"
       - "${UDP_PORT:-50000}:50000/udp"
+      - "${UDP_PORT:-50000}:50000/tcp"
       # Embedded LiveKit SFU: signalling, WebRTC over TCP, WebRTC over UDP.
       - "${LIVEKIT_PORT:-7880}:7880"
       - "${LIVEKIT_RTC_TCP_PORT:-7881}:7881/tcp"

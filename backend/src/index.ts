@@ -81,6 +81,7 @@ function memberFromRow(r: {
   speaking: number
   screen_sharing?: number
   watching_screen?: number
+  media_engine?: string
 }): RosterMember {
   return {
     clientId: r.client_id,
@@ -89,7 +90,8 @@ function memberFromRow(r: {
     deafened: Boolean(r.deafened),
     speaking: Boolean(r.speaking),
     screenSharing: Boolean(r.screen_sharing),
-    watchingScreen: Boolean(r.watching_screen)
+    watchingScreen: Boolean(r.watching_screen),
+    mediaEngine: r.media_engine === "webrtc" ? "webrtc" : "legacy"
   }
 }
 
@@ -102,6 +104,7 @@ function memberFromSnap(snap: {
   speaking: number
   screen_sharing?: number
   watching_screen?: number
+  media_engine?: string
 }): RosterMember & { roomId: string | null } {
   return {
     ...memberFromRow(snap),
@@ -218,6 +221,12 @@ function emitToServer(serverId: string, event: WsServerEvent) {
   for (const ws of clients.get(serverId) ?? []) {
     if (ws.readyState === ws.OPEN) ws.send(payload)
   }
+}
+
+function getServerBannerUrl(serverId: string): string | null {
+  const row = db.prepare("SELECT banner_url FROM servers WHERE id = ?").get(serverId) as { banner_url: string | null } | undefined
+  const url = row?.banner_url?.trim()
+  return url || null
 }
 
 function isVoiceRoomId(serverId: string, roomId: string): boolean {
@@ -482,7 +491,7 @@ function getMemberSnapshot(serverId: string, clientId: string) {
   return db
     .prepare(
       `SELECT ms.server_id, ms.room_id, ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking,
-              ms.screen_sharing, ms.watching_screen
+              ms.screen_sharing, ms.watching_screen, ms.media_engine
        FROM member_state ms
        JOIN server_members sm ON sm.server_id = ms.server_id AND sm.client_id = ms.client_id
        WHERE ms.server_id = ? AND ms.client_id = ?`
@@ -498,6 +507,7 @@ function getMemberSnapshot(serverId: string, clientId: string) {
         speaking: number
         screen_sharing: number
         watching_screen: number
+        media_engine: string
       }
     | undefined
 }
@@ -505,7 +515,7 @@ function getMemberSnapshot(serverId: string, clientId: string) {
 function getRoster(serverId: string, roomId: string | null): RosterMember[] {
   const rows = db
     .prepare(
-      `SELECT ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking, ms.screen_sharing, ms.watching_screen
+      `SELECT ms.client_id, sm.display_name, ms.muted, ms.deafened, ms.speaking, ms.screen_sharing, ms.watching_screen, ms.media_engine
        FROM member_state ms
        JOIN server_members sm ON sm.server_id = ms.server_id AND sm.client_id = ms.client_id
        WHERE ms.server_id = ? AND ms.room_id IS ?
@@ -519,6 +529,7 @@ function getRoster(serverId: string, roomId: string | null): RosterMember[] {
     speaking: number
     screen_sharing: number
     watching_screen: number
+    media_engine: string
   }>
   return rows.map((r) => memberFromRow(r))
 }
@@ -726,7 +737,7 @@ app.post("/v1/join", async (req, rep) => {
     displayName: body.displayName,
     superuserPassword: body.superuserPassword
   })
-  return rep.send({ ...joined, serverName: server.name })
+  return rep.send({ ...joined, serverName: server.name, bannerUrl: getServerBannerUrl(server.id) })
 })
 
 app.post("/v1/servers/:serverId/join", async (req, rep) => {
@@ -752,7 +763,7 @@ app.post("/v1/servers/:serverId/join", async (req, rep) => {
     displayName: body.displayName,
     superuserPassword: body.superuserPassword
   })
-  return rep.send(joined)
+  return rep.send({ ...joined, bannerUrl: getServerBannerUrl(params.serverId) })
 })
 
 app.addHook("preHandler", async (req, rep) => {
@@ -776,6 +787,33 @@ function requirePermission(rep: any, serverId: string, clientId: string, permiss
   }
   return info
 }
+
+app.get("/v1/servers/:serverId", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const server = db
+    .prepare("SELECT id, name, banner_url FROM servers WHERE id = ?")
+    .get(params.serverId) as { id: string; name: string; banner_url: string | null } | undefined
+  if (!server) return rep.code(404).send({ message: "server not found" })
+  return rep.send({ id: server.id, name: server.name, bannerUrl: getServerBannerUrl(server.id) })
+})
+
+app.patch("/v1/servers/:serverId", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
+  const body = z.object({ bannerUrl: z.string().max(2048).nullable().optional() }).parse(req.body)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
+  let bannerUrl: string | null = null
+  if (body.bannerUrl !== undefined && body.bannerUrl !== null) {
+    const trimmed = body.bannerUrl.trim()
+    bannerUrl = trimmed || null
+  }
+  db.prepare("UPDATE servers SET banner_url = ? WHERE id = ?").run(bannerUrl, params.serverId)
+  emitToServer(params.serverId, { type: "server_appearance_updated", bannerUrl })
+  return rep.send({ bannerUrl })
+})
 
 app.get("/v1/servers/:serverId/me", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
@@ -1186,7 +1224,13 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   touchLastSeen(auth.serverId, auth.clientId)
 
   socket.send(
-    JSON.stringify({ type: "hello", clientId: auth.clientId, serverId: auth.serverId, serverGeneration } satisfies WsServerEvent)
+    JSON.stringify({
+      type: "hello",
+      clientId: auth.clientId,
+      serverId: auth.serverId,
+      serverGeneration,
+      bannerUrl: getServerBannerUrl(auth.serverId)
+    } satisfies WsServerEvent)
   )
   socket.send(JSON.stringify({ type: "rooms_snapshot", rooms: getRooms(auth.serverId) } satisfies WsServerEvent))
   sendPresenceSnapshotToSocket(socket, auth.serverId)
@@ -1272,8 +1316,10 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         const forceMutedInLobby = roomId ? isLobbyVoiceRoom(auth.serverId, roomId) : false
         const effectiveMuted = forceMutedInLobby ? true : event.muted
         const roomChanged = prevRoomId !== roomId
+        const mediaEngine = event.mediaEngine === "webrtc" ? "webrtc" : "legacy"
         db.prepare(
           `UPDATE member_state SET room_id = ?, muted = ?, deafened = ?, screen_sharing = ?, watching_screen = ?,
+           media_engine = ?,
            speaking = CASE WHEN ? THEN 0 ELSE speaking END, last_seen = datetime('now')
            WHERE server_id = ? AND client_id = ?`
         ).run(
@@ -1282,6 +1328,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           event.deafened ? 1 : 0,
           event.screenSharing ? 1 : 0,
           event.watchingScreen ? 1 : 0,
+          mediaEngine,
           roomChanged ? 1 : 0,
           auth.serverId,
           auth.clientId

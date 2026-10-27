@@ -154,7 +154,15 @@ export function initDb(dbPath: string) {
   if (!hasColumn("watching_screen")) {
     db.exec("ALTER TABLE member_state ADD COLUMN watching_screen INTEGER NOT NULL DEFAULT 0")
   }
+  if (!hasColumn("media_engine")) {
+    db.exec("ALTER TABLE member_state ADD COLUMN media_engine TEXT NOT NULL DEFAULT 'legacy'")
+  }
   db.exec("CREATE INDEX IF NOT EXISTS idx_member_state_server_room ON member_state(server_id, room_id)")
+
+  const serverColumns = db.prepare("PRAGMA table_info(servers)").all() as Array<{ name: string }>
+  if (!serverColumns.some((c) => c.name === "banner_url")) {
+    db.exec("ALTER TABLE servers ADD COLUMN banner_url TEXT")
+  }
 
   return db
 }

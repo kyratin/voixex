@@ -1,3 +1,5 @@
+export type MediaEngineMode = "legacy" | "webrtc"
+
 export type RosterMember = {
   clientId: string
   displayName: string
@@ -6,6 +8,8 @@ export type RosterMember = {
   speaking: boolean
   screenSharing?: boolean
   watchingScreen?: boolean
+  /** Client voice/screen transport preference (server is source of truth). */
+  mediaEngine?: MediaEngineMode
 }
 
 export type WsClientEvent =
@@ -24,6 +28,7 @@ export type WsClientEvent =
       deafened: boolean
       screenSharing: boolean
       watchingScreen: boolean
+      mediaEngine?: MediaEngineMode
     }
   | { type: "set_watching_screen"; watching: boolean; roomId?: string }
   /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
@@ -33,7 +38,8 @@ export type WsClientEvent =
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
-  | { type: "hello"; clientId: string; serverId: string; serverGeneration: number }
+  | { type: "hello"; clientId: string; serverId: string; serverGeneration: number; bannerUrl?: string | null }
+  | { type: "server_appearance_updated"; bannerUrl: string | null }
   | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
