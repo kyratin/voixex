@@ -599,7 +599,18 @@ function emitMemberUpdated(serverId: string, snap: NonNullable<ReturnType<typeof
   })
 }
 
+/** roomId → serverId for voice level events (room ids never move between servers). */
+const serverIdByRoom = new Map<string, string | null>()
+
 createMediaServer(app.log, {
+  onVoiceLevels: ({ roomId, levels }) => {
+    if (!serverIdByRoom.has(roomId)) {
+      const row = db.prepare("SELECT server_id FROM rooms WHERE id = ? LIMIT 1").get(roomId) as { server_id: string } | undefined
+      serverIdByRoom.set(roomId, row?.server_id ?? null)
+    }
+    const serverId = serverIdByRoom.get(roomId)
+    if (serverId) emitToServer(serverId, { type: "voice_levels", roomId, levels })
+  },
   onSpeakingChanged: ({ clientId, speaking }) => {
     const row = db
       .prepare("SELECT server_id, room_id FROM member_state WHERE client_id = ? ORDER BY last_seen DESC LIMIT 1")

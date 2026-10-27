@@ -37,6 +37,8 @@ export type MediaLogger = {
 export type MediaHooks = {
   onSpeakingChanged?: (input: { clientId: string; speaking: boolean }) => void
   onSessionStale?: (input: { clientId: string }) => void
+  /** Every 100 ms per room while someone talks: loudness 0..1 per speaker, for the UI rings. */
+  onVoiceLevels?: (input: { roomId: string; levels: Record<string, number> }) => void
 }
 
 /** Capabilities a client announces in HELLO2 (space separated after the token). */
@@ -479,11 +481,16 @@ function mixTick() {
     const tick = (roomTick.get(roomId) ?? 0) + 1
     roomTick.set(roomId, tick)
     const sources: Array<{ clientId: string; frame: Int16Array }> = []
+    const peaks = roomLevelPeaks.get(roomId) ?? new Map<string, number>()
     for (const s of members) {
       const frame = s.muted ? null : s.stream.pull(now)
       if (frame) sources.push({ clientId: s.clientId, frame })
-      updateSpeaking(s, frame ? s.stream.lastRms : 0, now)
+      const rmsLevel = frame ? s.stream.lastRms : 0
+      updateSpeaking(s, rmsLevel, now)
+      if (rmsLevel > 0) peaks.set(s.clientId, Math.max(peaks.get(s.clientId) ?? 0, rmsLevel))
     }
+    roomLevelPeaks.set(roomId, peaks)
+    if (tick % LEVEL_EVERY_TICKS === 0) emitLevels(roomId, peaks)
     if (sources.length === 0) continue
     for (const listener of members) {
       if (listener.deafened) continue
@@ -519,6 +526,37 @@ function sendOpus2(listener: Session, pcm: Int16Array, tick: number) {
   send(listener, KIND_OPUS2, encodeOpus2(tick, continuous ? 0 : OPUS2_FLAG_TALKSPURT, frames))
   listener.recentEncoded = [encoded, ...listener.recentEncoded].slice(0, 2)
   listener.lastTxFrameNo = tick
+}
+
+/** Loudest frame per speaker since the last levels event. */
+const roomLevelPeaks = new Map<string, Map<string, number>>()
+/** Rooms whose last levels event had someone audible (one all-quiet event follows). */
+const roomsWithLevels = new Set<string>()
+const LEVEL_EVERY_TICKS = 5
+
+/** RMS → 0..1 on a dB scale: -50 dBFS (silence) .. -12 dBFS (loud speech). */
+function displayLevel(rms: number) {
+  if (rms <= 0) return 0
+  const db = 20 * Math.log10(rms)
+  return Math.round(Math.max(0, Math.min(1, (db + 50) / 38)) * 100) / 100
+}
+
+function emitLevels(roomId: string, peaks: Map<string, number>) {
+  const levels: Record<string, number> = {}
+  let audible = false
+  for (const [clientId, rms] of peaks) {
+    const level = displayLevel(rms)
+    if (level > 0) {
+      levels[clientId] = level
+      audible = true
+    }
+  }
+  peaks.clear()
+  // While nobody talks, send nothing after a single all-quiet update.
+  if (!audible && !roomsWithLevels.has(roomId)) return
+  if (audible) roomsWithLevels.add(roomId)
+  else roomsWithLevels.delete(roomId)
+  hooks.onVoiceLevels?.({ roomId, levels })
 }
 
 function updateSpeaking(s: Session, level: number, now: number) {

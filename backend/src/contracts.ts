@@ -44,6 +44,8 @@ export type WsServerEvent =
   | { type: "hello"; clientId: string; serverId: string; serverGeneration: number; bannerUrl?: string | null }
   | { type: "server_appearance_updated"; bannerUrl: string | null }
   | { type: "members_changed"; clientId?: string }
+  /** ~10 Hz while someone in the room talks: loudness 0..1 per speaking member (UI rings). */
+  | { type: "voice_levels"; roomId: string; levels: Record<string, number> }
   | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
   | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }

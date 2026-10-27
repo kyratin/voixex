@@ -33,6 +33,7 @@ export type WorkerToHost =
   | { t: "log"; level: "info" | "warn" | "debug"; obj: object; msg?: string }
   | { t: "speaking"; clientId: string; speaking: boolean }
   | { t: "stale"; clientId: string }
+  | { t: "levels"; roomId: string; levels: Record<string, number> }
   | { t: "wssend"; connId: string; data: Uint8Array }
   | { t: "wsend"; connId: string }
 
@@ -74,5 +75,6 @@ port.on("message", (m: HostToWorker) => {
 
 startMedia(log, {
   onSpeakingChanged: ({ clientId, speaking }) => post({ t: "speaking", clientId, speaking }),
-  onSessionStale: ({ clientId }) => post({ t: "stale", clientId })
+  onSessionStale: ({ clientId }) => post({ t: "stale", clientId }),
+  onVoiceLevels: ({ roomId, levels }) => post({ t: "levels", roomId, levels })
 })

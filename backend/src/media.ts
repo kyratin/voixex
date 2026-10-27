@@ -5,6 +5,7 @@ import type { HostToWorker, WorkerToHost } from "./media/worker.js"
 type MediaHooks = {
   onSpeakingChanged?: (input: { clientId: string; speaking: boolean }) => void
   onSessionStale?: (input: { clientId: string }) => void
+  onVoiceLevels?: (input: { roomId: string; levels: Record<string, number> }) => void
 }
 
 /**
@@ -77,6 +78,7 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
       if (m.t === "log") logger[m.level](m.obj, m.msg)
       else if (m.t === "speaking") hooks.onSpeakingChanged?.({ clientId: m.clientId, speaking: m.speaking })
       else if (m.t === "stale") hooks.onSessionStale?.({ clientId: m.clientId })
+      else if (m.t === "levels") hooks.onVoiceLevels?.({ roomId: m.roomId, levels: m.levels })
       else if (m.t === "wssend") {
         const sock = mediaSockets.get(m.connId)
         // Control replies (HELLO_ACK) are tiny; only audio would pile up.
