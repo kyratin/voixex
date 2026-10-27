@@ -287,10 +287,17 @@ export class WebRtcMediaSession {
     await this.applyOutputDeviceToElements()
   }
 
-  /** Returns true when the screen video reached LiveKit (viewers can watch without the WS relay). */
-  async publishScreenStream(stream: MediaStream, encoding?: ScreenPublishOptions): Promise<boolean> {
+  /**
+   * video: the screen reached LiveKit (viewers can watch without the WS relay).
+   * audio: the stream sound reached LiveKit (null when the capture has no audio track);
+   * audioError says why it did not.
+   */
+  async publishScreenStream(
+    stream: MediaStream,
+    encoding?: ScreenPublishOptions
+  ): Promise<{ video: boolean; audio: boolean | null; audioError?: string }> {
     const room = this.room
-    if (!room || !this.live) return false
+    if (!room || !this.live) return { video: false, audio: null }
     await this.stopScreenShare()
     const published: LocalTrack[] = []
     const video = stream.getVideoTracks()[0]
@@ -320,15 +327,28 @@ export class WebRtcMediaSession {
       })
       published.push(track)
     }
+    // The stream sound is published separately: a failure here must not take the picture down.
+    let audioOk: boolean | null = null
+    let audioError: string | undefined
     const audio = stream.getAudioTracks()[0]
     if (audio) {
-      const track = new LocalAudioTrack(audio)
-      await room.localParticipant.publishTrack(track, { source: Track.Source.ScreenShareAudio })
-      published.push(track)
+      audioOk = false
+      // Some system-audio captures are rejected with RED/DTX: retry as plain Opus.
+      for (const options of [{ source: Track.Source.ScreenShareAudio }, { source: Track.Source.ScreenShareAudio, red: false, dtx: false }]) {
+        const track = new LocalAudioTrack(audio)
+        try {
+          await room.localParticipant.publishTrack(track, options)
+          published.push(track)
+          audioOk = true
+          break
+        } catch (e) {
+          audioError = e instanceof Error ? e.message : String(e)
+        }
+      }
     }
     this.screenTracks = published
     this.opts.onScreenShareChange?.(true)
-    return Boolean(video)
+    return { video: Boolean(video), audio: audioOk, audioError }
   }
 
   /** Viewer side: which simulcast layer of the remote screen share to receive. */

@@ -316,6 +316,7 @@ export const en = {
     threshold: "{label} threshold"
   },
   notices: {
+    screenAudioPublishFailed: "Stream sound could not be sent to LiveKit ({error}): phone viewers will not hear it.",
     screenAudioUnavailable: "System audio could not be captured on this computer: viewers see the screen without sound.",
     serverTooOldForPhoneShare: "Sharing from a phone needs a newer server (0.6.2 or later).",
     channelBannerSaved: "Channel banner saved",

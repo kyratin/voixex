@@ -3138,7 +3138,14 @@ export default function VoIPApp() {
       // The LiveKit session may be gone (dropped, or never started for this room): without it the
       // video only went out as the WebSocket copy, which phones could not play.
       if (activeServerId) await ensureLiveKitForVoiceRoom(activeServerId, currentVoiceChannel)
-      viaLiveKit = Boolean(await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps }))
+      const published = await webRtcSessionRef.current?.publishScreenStream(stream, { fps, bitrateKbps })
+      viaLiveKit = Boolean(published?.video)
+      if (published?.audio === false) {
+        // Viewers on LiveKit (phones) would get no sound: say why, and keep the WebSocket copy
+        // (which carries the sound) running for everyone else.
+        toast.warning(t("notices.screenAudioPublishFailed", { error: published.audioError ?? "?" }))
+        viaLiveKit = false
+      }
     } catch {
       viaLiveKit = false
     }
