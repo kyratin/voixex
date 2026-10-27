@@ -31,6 +31,8 @@ export type WsClientEvent =
       mediaEngine?: MediaEngineMode
     }
   | { type: "set_watching_screen"; watching: boolean; roomId?: string }
+  /** Viewer watching a lower-quality LiveKit layer: stop relaying WS screen chunks to this socket. */
+  | { type: "set_screen_relay"; enabled: boolean }
   /** One MediaRecorder WebM blob, base64 (reliable path; avoids UDP packet loss). */
   | { type: "screen_chunk"; chunkBase64: string }
   /** Viewer asks server to nudge the active sharer (fresh WebM header for MSE). */

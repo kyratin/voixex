@@ -78,7 +78,10 @@ const loginFailuresByNick = new AttemptLimiter(10, 10 * 60_000)
 const serverPasswordAttempts = new AttemptLimiter(30, 10 * 60_000)
 const clients = new Map<string, Set<WebSocket>>()
 /** Map WebSocket → client for targeted broadcast (screen chunks). */
-const wsClientMeta = new Map<WebSocket, { serverId: string; clientId: string; certId?: string }>()
+const wsClientMeta = new Map<
+  WebSocket,
+  { serverId: string; clientId: string; certId?: string; screenRelayOff?: boolean }
+>()
 const screenShareStateByClient = new Map<string, { serverId: string; roomId: string | null; active: boolean }>()
 /** Viewer IDs temporarily forced into WS screen relay after join/resync. */
 const forceScreenRelayByRoom = new Map<string, Map<string, number>>()
@@ -300,6 +303,8 @@ function broadcastScreenChunkWs(app: FastifyInstance, serverId: string, roomId: 
     openSameServer++
     const meta = wsClientMeta.get(ws)
     if (!meta || meta.clientId === fromClientId) continue
+    // The viewer chose a LiveKit quality layer and does not want the full-quality WS stream.
+    if (meta.screenRelayOff) continue
     let allowed = memberIds.has(meta.clientId)
     if (!allowed && forced) {
       const expiresAt = forced.get(meta.clientId)
@@ -1998,6 +2003,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           markForceScreenRelay(roomId, auth.clientId)
           notifyActiveScreenSharerToResync(auth.serverId, roomId, auth.clientId)
         }
+      } else if (event.type === "set_screen_relay") {
+        const meta = wsClientMeta.get(socket)
+        if (meta) meta.screenRelayOff = !event.enabled
       } else if (event.type === "set_watching_screen") {
         db.prepare("UPDATE member_state SET watching_screen = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?").run(
           event.watching ? 1 : 0,
