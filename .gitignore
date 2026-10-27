@@ -10,3 +10,6 @@ backend_logs.txt
 .env
 .DS_Store
 **/.DS_Store
+
+# Windows "downloaded from the internet" markers (invalid file names on Windows checkouts)
+*:Zone.Identifier
