@@ -30,8 +30,11 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then name="${GITHUB_REF#refs/tags/v}"; else name="0.0.0-ci.${GITHUB_RUN_NUMBER}"; fi
           IFS=. read -r major minor patch <<< "${name%%-*}"
+          code=$(( major * 10000 + minor * 100 + ${patch:-0} ))
+          # Check builds (not tags) are never installed over a release: any positive code will do.
+          [ "$code" -gt 0 ] || code=$GITHUB_RUN_NUMBER
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "code=$(( major * 10000 + minor * 100 + ${patch:-0} ))" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
       - name: Web UI
         working-directory: primer_front
         run: |
