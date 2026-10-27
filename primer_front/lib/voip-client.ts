@@ -6,6 +6,8 @@ const DEFAULT_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:1
 
 export type JoinResult = {
   serverId: string
+  /** Protection level as the server knows it (protected profiles only); the device copy may be stale. */
+  authMode?: AuthMode
   /** Set when the member is below the server's minimum protection level: raise it before entering. */
   upgradeRequired?: { minLevel: number }
   serverName?: string

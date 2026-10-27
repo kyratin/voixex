@@ -244,7 +244,8 @@ export const es: TranslationDict = {
     samples: "{n} muestras",
     underruns: "Vaciados del búfer",
     underrunsHint: "Eventos de búfer vacío por ~1 s",
-    overflowDrops: "Descartes por desbordamiento"
+    overflowDrops: "Descartes por desbordamiento",
+    summary: "Ping {ping} ms · pérdida {loss}%"
   },
   meter: {
     joinToSee: "Los niveles del micrófono en vivo están disponibles en la app de escritorio.",
@@ -375,7 +376,9 @@ export const es: TranslationDict = {
     certificateOnlyReady: "Tu certificado basta para entrar.",
     raiseAndSignIn: "Subir nivel y entrar",
     next: "Siguiente",
-    back: "Atrás"
+    back: "Atrás",
+    levelNowNeedsPassword: "Este perfil ahora usa el nivel 3 en este servidor (cambiado en otro dispositivo): introduce tu nick y contraseña.",
+    levelNowPasswordOnly: "Este perfil ahora entra con nick y contraseña en este servidor (cambiado en otro dispositivo)."
   },
   authErrors: {
     invalidCredentials: "Nick o contraseña incorrectos para este certificado.",
@@ -402,7 +405,8 @@ export const es: TranslationDict = {
     certificateRequired: "Este perfil necesita su certificado para entrar.",
     noPassword: "Este perfil no tiene contraseña en su nivel.",
     sessionExpired: "Un administrador restableció tu acceso.",
-    upgradeRequired: "Sube tu nivel de protección para entrar."
+    upgradeRequired: "Sube tu nivel de protección para entrar.",
+    passwordRequired: "Este perfil también necesita tu nick y contraseña."
   },
   security: {
     title: "Mi perfil aquí",

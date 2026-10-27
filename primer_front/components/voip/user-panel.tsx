@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { Mic, MicOff, Headphones, HeadphoneOff, Settings, PhoneOff, Signal, LogOut } from "lucide-react"
+import { Mic, MicOff, Headphones, HeadphoneOff, Settings, Signal, LogOut } from "lucide-react"
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
@@ -65,9 +65,9 @@ export function UserPanel({
                 type="button"
                 className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-sidebar-accent"
               >
-                <Signal className="h-4 w-4 shrink-0 text-accent" />
+                <Signal className={cn("h-4 w-4 shrink-0", qualityClass)} />
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-semibold text-accent">{t("userPanel.voiceConnected")}</div>
+                  <div className={cn("text-xs font-semibold", qualityClass)}>{t("userPanel.voiceConnected")}</div>
                   <div className="truncate text-[11px] text-muted-foreground">{voiceChannelName}</div>
                   {voiceStatsSummary ? (
                     <div className="truncate text-[10px] text-muted-foreground">{voiceStatsSummary}</div>
@@ -127,21 +127,6 @@ export function UserPanel({
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
-          {isInVoice && onDisconnect ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={onDisconnect}
-                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                >
-                  <PhoneOff className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t("userPanel.disconnect")}</TooltipContent>
-            </Tooltip>
-          ) : null}
 
           <Tooltip>
             <TooltipTrigger asChild>

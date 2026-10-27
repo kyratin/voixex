@@ -245,7 +245,8 @@ export const ru: TranslationDict = {
     samples: "{n} сэмплов",
     underruns: "Опустошения буфера",
     underrunsHint: "Событий пустого буфера за ~1 с",
-    overflowDrops: "Сбросы при переполнении"
+    overflowDrops: "Сбросы при переполнении",
+    summary: "Пинг {ping} мс · потери {loss}%"
   },
   meter: {
     joinToSee: "Уровень микрофона в реальном времени доступен в десктоп-приложении.",
@@ -376,7 +377,9 @@ export const ru: TranslationDict = {
     certificateOnlyReady: "Для входа достаточно вашего сертификата.",
     raiseAndSignIn: "Повысить уровень и войти",
     next: "Далее",
-    back: "Назад"
+    back: "Назад",
+    levelNowNeedsPassword: "На этом сервере у профиля теперь уровень 3 (изменён на другом устройстве): введите ник и пароль.",
+    levelNowPasswordOnly: "На этом сервере профиль теперь входит по нику и паролю (изменено на другом устройстве)."
   },
   authErrors: {
     invalidCredentials: "Неверный ник или пароль для этого сертификата.",
@@ -403,7 +406,8 @@ export const ru: TranslationDict = {
     certificateRequired: "Для входа в этот профиль нужен его сертификат.",
     noPassword: "На этом уровне у профиля нет пароля.",
     sessionExpired: "Администратор сбросил ваш доступ.",
-    upgradeRequired: "Повысьте уровень защиты, чтобы войти."
+    upgradeRequired: "Повысьте уровень защиты, чтобы войти.",
+    passwordRequired: "Этому профилю нужны также ник и пароль."
   },
   security: {
     title: "Мой профиль здесь",

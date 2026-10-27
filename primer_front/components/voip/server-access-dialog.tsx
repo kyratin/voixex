@@ -18,7 +18,15 @@ export type ServerAddress = { apiHost: string; apiPort: string; apiUseHttps: boo
 export type AccessMode =
   | { kind: "add" }
   | { kind: "import" }
-  | { kind: "login"; serverId: string; label: string; authMode: AuthMode; secure: boolean }
+  | {
+      kind: "login"
+      serverId: string
+      label: string
+      authMode: AuthMode
+      secure: boolean
+      /** Why the dialog opened, e.g. the level was changed on another device. */
+      notice?: string
+    }
   | { kind: "claim"; serverId: string; label: string; nick: string; secure: boolean }
   | {
       kind: "upgrade"
@@ -453,6 +461,7 @@ export function ServerAccessDialog({
   } else if (mode?.kind === "login") {
     body = (
       <div className="space-y-3">
+        {mode.notice ? <p className="rounded-lg bg-primary/10 p-2.5 text-xs text-foreground">{mode.notice}</p> : null}
         {modeNeedsPassword(mode.authMode) ? (
           <>
             {nickField(true)}

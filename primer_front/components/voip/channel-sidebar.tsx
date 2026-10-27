@@ -1,11 +1,10 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { ArrowLeft, Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Eye, LogOut } from "lucide-react"
+import { ArrowLeft, Hash, Volume2, ChevronDown, Lock, MicOff, Headphones, Eye } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Slider } from "@/components/ui/slider"
 import { Label } from "@/components/ui/label"
@@ -51,7 +50,6 @@ interface ChannelSidebarProps {
   currentVoiceChannelId?: string
   isInVoice?: boolean
   onChannelSelect: (channelId: string) => void
-  onLeaveVoice?: () => void
   voiceUsers?: Record<string, VoiceUser[]>
   /** When set, voice rows can open per-user output volume (desktop UDP mixer on server). */
   selfClientId?: string | null
@@ -70,7 +68,6 @@ export function ChannelSidebar({
   currentVoiceChannelId = "",
   isInVoice = false,
   onChannelSelect,
-  onLeaveVoice,
   voiceUsers = {},
   selfClientId = null,
   peerVolumePct = {},
@@ -125,16 +122,6 @@ export function ChannelSidebar({
         </div>
       )}
 
-      {isInVoice && currentVoiceChannelId && onLeaveVoice ? (
-        <div className="mx-2 mt-2 flex shrink-0 items-center gap-2 rounded-lg bg-accent/10 px-3 py-1.5">
-          <Volume2 className="h-3.5 w-3.5 shrink-0 text-accent" />
-          <span className="min-w-0 flex-1 truncate text-xs text-foreground">{t("sidebar.inVoiceChannel")}</span>
-          <Button variant="ghost" size="sm" className="h-7 shrink-0 gap-1 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={onLeaveVoice}>
-            <LogOut className="h-3.5 w-3.5" />
-            {t("common.leave")}
-          </Button>
-        </div>
-      ) : null}
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="p-2">

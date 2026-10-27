@@ -243,7 +243,8 @@ export const en = {
     samples: "{n} samples",
     underruns: "Underruns",
     underrunsHint: "Empty-buffer events per ~1s",
-    overflowDrops: "Overflow drops"
+    overflowDrops: "Overflow drops",
+    summary: "Ping {ping} ms · loss {loss}%"
   },
   meter: {
     joinToSee: "Live microphone levels are available in the desktop app.",
@@ -374,7 +375,9 @@ export const en = {
     certificateOnlyReady: "Your certificate is enough to sign in.",
     raiseAndSignIn: "Raise level and sign in",
     next: "Next",
-    back: "Back"
+    back: "Back",
+    levelNowNeedsPassword: "This profile now uses level 3 on this server (changed on another device): enter your nick and password.",
+    levelNowPasswordOnly: "This profile now signs in with nick and password on this server (changed on another device)."
   },
   authErrors: {
     invalidCredentials: "Wrong nick or password for this certificate.",
@@ -401,7 +404,8 @@ export const en = {
     certificateRequired: "This profile needs its certificate to sign in.",
     noPassword: "This profile has no password at its level.",
     sessionExpired: "Your access was reset by an admin.",
-    upgradeRequired: "Raise your protection level to enter."
+    upgradeRequired: "Raise your protection level to enter.",
+    passwordRequired: "This profile also needs your nick and password."
   },
   security: {
     title: "My profile here",

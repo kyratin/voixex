@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { FileKey, ShieldCheck, ShieldOff } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -147,16 +147,26 @@ export function MySecurityPanel({
   const [exportRepeat, setExportRepeat] = useState("")
   const [exportState, setExportState] = useState<{ busy: boolean; message: string; ok: boolean }>({ busy: false, message: "", ok: false })
 
+  // The parent passes new function instances on every render (it re-renders many times a second
+  // during voice), so keep them in refs: loading must not depend on their identity, or it would
+  // refetch constantly and reset the level being chosen.
+  const loadRef = useRef(load)
+  const describeErrorRef = useRef(describeError)
+  useEffect(() => {
+    loadRef.current = load
+    describeErrorRef.current = describeError
+  })
+
   const refresh = useCallback(async () => {
     try {
-      const loaded = await load()
+      const loaded = await loadRef.current()
       setInfo(loaded)
       if (loaded.authMode) setTargetLevel(loaded.authMode)
       setLoadError("")
     } catch (e) {
-      setLoadError(describeError(e).text)
+      setLoadError(describeErrorRef.current(e).text)
     }
-  }, [load, describeError])
+  }, [])
 
   useEffect(() => {
     void refresh()
@@ -362,14 +372,22 @@ export function ServerSecurityPolicy({
   const [saved, setSaved] = useState<number | null>(null)
   const [state, setState] = useState<{ busy: boolean; message: string; ok: boolean }>({ busy: false, message: "", ok: false })
 
+  // Load once on open; `load` is a new function on every parent render.
+  const loadRef = useRef(load)
+  const describeErrorRef = useRef(describeError)
   useEffect(() => {
-    void load()
+    loadRef.current = load
+    describeErrorRef.current = describeError
+  })
+  useEffect(() => {
+    void loadRef
+      .current()
       .then((p) => {
         setValue(p.minAuthLevel)
         setSaved(p.minAuthLevel)
       })
-      .catch((e) => setState({ busy: false, ok: false, message: describeError(e).text }))
-  }, [load, describeError])
+      .catch((e) => setState({ busy: false, ok: false, message: describeErrorRef.current(e).text }))
+  }, [])
 
   if (value === null) return state.message ? <p className="text-sm text-destructive">{state.message}</p> : <Spinner className="h-5 w-5" />
 

@@ -3151,17 +3151,21 @@ export default function VoIPApp() {
   const voiceChannelName = categories.flatMap((c) => c.channels).find((c) => c.id === currentVoiceChannel)?.name || ""
   const isTextChannel = activeChannel?.type === "text"
   const canOpenServerSettings = Boolean(activeServerId && canManageServer)
+  // Worst of ping, loss and jitter decides the colour: a 200+ ms ping is not "green" even with no loss.
   const qualityClass = useMemo(() => {
-    const loss = voiceStats?.packetLossPct ?? 0
-    const jitter = voiceStats?.jitter1PctMs ?? 0
-    if (loss < 0.5 && jitter < 20) return "text-accent"
-    if (loss < 2 && jitter < 50) return "text-yellow-500"
+    if (!voiceStats) return "text-muted-foreground"
+    const ping = voiceStats.pingNowMs ?? 0
+    const loss = voiceStats.packetLossPct ?? 0
+    // Current jitter, like the current ping: the worst-1% value spikes and is shown in the stats panel.
+    const jitter = voiceStats.jitterNowMs ?? 0
+    if (ping < 150 && loss < 1 && jitter < 30) return "text-accent"
+    if (ping < 300 && loss < 3 && jitter < 60) return "text-yellow-500"
     return "text-destructive"
   }, [voiceStats])
   const voiceStatsSummary = useMemo(() => {
     if (!isInVoice || !voiceStats) return ""
-    return `Ping1% ${voiceStats.ping1PctMs ?? 0}ms | Loss ${voiceStats.packetLossPct ?? 0}% | Jitter1% ${voiceStats.jitter1PctMs ?? 0}ms`
-  }, [isInVoice, voiceStats])
+    return t("stats.summary", { ping: voiceStats.pingNowMs ?? 0, loss: voiceStats.packetLossPct ?? 0 })
+  }, [isInVoice, voiceStats, t])
 
   const persistConnectionSettings = (patch: Partial<SavedServerProfile>) => {
     const globalPatch: ConnectionPrefs = {}
@@ -3299,7 +3303,9 @@ export default function VoIPApp() {
           if (!identityRef || !identity?.certificate) throw new ApiError("certificateMissing", "certificate missing on this device")
           join = await uiClient.loginWithCertificate({
             certificate: identity.certificate,
-            ...(modeNeedsPassword(preset.authMode) ? { nick: auth.nick, password: auth.password } : {}),
+            // The level saved on this device may be outdated (changed on another device), so send
+            // nick + password whenever they were typed; the server asks for them if it needs them.
+            ...(auth.nick || auth.password ? { nick: auth.nick, password: auth.password } : {}),
             superuserPassword: auth.superuserPassword,
             signLoginMessage: (message) => window.voixexIdentity!.sign(identityRef, message)
           })
@@ -3435,7 +3441,7 @@ export default function VoIPApp() {
             identityRef: preset?.identityRef,
             certId: preset?.certId,
             serverClientId: join.profile.clientId,
-            authMode: preset?.authMode
+            authMode: join.authMode ?? preset?.authMode
           }
         : {
             serverId: joinedServerId,
@@ -3672,6 +3678,22 @@ export default function VoIPApp() {
       pendingLoginRef.current = null
       setAccessMode(null)
     } catch (e) {
+      // The level saved on this device may be stale. A certificate-only attempt that the server
+      // turns down for lack of nick/password means the profile now needs them (servers before
+      // 0.4.1 answer that with invalidCredentials and no level): switch the dialog to those fields.
+      const triedCertificateAlone = Boolean(profile.identityRef) && !credentials.nick && !credentials.password
+      if (e instanceof ApiError && triedCertificateAlone && (e.code === "passwordRequired" || e.code === "invalidCredentials")) {
+        const mode = levelFromError(e) ?? "password_certificate"
+        const updated = updateSavedServer(profile.serverId, { authMode: mode }) ?? { ...profile, authMode: mode }
+        openLoginDialog(updated, mode, t("access.levelNowNeedsPassword"))
+        return
+      }
+      if (e instanceof ApiError && e.code === "authModeMismatch" && levelFromError(e)) {
+        const mode = levelFromError(e)!
+        const updated = updateSavedServer(profile.serverId, { authMode: mode }) ?? { ...profile, authMode: mode }
+        openLoginDialog(updated, mode, t("access.levelNowPasswordOnly"))
+        return
+      }
       if (e instanceof ApiError && e.code === "upgradeRequired" && profile.authMode) {
         pendingLoginRef.current = credentials
         setAccessMode({
@@ -3684,7 +3706,10 @@ export default function VoIPApp() {
         })
         return
       }
-      if (e instanceof ApiError && (e.code === "authModeMismatch" || e.code === "certificateRequired")) {
+      if (
+        e instanceof ApiError &&
+        (e.code === "authModeMismatch" || e.code === "certificateRequired" || e.code === "passwordRequired")
+      ) {
         const mode = e.details.authMode
         if (mode === "password" || mode === "certificate" || mode === "password_certificate") {
           updateSavedServer(profile.serverId, { authMode: mode })
@@ -3887,15 +3912,21 @@ export default function VoIPApp() {
     setAccessMode(null)
   }
 
-  const openLoginDialog = (saved: SavedServerProfile) => {
-    if (!saved.authMode) return
+  const openLoginDialog = (saved: SavedServerProfile, authMode: AuthMode | undefined = saved.authMode, notice?: string) => {
+    if (!authMode) return
     setAccessMode({
       kind: "login",
       serverId: saved.serverId,
       label: saved.serverName || saved.apiHost,
-      authMode: saved.authMode,
-      secure: Boolean(saved.apiUseHttps)
+      authMode,
+      secure: Boolean(saved.apiUseHttps),
+      ...(notice ? { notice } : {})
     })
+  }
+
+  const levelFromError = (e: unknown): AuthMode | undefined => {
+    const mode = e instanceof ApiError ? e.details.authMode : undefined
+    return mode === "password" || mode === "certificate" || mode === "password_certificate" ? mode : undefined
   }
 
   const openServer = (serverId: string) => {
@@ -3906,16 +3937,17 @@ export default function VoIPApp() {
       setAccessMode({ kind: "claim", serverId, label, nick: saved.displayName, secure: Boolean(saved.apiUseHttps) })
       return
     }
-    if (saved.authMode !== "certificate") {
+    if (!saved.identityRef) {
       openLoginDialog(saved)
       return
     }
-    // Level 2: the certificate alone is enough, sign in with one click.
+    // With a certificate on this device, try it alone first: the level may have been changed on
+    // another device, and only the server knows. Nick + password are asked only if it needs them.
     setBusyServerId(serverId)
     void signInToProfile(saved, { nick: "", password: "" })
       .catch((e) => {
         toast.error(describeAuthError(e).text)
-        openLoginDialog(saved)
+        openLoginDialog(saved, levelFromError(e) ?? saved.authMode)
       })
       .finally(() => setBusyServerId(null))
   }
@@ -4019,7 +4051,6 @@ export default function VoIPApp() {
               currentVoiceChannelId={currentVoiceChannel}
               isInVoice={isInVoice}
               onChannelSelect={handleChannelSelect}
-              onLeaveVoice={handleDisconnect}
               voiceUsers={voiceUsers}
               selfClientId={myVoiceClientId}
               peerVolumePct={peerVolumePct}
