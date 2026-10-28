@@ -13,4 +13,8 @@ if (!existsSync(dist)) {
 
 cpSync(resolve(dist, "speex.wasm"), resolve(pub, "speex.wasm"))
 cpSync(resolve(dist, "speex/workletProcessor.js"), resolve(pub, "speex-worklet.js"))
-console.log("[copy-speex-dsp] copied speex.wasm and speex-worklet.js to public/")
+// RNNoise (AI noise suppression): the model + both builds and its worklet.
+cpSync(resolve(dist, "rnnoise.wasm"), resolve(pub, "rnnoise.wasm"))
+cpSync(resolve(dist, "rnnoise_simd.wasm"), resolve(pub, "rnnoise_simd.wasm"))
+cpSync(resolve(dist, "rnnoise/workletProcessor.js"), resolve(pub, "rnnoise-worklet.js"))
+console.log("[copy-speex-dsp] copied Speex and RNNoise worklets and wasm to public/")

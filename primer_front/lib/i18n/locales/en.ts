@@ -206,6 +206,8 @@ export const en = {
     unknownServer: "unknown server"
   },
   settings: {
+    aiNoise: "AI noise suppression",
+    aiNoiseHint: "A neural network (RNNoise) on this device removes keyboard, fans, street and hum, and keeps your voice. Replaces the noise gate and the browser's noise suppression.",
     serverTitle: "Server settings — {name}",
     serverDescription: "Only admins see this. Changes apply to everyone on the server.",
     title: "Settings",
@@ -321,6 +323,7 @@ export const en = {
     threshold: "{label} threshold"
   },
   notices: {
+    aiNoiseFailed: "AI noise suppression could not start; the regular settings are used.",
     screenAudioPublishFailed: "Stream sound could not be sent to LiveKit ({error}): phone viewers will not hear it.",
     screenAudioUnavailable: "System audio could not be captured on this computer: viewers see the screen without sound.",
     serverTooOldForPhoneShare: "Sharing from a phone needs a newer server (0.6.2 or later).",

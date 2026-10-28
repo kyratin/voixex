@@ -208,6 +208,8 @@ export const pt: TranslationDict = {
     unknownServer: "servidor desconhecido"
   },
   settings: {
+    aiNoise: "Supressão de ruído com IA",
+    aiNoiseHint: "Uma rede neural (RNNoise) neste dispositivo remove teclado, ventiladores, rua e zumbido e mantém sua voz. Substitui o noise gate e a supressão do navegador.",
     serverTitle: "Configurações do servidor — {name}",
     serverDescription: "Só administradores veem isto. As mudanças valem para todos no servidor.",
     title: "Definições",
@@ -322,6 +324,7 @@ export const pt: TranslationDict = {
     threshold: "Limiar: {label}"
   },
   notices: {
+    aiNoiseFailed: "A supressão de ruído com IA não iniciou; usando as configurações normais.",
     screenAudioPublishFailed: "Não foi possível enviar o som da transmissão ao LiveKit ({error}): quem assiste pelo celular não vai ouvir.",
     screenAudioUnavailable: "Não foi possível capturar o áudio do sistema neste computador: verão a tela sem som.",
     serverTooOldForPhoneShare: "Compartilhar do celular requer um servidor mais novo (0.6.2 ou superior).",

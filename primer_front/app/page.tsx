@@ -39,8 +39,8 @@ import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
 import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
 import { WebRtcMediaSession } from "@/lib/webrtc-media"
-import { connectMonoSourceToTap, createMonoMediaStreamTap, createSpeexNoiseWorklet } from "@/lib/speex-capture"
-import type { SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
+import { connectMonoSourceToTap, createMonoMediaStreamTap, createRnnoiseWorklet, createSpeexNoiseWorklet } from "@/lib/speex-capture"
+import type { RnnoiseWorkletNode, SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -294,7 +294,8 @@ export default function VoIPApp() {
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
     captureHighpass: BiquadFilterNode
-    speexWorklet: SpeexWorkletNode | null
+    /** The noise-suppression worklet in the capture chain: RNNoise (AI) or Speex. */
+    speexWorklet: SpeexWorkletNode | RnnoiseWorkletNode | null
     postDspGain: GainNode
     webrtcMicMerger: ChannelMergerNode
     /** Processed mic branch for LiveKit (parallel to ScriptProcessor UDP uplink). */
@@ -442,6 +443,9 @@ export default function VoIPApp() {
   /** Opus masks noise/hiss far better than raw PCM; PCM uplink sends full ADC noise floor (~768 kb/s). */
   /** SpeexDSP preprocess in AudioWorklet; causes hollow "tube" sound — off by default, browser NS is better. */
   const [speexNoiseSuppressionEnabled, setSpeexNoiseSuppressionEnabled] = useState(false)
+  /** AI noise suppression (RNNoise neural network, on device), like Krisp. On by default. */
+  const [aiNoiseSuppressionEnabled, setAiNoiseSuppressionEnabled] = useState(true)
+  const aiNoiseSuppressionEnabledRef = useRef(true)
   const [monitorEnabled, setMonitorEnabled] = useState(false)
   const [monitorVolumePct, setMonitorVolumePct] = useState(15)
   /** Off by default: condenser mics pump with aggressive gating; browser NS + mic level is enough. */
@@ -1048,6 +1052,7 @@ export default function VoIPApp() {
         playbackHighpassHz?: number
         playbackLimiterEnabled?: boolean
         speexNoiseSuppressionEnabled?: boolean
+        aiNoiseSuppressionEnabled?: boolean
       }
       if (typeof parsed.micVolumePct === "number") setMicVolumePct(Math.max(0, Math.min(200, Math.round(parsed.micVolumePct))))
       if (typeof parsed.outputVolumePct === "number") setOutputVolumePct(Math.max(0, Math.min(200, Math.round(parsed.outputVolumePct))))
@@ -1076,6 +1081,7 @@ export default function VoIPApp() {
       // Playback DSP stays manual-only from Settings.
       // Do not auto-restore these toggles from old profiles/localStorage.
       if (typeof parsed.speexNoiseSuppressionEnabled === "boolean") setSpeexNoiseSuppressionEnabled(parsed.speexNoiseSuppressionEnabled)
+      if (typeof parsed.aiNoiseSuppressionEnabled === "boolean") setAiNoiseSuppressionEnabled(parsed.aiNoiseSuppressionEnabled)
     } catch {
       // ignore broken localStorage payload
     }
@@ -1102,7 +1108,8 @@ export default function VoIPApp() {
         playbackHighpassEnabled,
         playbackHighpassHz,
         playbackLimiterEnabled,
-        speexNoiseSuppressionEnabled
+        speexNoiseSuppressionEnabled,
+        aiNoiseSuppressionEnabled
       })
     )
   }, [
@@ -1123,7 +1130,8 @@ export default function VoIPApp() {
     playbackHighpassEnabled,
     playbackHighpassHz,
     playbackLimiterEnabled,
-    speexNoiseSuppressionEnabled
+    speexNoiseSuppressionEnabled,
+    aiNoiseSuppressionEnabled
   ])
 
   useEffect(() => {
@@ -1216,6 +1224,10 @@ export default function VoIPApp() {
   useEffect(() => {
     speexNoiseSuppressionEnabledRef.current = speexNoiseSuppressionEnabled
   }, [speexNoiseSuppressionEnabled])
+
+  useEffect(() => {
+    aiNoiseSuppressionEnabledRef.current = aiNoiseSuppressionEnabled
+  }, [aiNoiseSuppressionEnabled])
 
   useEffect(() => {
     playbackGateEnabledRef.current = playbackGateEnabled
@@ -1995,8 +2007,18 @@ export default function VoIPApp() {
         }
 
         const captureCtx = new AudioContext({ sampleRate: 48000 })
-        let speexWorklet: SpeexWorkletNode | null = null
-        if (speexRequested) {
+        let speexWorklet: SpeexWorkletNode | RnnoiseWorkletNode | null = null
+        let aiActive = false
+        if (aiNoiseSuppressionEnabledRef.current) {
+          try {
+            speexWorklet = await createRnnoiseWorklet(captureCtx)
+            aiActive = true
+          } catch (e) {
+            console.warn("[voixex] RNNoise failed:", e)
+            setDeviceError(t("notices.aiNoiseFailed"))
+          }
+        }
+        if (!aiActive && speexRequested) {
           try {
             speexWorklet = await createSpeexNoiseWorklet(captureCtx)
           } catch (e) {
@@ -2008,6 +2030,7 @@ export default function VoIPApp() {
             )
           }
         }
+        // Any worklet suppressor (AI or Speex) replaces the browser's own noise suppression.
         const speexActive = Boolean(speexWorklet)
 
         const preferredConstraints: MediaTrackConstraints = {
@@ -2176,7 +2199,9 @@ export default function VoIPApp() {
           const muteAmp = Math.max(0, Math.round(gateMuteThresholdRef.current))
           const openAmp = Math.max(muteAmp + 24, Math.round(gateOpenThresholdRef.current))
           const gateFloorRatio = Math.max(0.01, Math.min(0.5, gateFloorPctRef.current / 100))
-          const gatedPcm = gateEnabledRef.current
+          // The neural network already removes the noise between words; a gate on top would only
+          // clip quiet speech.
+          const gatedPcm = gateEnabledRef.current && !aiActive
             ? applyUplinkNoiseGate(pcm, muteAmp, openAmp, gateFloorRatio)
             : pcm
           // The mute button applies to the call; a mic test should still show and play the mic.
@@ -2332,7 +2357,8 @@ export default function VoIPApp() {
     noiseSuppressionEnabled,
     echoCancellationEnabled,
     autoGainControlEnabled,
-    speexNoiseSuppressionEnabled
+    speexNoiseSuppressionEnabled,
+    aiNoiseSuppressionEnabled
   ])
 
   useEffect(() => {
@@ -4911,7 +4937,17 @@ export default function VoIPApp() {
                 </p>
               </div>
 
-              {hasDesktopBridge ? (
+              <div className="rounded-lg border border-primary/40 bg-primary/5 p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <Label>{t("settings.aiNoise")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("settings.aiNoiseHint")}</p>
+                  </div>
+                  <Switch checked={aiNoiseSuppressionEnabled} onCheckedChange={setAiNoiseSuppressionEnabled} />
+                </div>
+              </div>
+
+              {hasDesktopBridge && !aiNoiseSuppressionEnabled ? (
                 <div className="rounded-lg border border-border p-3 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
