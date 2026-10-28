@@ -229,6 +229,13 @@ export const pt: TranslationDict = {
     empty: "Ainda não há ninguém"
   },
   settings: {
+    serverAppearanceHint: "Os membros veem este nome e ícone na lista de servidores e por cima dos canais. Vêm do servidor, ninguém os escreve.",
+    serverName: "Nome do servidor",
+    serverIconPick: "Escolher ícone…",
+    serverIconRemove: "Remover ícone",
+    serverAppearanceSaved: "Aparência do servidor guardada",
+    serverAppearanceFailed: "Não foi possível guardar a aparência do servidor",
+    serverIconBadFile: "Não foi possível ler a imagem",
     tabWindow: "Janela",
     closeToTray: "Fechar para a bandeja",
     closeToTrayHint: "O botão de fechar esconde o Voixex na bandeja (barra de menus no macOS) e a chamada continua. Saia pelo menu da bandeja.",
@@ -352,6 +359,8 @@ export const pt: TranslationDict = {
     threshold: "Limiar: {label}"
   },
   notices: {
+    channelBannerFailed: "Não foi possível guardar o banner do canal",
+    serverTooOldForAppearance: "Precisa de um servidor mais recente (0.6.4+)",
     serverTooOldForChannelRules: "As regras de canal precisam de um servidor mais recente (0.6.4+)",
     aiNoiseFailed: "A supressão de ruído com IA não iniciou; usando as configurações normais.",
     screenAudioPublishFailed: "Não foi possível enviar o som da transmissão ao LiveKit ({error}): quem assiste pelo celular não vai ouvir.",
@@ -430,7 +439,7 @@ export const pt: TranslationDict = {
   access: {
     stepAddress: "Endereço do servidor",
     stepAddressHint: "Por exemplo voip.example.com — ou cole um link: protocolo e porta são detectados sozinhos.",
-    addressMore: "Porta, protocolo e nome",
+    addressMore: "Porta e protocolo",
     stepNick: "Como devem chamar você aqui?",
     stepNickHint: "Seu nick é visível para os outros membros, 2–32 caracteres.",
     stepProtection: "Como proteger seu perfil?",

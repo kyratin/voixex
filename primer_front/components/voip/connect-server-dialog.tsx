@@ -52,17 +52,6 @@ export function ConnectServerDialog({ draft, onOpenChange, onSave }: ConnectServ
         {value ? (
           <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="space-y-4 px-6 py-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="connect-list-name">{t("connect.nameInList")}</Label>
-                <Input
-                  id="connect-list-name"
-                  className="h-9"
-                  value={value.serverName}
-                  onChange={(e) => set("serverName", e.target.value)}
-                  placeholder={t("connect.namePlaceholder")}
-                />
-              </div>
-
               <div className="grid grid-cols-[1fr_5.5rem] gap-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="connect-host">{t("connect.host")}</Label>

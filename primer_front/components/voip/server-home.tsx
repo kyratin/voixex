@@ -1,6 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
+import { ServerIcon } from "@/components/voip/server-icon"
 import { Archive, AudioLines, ChevronDown, FileKey, KeyRound, LockKeyhole, MoreHorizontal, Pencil, Plus, Settings, ShieldCheck, Trash2 } from "lucide-react"
 import { Spinner } from "@/components/ui/spinner"
 import {
@@ -10,13 +11,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu"
-import { avatarGradient } from "@/lib/avatar-colors"
 import { authLevel, type AuthMode } from "@/lib/voip-client"
 import { useI18n } from "@/lib/i18n/provider"
 
 export type ServerCardInfo = {
   id: string
   label: string
+  /** The server's icon (sent by the server); null = first letter. */
+  iconUrl: string | null
   address: string
   secure: boolean
   /** Protection level chosen on this server; null = old unprotected profile. */
@@ -163,12 +165,7 @@ export function ServerHome({
                 )}
               >
                 <div className="flex items-start justify-between">
-                  <div
-                    className="flex size-10 items-center justify-center rounded-xl text-lg font-bold text-white"
-                    style={{ background: avatarGradient(server.id) }}
-                  >
-                    {server.label.slice(0, 1).toUpperCase() || "S"}
-                  </div>
+                  <ServerIcon name={server.label} iconUrl={server.iconUrl} seed={server.id} className="size-10 text-lg" />
                   {busy ? (
                     <Spinner className="h-4 w-4" />
                   ) : (

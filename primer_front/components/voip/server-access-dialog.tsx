@@ -434,10 +434,6 @@ export function ServerAccessDialog({
             </SelectContent>
           </Select>
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="access-label">{t("access.label")}</Label>
-          <Input id="access-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("access.labelPlaceholder")} />
-        </div>
       </div>
     </div>
   )
@@ -597,10 +593,6 @@ export function ServerAccessDialog({
                       <SelectItem value="http">{t("connect.httpWs")}</SelectItem>
                     </SelectContent>
                   </Select>
-                </div>
-                <div className="col-span-2 space-y-1.5">
-                  <Label htmlFor="access-label">{t("access.label")}</Label>
-                  <Input id="access-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("access.labelPlaceholder")} />
                 </div>
               </div>
             </details>

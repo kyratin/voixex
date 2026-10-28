@@ -227,6 +227,13 @@ export const en = {
     empty: "Nobody here yet"
   },
   settings: {
+    serverAppearanceHint: "Members see this name and icon in their server list and at the top of the channels. They come from the server, nobody types them.",
+    serverName: "Server name",
+    serverIconPick: "Choose icon…",
+    serverIconRemove: "Remove icon",
+    serverAppearanceSaved: "Server appearance saved",
+    serverAppearanceFailed: "Couldn't save the server appearance",
+    serverIconBadFile: "That image couldn't be read",
     tabWindow: "Window",
     closeToTray: "Close to the tray",
     closeToTrayHint: "The close button hides Voixex to the tray (menu bar on macOS) and keeps the call going. Quit from the tray menu.",
@@ -351,6 +358,8 @@ export const en = {
     threshold: "{label} threshold"
   },
   notices: {
+    channelBannerFailed: "Couldn't save the channel banner",
+    serverTooOldForAppearance: "This needs a newer server (0.6.4+)",
     serverTooOldForChannelRules: "Channel rules need a newer server (0.6.4+)",
     aiNoiseFailed: "AI noise suppression could not start; the regular settings are used.",
     screenAudioPublishFailed: "Stream sound could not be sent to LiveKit ({error}): phone viewers will not hear it.",
@@ -429,7 +438,7 @@ export const en = {
   access: {
     stepAddress: "Server address",
     stepAddressHint: "For example voip.example.com — or paste a link; protocol and port are picked up automatically.",
-    addressMore: "Port, protocol and name",
+    addressMore: "Port and protocol",
     stepNick: "What should people call you here?",
     stepNickHint: "Your nick is visible to other members, 2–32 characters.",
     stepProtection: "How to protect your profile?",

@@ -11,7 +11,9 @@ export type JoinResult = {
   authMode?: AuthMode
   /** Set when the member is below the server's minimum protection level: raise it before entering. */
   upgradeRequired?: { minLevel: number }
+  /** The server's own name and icon (set by its admins); shown instead of anything typed locally. */
   serverName?: string
+  serverIconUrl?: string | null
   bannerUrl?: string | null
   authToken: string
   mediaToken: string
@@ -51,7 +53,7 @@ export type RegisteredMember = {
 
 /** Voice channel rules set by admins (enforced by the server). */
 export type RoomPolicy = { allowMic: boolean; allowStreams: boolean }
-export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy }
+export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy; bannerUrl?: string | null }
 
 export type RealtimeState = {
   /** Every registered profile (empty until loaded or on servers without the endpoint). */
@@ -62,6 +64,9 @@ export type RealtimeState = {
   messagesByChannel: Record<string, ChatMessage[]>
   activeScreenShareByRoom: Record<string, string | null>
   serverBannerUrl: string | null
+  /** From the server (hello / appearance updates); null until known or on older servers. */
+  serverName: string | null
+  serverIconUrl: string | null
   me: {
     clientId: string
     displayName: string
@@ -263,6 +268,8 @@ export class VoipClient {
     messagesByChannel: {},
     activeScreenShareByRoom: {},
     serverBannerUrl: null,
+    serverName: null,
+    serverIconUrl: null,
     me: null,
     connection: { wsConnected: false, reconnecting: false }
   }
@@ -552,12 +559,42 @@ export class VoipClient {
       headers: { Authorization: `Bearer ${this.authToken}` }
     })
     if (!res.ok) throw new Error("server load failed")
-    const body = (await res.json()) as { id: string; name: string; bannerUrl?: string | null }
-    if (body.bannerUrl !== undefined) {
-      this.state.serverBannerUrl = body.bannerUrl?.trim() || null
-      this.emit()
-    }
+    const body = (await res.json()) as { id: string; name: string; bannerUrl?: string | null; iconUrl?: string | null }
+    if (body.bannerUrl !== undefined) this.state.serverBannerUrl = body.bannerUrl?.trim() || null
+    if (body.name) this.state.serverName = body.name
+    if (body.iconUrl !== undefined) this.state.serverIconUrl = body.iconUrl?.trim() || null
+    this.emit()
     return body
+  }
+
+  /** Admins: the server's name, icon and banner as every member sees them. */
+  async updateServerAppearance(serverId: string, patch: { name?: string; iconUrl?: string | null; bannerUrl?: string | null }) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${this.authToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    })
+    if (!res.ok) throw new Error("server appearance update failed")
+    const body = (await res.json()) as { name?: string; iconUrl?: string | null; bannerUrl: string | null }
+    // Servers before 0.6.4 ignore name and icon and answer with the banner only.
+    if (patch.name !== undefined && body.name === undefined) throw new ApiError("serverTooOldForAppearance", "server too old")
+    this.state.serverBannerUrl = body.bannerUrl?.trim() || null
+    if (body.name) this.state.serverName = body.name
+    if (body.iconUrl !== undefined) this.state.serverIconUrl = body.iconUrl?.trim() || null
+    this.emit()
+    return body
+  }
+
+  async setRoomBanner(serverId: string, roomId: string, bannerUrl: string | null) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/rooms/${roomId}/banner`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${this.authToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ bannerUrl })
+    })
+    if (res.status === 404) throw new ApiError("serverTooOldForAppearance", "server too old")
+    if (!res.ok) throw new Error("channel banner update failed")
   }
 
   async updateServerBanner(serverId: string, bannerUrl: string | null) {
@@ -696,6 +733,8 @@ export class VoipClient {
       messagesByChannel: {},
       activeScreenShareByRoom: {},
       serverBannerUrl: null,
+      serverName: null,
+      serverIconUrl: null,
       me: null,
       connection: { wsConnected: false, reconnecting: false }
     }
@@ -780,8 +819,16 @@ export class VoipClient {
         return
       }
       const typed = data as
-        | { type: "hello"; clientId: string; serverId: string; serverGeneration?: number; bannerUrl?: string | null }
-        | { type: "server_appearance_updated"; bannerUrl: string | null }
+        | {
+            type: "hello"
+            clientId: string
+            serverId: string
+            serverGeneration?: number
+            bannerUrl?: string | null
+            serverName?: string
+            iconUrl?: string | null
+          }
+        | { type: "server_appearance_updated"; bannerUrl: string | null; name?: string; iconUrl?: string | null }
         | { type: "members_changed"; clientId?: string }
         | { type: "rooms_snapshot"; rooms: RoomInfo[] }
         | { type: "rooms_updated"; rooms: RoomInfo[] }
@@ -807,8 +854,12 @@ export class VoipClient {
         if (typed.bannerUrl !== undefined) {
           this.state.serverBannerUrl = typed.bannerUrl?.trim() || null
         }
+        if (typed.serverName) this.state.serverName = typed.serverName
+        if (typed.iconUrl !== undefined) this.state.serverIconUrl = typed.iconUrl?.trim() || null
       } else if (typed.type === "server_appearance_updated") {
         this.state.serverBannerUrl = typed.bannerUrl?.trim() || null
+        if (typed.name) this.state.serverName = typed.name
+        if (typed.iconUrl !== undefined) this.state.serverIconUrl = typed.iconUrl?.trim() || null
       } else if (typed.type === "members_changed") {
         void this.refreshMembers()
         // Our own roles changed: reload permissions so admin-only UI appears or disappears.
@@ -1004,8 +1055,8 @@ export class VoipClient {
     const textChannels = this.state.rooms.filter((room) => room.kind === "text")
     const voiceChannels = this.state.rooms.filter((room) => room.kind === "voice")
     return [
-      { id: "text", name: "Text", channels: textChannels.map((room) => ({ id: room.id, name: room.name, type: "text" as const })) },
-      { id: "voice", name: "Voice", channels: voiceChannels.map((room) => ({ id: room.id, name: room.name, type: "voice" as const, policy: room.policy })) }
+      { id: "text", name: "Text", channels: textChannels.map((room) => ({ id: room.id, name: room.name, type: "text" as const, bannerUrl: room.bannerUrl ?? null })) },
+      { id: "voice", name: "Voice", channels: voiceChannels.map((room) => ({ id: room.id, name: room.name, type: "voice" as const, policy: room.policy, bannerUrl: room.bannerUrl ?? null })) }
     ]
   }
 

@@ -60,6 +60,8 @@ type VoiceStageProps = {
   showingStreamWindow: boolean
   hasDesktopBridge: boolean
   canStartScreenShare?: boolean
+  /** Channel picture from the admins, shown dimmed behind the call. */
+  bannerUrl?: string | null
   /** Channel rules: microphones / streams turned off by an admin in this channel. */
   micLocked?: boolean
   streamsLocked?: boolean
@@ -271,6 +273,7 @@ export function VoiceStage({
   hasDesktopBridge,
   canStartScreenShare = true,
   micLocked = false,
+  bannerUrl = null,
   streamsLocked = false,
   desktopControls = true,
   screenShareWithAudio,
@@ -415,7 +418,7 @@ export function VoiceStage({
     <section
       ref={sectionRef}
       className={cn(
-        "flex flex-col overflow-hidden bg-stage",
+        "isolate flex flex-col overflow-hidden bg-stage",
         fullscreen
           ? "fixed inset-0 z-50 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] animate-in fade-in slide-in-from-bottom-8 duration-300"
           : cn(
@@ -428,6 +431,13 @@ export function VoiceStage({
       style={fullscreen || chosenHeight === null ? undefined : { height: chosenHeight, maxHeight: `calc(100% - ${CHAT_RESERVE_PX}px)` }}
       aria-label={channelName}
     >
+      {bannerUrl && !immersive ? (
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={bannerUrl} alt="" className="pointer-events-none absolute inset-0 -z-10 h-full w-full object-cover opacity-30" />
+          <div className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-b from-stage/40 via-stage/70 to-stage" />
+        </>
+      ) : null}
       <div
         className={cn(
           "z-10 flex min-w-0 items-center gap-2 text-xs text-muted-foreground",

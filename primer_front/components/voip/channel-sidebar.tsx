@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useI18n } from "@/lib/i18n/provider"
 import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
+import { ServerIcon } from "@/components/voip/server-icon"
 import { ConnectionSecurityBadge } from "@/components/voip/server-access-dialog"
 
 export interface Channel {
@@ -16,6 +17,8 @@ export interface Channel {
   type: "text" | "voice"
   /** Voice channels: what the admins allow (missing on older servers = everything). */
   policy?: { allowMic: boolean; allowStreams: boolean }
+  /** Picture for the channel's header, set by admins on the server. */
+  bannerUrl?: string | null
   isPrivate?: boolean
   unread?: boolean
   mentions?: number
@@ -49,6 +52,8 @@ interface ChannelSidebarProps {
   /** Connection (HTTPS/HTTP) and the member's protection level on this server. */
   security?: { secure: boolean; levelLabel: string; levelHint?: string }
   serverBannerUrl?: string | null
+  /** The server's icon from its admins. */
+  serverIconUrl?: string | null
   categories: ChannelCategory[]
   activeChannelId: string
   currentVoiceChannelId?: string
@@ -95,6 +100,7 @@ export function ChannelSidebar({
   onOpenServerSettings,
   security,
   serverBannerUrl,
+  serverIconUrl = null,
   categories,
   activeChannelId,
   currentVoiceChannelId = "",
@@ -167,9 +173,12 @@ export function ChannelSidebar({
             <div className="absolute inset-0 bg-gradient-to-t from-card via-card/70 to-transparent" />
           </>
         ) : null}
-        <div className="relative">
-          <p className="truncate text-lg font-bold text-foreground">{serverName}</p>
-          {serverAddress ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{serverAddress}</p> : null}
+        <div className="relative flex items-center gap-3">
+          {serverIconUrl ? <ServerIcon name={serverName} iconUrl={serverIconUrl} seed={serverName} className="size-10" /> : null}
+          <div className="min-w-0">
+            <p className="truncate text-lg font-bold text-foreground">{serverName}</p>
+            {serverAddress ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{serverAddress}</p> : null}
+          </div>
         </div>
       </div>
 

@@ -229,6 +229,13 @@ export const ru: TranslationDict = {
     empty: "Пока никого нет"
   },
   settings: {
+    serverAppearanceHint: "Это название и иконку участники видят в списке серверов и над каналами. Их передаёт сервер, вручную никто не вводит.",
+    serverName: "Название сервера",
+    serverIconPick: "Выбрать иконку…",
+    serverIconRemove: "Убрать иконку",
+    serverAppearanceSaved: "Оформление сервера сохранено",
+    serverAppearanceFailed: "Не удалось сохранить оформление сервера",
+    serverIconBadFile: "Не удалось прочитать картинку",
     tabWindow: "Окно",
     closeToTray: "Сворачивать в трей при закрытии",
     closeToTrayHint: "Кнопка закрытия прячет Voixex в трей (в строку меню на macOS), звонок продолжается. Выйти можно из меню трея.",
@@ -353,6 +360,8 @@ export const ru: TranslationDict = {
     threshold: "Порог: {label}"
   },
   notices: {
+    channelBannerFailed: "Не удалось сохранить баннер канала",
+    serverTooOldForAppearance: "Нужен сервер новее (0.6.4+)",
     serverTooOldForChannelRules: "Правилам каналов нужен сервер новее (0.6.4+)",
     aiNoiseFailed: "ИИ-шумоподавление не запустилось, используются обычные настройки.",
     screenAudioPublishFailed: "Звук трансляции не удалось отправить в LiveKit ({error}): зрители с телефонов его не услышат.",
@@ -431,7 +440,7 @@ export const ru: TranslationDict = {
   access: {
     stepAddress: "Адрес сервера",
     stepAddressHint: "Например, voip.example.com — или вставьте ссылку: протокол и порт определятся сами.",
-    addressMore: "Порт, протокол и название",
+    addressMore: "Порт и протокол",
     stepNick: "Как вас называть на этом сервере?",
     stepNickHint: "Ник видят другие участники, 2–32 символа.",
     stepProtection: "Как защитить профиль?",

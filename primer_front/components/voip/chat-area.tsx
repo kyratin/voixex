@@ -32,6 +32,8 @@ export interface Message {
 
 interface ChatAreaProps {
   channelName: string
+  /** Header picture set by admins for this channel. */
+  bannerUrl?: string | null
   channelType: "text" | "voice"
   messages: Message[]
   onSendMessage: (content: string) => void
@@ -71,6 +73,7 @@ function HeaderButton({ label, active, onClick, children }: { label: string; act
 
 export function ChatArea({
   channelName,
+  bannerUrl = null,
   messages,
   onSendMessage,
   onUploadAttachment,
@@ -157,20 +160,27 @@ export function ChatArea({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
-      <header className="flex h-14 shrink-0 items-center gap-3 bg-card px-3 sm:px-5">
+      <header className={cn("relative isolate flex shrink-0 items-center gap-3 overflow-hidden bg-card px-3 sm:px-5", bannerUrl ? "h-24 items-end pb-3" : "h-14")}>
+        {bannerUrl ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={bannerUrl} alt="" className="pointer-events-none absolute inset-0 -z-10 h-full w-full object-cover opacity-60" />
+            <div className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-t from-card via-card/60 to-transparent" />
+          </>
+        ) : null}
         {onOpenNavigation ? (
           <button
             type="button"
             onClick={onOpenNavigation}
             aria-label={t("sidebar.openChannels")}
-            className="-ml-1 rounded-md p-2 text-muted-foreground hover:bg-secondary hover:text-foreground md:hidden"
+            className="relative -ml-1 rounded-md p-2 text-muted-foreground hover:bg-secondary hover:text-foreground md:hidden"
           >
             <Menu className="h-5 w-5" />
           </button>
         ) : null}
-        <Hash className="h-5 w-5 shrink-0 text-muted-foreground" />
-        <h1 className="truncate text-sm font-bold text-foreground">{channelName}</h1>
-        <div className="ml-auto flex items-center gap-1">
+        <Hash className="relative h-5 w-5 shrink-0 text-muted-foreground" />
+        <h1 className="relative truncate text-sm font-bold text-foreground">{channelName}</h1>
+        <div className="relative ml-auto flex items-center gap-1">
           <HeaderButton label={t("chat.toggleMembers")} active={showMemberList} onClick={onToggleMemberList}>
             <Users className="h-4 w-4" />
           </HeaderButton>

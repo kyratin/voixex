@@ -60,6 +60,7 @@ import { ConnectServerDialog, type ConnectionDraft } from "@/components/voip/con
 import { LanguageSelector } from "@/components/voip/language-selector"
 import { VoiceMiniBar, VoiceStage } from "@/components/voip/voice-stage"
 import { MiniCallView, MiniCallWindow } from "@/components/voip/mini-call"
+import { ServerIcon, imageFileToIcon } from "@/components/voip/server-icon"
 import { TitleBar } from "@/components/voip/title-bar"
 import { useI18n } from "@/lib/i18n/provider"
 import { Headphones, Mic, Monitor, Server } from "lucide-react"
@@ -244,7 +245,10 @@ export default function VoIPApp() {
     | "server_members"
   type SavedServerProfile = {
     serverId: string
+    /** The server's own name (it sends it on sign-in and when an admin renames it). */
     serverName: string
+    /** The server's icon (image or data: URL), sent like the name. */
+    serverIconUrl?: string
     apiHost: string
     apiPort: string
     /** When true, API + WebSocket use https / wss. */
@@ -373,6 +377,10 @@ export default function VoIPApp() {
   const [categories, setCategories] = useState<ChannelCategory[]>([])
   /** Rules of the voice channel we are in (null: everything allowed / older server). */
   const [voiceRoomPolicy, setVoiceRoomPolicy] = useState<RoomPolicy | null>(null)
+  /** Name and icon the connected server announces (kept in its saved profile). */
+  const [liveServerAppearance, setLiveServerAppearance] = useState<{ name: string; iconUrl: string | null } | null>(null)
+  const [serverNameDraft, setServerNameDraft] = useState("")
+  const [savingAppearance, setSavingAppearance] = useState(false)
   const micLockedRef = useRef(false)
   const [savingRuleFor, setSavingRuleFor] = useState<string | null>(null)
   const [voiceUsers, setVoiceUsers] = useState<Record<string, Array<{ id: string; name: string; avatar: string; isMuted?: boolean; isDeafened?: boolean; isSpeaking?: boolean; isScreenSharing?: boolean; isWatchingScreen?: boolean }>>>({})
@@ -767,6 +775,11 @@ export default function VoIPApp() {
       }
       setCanManageServer(Boolean(u.me?.permissions?.manage_server))
 
+      if (u.serverName) {
+        const name = u.serverName
+        const iconUrl = u.serverIconUrl ?? null
+        setLiveServerAppearance((prev) => (prev && prev.name === name && prev.iconUrl === iconUrl ? prev : { name, iconUrl }))
+      }
       if (u.serverBannerUrl !== undefined) {
         const bannerUrl = u.serverBannerUrl?.trim() || undefined
         setServerAppearance((prev) => {
@@ -2455,16 +2468,37 @@ export default function VoIPApp() {
     }
   }
 
-  const saveChannelBanner = () => {
+  /** Channel banners live on the server, so every member sees them (they used to stay on one device). */
+  const saveChannelBanner = async () => {
     if (!activeServerId || !channelBannerChannelId) return
-    const banners = { ...(serverAppearance.channelBanners ?? {}) }
-    const url = channelBannerDraft.trim()
-    if (url) banners[channelBannerChannelId] = url
-    else delete banners[channelBannerChannelId]
-    const next: ServerAppearance = { ...serverAppearance, channelBanners: banners }
-    saveServerAppearance(activeServerId, next)
-    setServerAppearance(next)
-    toast.success(t("notices.channelBannerSaved"))
+    try {
+      await uiClient.setRoomBanner(activeServerId, channelBannerChannelId, channelBannerDraft.trim() || null)
+      toast.success(t("notices.channelBannerSaved"))
+    } catch (e) {
+      toast.error(errorText(e, "notices.channelBannerFailed"))
+    }
+  }
+
+  const saveServerAppearance_ = async (patch: { name?: string; iconUrl?: string | null }) => {
+    if (!activeServerId) return
+    setSavingAppearance(true)
+    try {
+      await uiClient.updateServerAppearance(activeServerId, patch)
+      toast.success(t("settings.serverAppearanceSaved"))
+    } catch (e) {
+      toast.error(errorText(e, "settings.serverAppearanceFailed"))
+    } finally {
+      setSavingAppearance(false)
+    }
+  }
+
+  const pickServerIcon = async (file: File | undefined) => {
+    if (!file) return
+    try {
+      await saveServerAppearance_({ iconUrl: await imageFileToIcon(file) })
+    } catch {
+      toast.error(t("settings.serverIconBadFile"))
+    }
   }
 
   useEffect(() => {
@@ -3754,9 +3788,10 @@ export default function VoIPApp() {
         join = await uiClient.joinServer(password, clientId, normalizedDisplayName, superPassword || undefined)
       }
       const joinedServerId = join.serverId
-      const joinedServerName = join.serverName ?? "Server"
+      // The server names itself; what was typed is only a fallback for servers before 0.6.4.
       const effectiveListName =
-        (preset?.serverName?.trim() || connectServerListName.trim() || joinedServerName).trim() || "Server"
+        (join.serverName?.trim() || preset?.serverName?.trim() || connectServerListName.trim()).trim() || "Server"
+      const joinedIconUrl = join.serverIconUrl === undefined ? preset?.serverIconUrl : join.serverIconUrl?.trim() || undefined
       // Drop the old entry for this server (same host:port or same server id) so it is replaced, not duplicated.
       const withoutSameHostForName = savedServers.filter(
         (s) => !(s.apiHost === host && s.apiPort === port) && s.serverId !== joinedServerId
@@ -3859,6 +3894,7 @@ export default function VoIPApp() {
             // Nothing secret is kept for a protected profile: nick and password are typed each time.
             serverId: joinedServerId,
             serverName: effectiveListName,
+            serverIconUrl: joinedIconUrl,
             apiHost: host,
             apiPort: port,
             apiUseHttps: resolvedUseHttps,
@@ -3875,6 +3911,7 @@ export default function VoIPApp() {
         : {
             serverId: joinedServerId,
             serverName: effectiveListName,
+            serverIconUrl: joinedIconUrl,
             apiHost: host,
             apiPort: port,
             apiUseHttps: resolvedUseHttps,
@@ -3940,6 +3977,7 @@ export default function VoIPApp() {
   /** Server administration lives in its own dialog and is only reachable for admins. */
   const openServerSettings = (initialTab: AppSettingsTab = "server_general") => {
     if (!canOpenServerSettings) return
+    setServerNameDraft(savedServers.find((s) => s.serverId === activeServerId)?.serverName ?? "")
     setAppSettingsTab(initialTab)
     setShowAppSettings(true)
   }
@@ -4085,6 +4123,17 @@ export default function VoIPApp() {
       setCreatingChannel(false)
     }
   }
+
+  // The server renamed itself or changed its icon: keep the saved profile (server list) in step.
+  useEffect(() => {
+    if (!liveServerAppearance || !activeServerId) return
+    const saved = savedServers.find((s) => s.serverId === activeServerId)
+    if (!saved) return
+    const iconUrl = liveServerAppearance.iconUrl ?? undefined
+    if (saved.serverName === liveServerAppearance.name && saved.serverIconUrl === iconUrl) return
+    updateSavedServer(activeServerId, { serverName: liveServerAppearance.name, serverIconUrl: iconUrl })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveServerAppearance, activeServerId, savedServers])
 
   const persistSavedServers = (next: SavedServerProfile[]) => {
     setSavedServers(next)
@@ -4551,6 +4600,7 @@ export default function VoIPApp() {
       savedServers.map((s) => ({
         id: s.serverId,
         label: s.serverName || s.apiHost,
+        iconUrl: s.serverIconUrl ?? null,
         address: s.apiPort ? `${s.apiHost}:${s.apiPort}` : s.apiHost,
         secure: Boolean(s.apiUseHttps),
         authMode: s.authMode ?? null,
@@ -4713,6 +4763,7 @@ export default function VoIPApp() {
                   hasDesktopBridge={hasDesktopBridge}
                   canStartScreenShare={canStartScreenShare && !streamsLocked}
                   micLocked={micLocked}
+                  bannerUrl={allChannels.find((c) => c.id === currentVoiceChannel)?.bannerUrl ?? null}
                   streamsLocked={streamsLocked}
                   desktopControls={!isMobileApp}
                   screenShareWithAudio={screenShareWithAudio}
@@ -4791,6 +4842,7 @@ export default function VoIPApp() {
           >
             <ChannelSidebar
               serverName={servers.find((s) => s.id === activeServerId)?.name || t("common.noServer")}
+              serverIconUrl={activeProfile?.serverIconUrl ?? null}
               serverAddress={activeProfile ? (activeProfile.apiPort ? `${activeProfile.apiHost}:${activeProfile.apiPort}` : activeProfile.apiHost) : undefined}
               onLeaveServer={() => void leaveServer()}
               onOpenServerSettings={canOpenServerSettings ? () => openServerSettings() : undefined}
@@ -4868,6 +4920,7 @@ export default function VoIPApp() {
         ) : (
           <ChatArea
             channelName={activeChannel?.type === "text" ? activeChannel.name : ""}
+            bannerUrl={activeChannel?.type === "text" ? (activeChannel.bannerUrl ?? null) : null}
             channelType="text"
             messages={activeChannel?.type === "text" ? messages : []}
             onSendMessage={handleSendMessage}
@@ -5301,8 +5354,44 @@ export default function VoIPApp() {
                   describeError={describeAuthError}
                 />
               ) : null}
-              <div className="rounded-lg border border-border p-4 space-y-2">
-                <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverLabel")}</span><span className="text-sm font-medium">{servers.find((s) => s.id === activeServerId)?.name ?? t("common.unknown")}</span></div>
+              <div className="space-y-4 rounded-lg border border-border p-4">
+                <p className="text-xs text-muted-foreground">{t("settings.serverAppearanceHint")}</p>
+                <div className="flex items-center gap-4">
+                  <ServerIcon name={serverNameDraft || activeProfile?.serverName || ""} iconUrl={activeProfile?.serverIconUrl ?? null} seed={activeServerId} className="size-16 text-2xl" />
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" asChild disabled={savingAppearance}>
+                      <label className="cursor-pointer">
+                        {t("settings.serverIconPick")}
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/gif"
+                          className="hidden"
+                          onChange={(e) => {
+                            void pickServerIcon(e.target.files?.[0])
+                            e.target.value = ""
+                          }}
+                        />
+                      </label>
+                    </Button>
+                    {activeProfile?.serverIconUrl ? (
+                      <Button size="sm" variant="ghost" disabled={savingAppearance} onClick={() => void saveServerAppearance_({ iconUrl: null })}>
+                        {t("settings.serverIconRemove")}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="server-name">{t("settings.serverName")}</Label>
+                  <div className="flex gap-2">
+                    <Input id="server-name" value={serverNameDraft} maxLength={64} onChange={(e) => setServerNameDraft(e.target.value)} />
+                    <Button
+                      onClick={() => void saveServerAppearance_({ name: serverNameDraft.trim() })}
+                      disabled={savingAppearance || !serverNameDraft.trim() || serverNameDraft.trim() === activeProfile?.serverName}
+                    >
+                      {t("common.save")}
+                    </Button>
+                  </div>
+                </div>
                 <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">{t("settings.serverId")}</span><span className="text-xs font-mono text-muted-foreground">{activeServerId}</span></div>
               </div>
               <div className="space-y-2">
@@ -5330,7 +5419,7 @@ export default function VoIPApp() {
                   onChange={(e) => {
                     const id = e.target.value
                     setChannelBannerChannelId(id)
-                    setChannelBannerDraft(id ? (serverAppearance.channelBanners?.[id] ?? "") : "")
+                    setChannelBannerDraft(id ? (allChannels.find((c) => c.id === id)?.bannerUrl ?? "") : "")
                   }}
                 >
                   <option value="">{t("settings.selectChannel")}</option>
@@ -5346,7 +5435,13 @@ export default function VoIPApp() {
                   placeholder="https://example.com/channel-banner.jpg"
                   disabled={!channelBannerChannelId}
                 />
-                <Button size="sm" onClick={saveChannelBanner} disabled={!channelBannerChannelId}>
+                {channelBannerDraft.trim() ? (
+                  <div className="overflow-hidden rounded-lg border border-border">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={channelBannerDraft.trim()} alt="" className="h-20 w-full object-cover" />
+                  </div>
+                ) : null}
+                <Button size="sm" onClick={() => void saveChannelBanner()} disabled={!channelBannerChannelId}>
                   {t("settings.saveChannelBanner")}
                 </Button>
               </div>
