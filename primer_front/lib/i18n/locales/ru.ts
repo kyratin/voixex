@@ -93,6 +93,7 @@ export const ru: TranslationDict = {
     undeafen: "Слышать снова"
   },
   voice: {
+    resizeStage: "Потяните, чтобы изменить размер окна звонка · двойной клик — сбросить",
     streamContent: "Что показываете",
     contentMotion: "Видео и игры",
     contentDetail: "Текст и код",

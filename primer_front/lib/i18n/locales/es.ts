@@ -93,6 +93,7 @@ export const es: TranslationDict = {
     undeafen: "Quitar ensordecer"
   },
   voice: {
+    resizeStage: "Arrastra para cambiar el tamaño de la llamada · doble clic para restablecer",
     streamContent: "Contenido",
     contentMotion: "Vídeo y juegos",
     contentDetail: "Texto y código",

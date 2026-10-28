@@ -91,6 +91,7 @@ export const en = {
     undeafen: "Undeafen"
   },
   voice: {
+    resizeStage: "Drag to resize the call · double-click to reset",
     streamContent: "Content",
     contentMotion: "Video & games",
     contentDetail: "Text & code",

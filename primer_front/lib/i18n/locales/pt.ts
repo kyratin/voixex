@@ -93,6 +93,7 @@ export const pt: TranslationDict = {
     undeafen: "Ouvir novamente"
   },
   voice: {
+    resizeStage: "Arraste para redimensionar a chamada · duplo clique para repor",
     streamContent: "Conteúdo",
     contentMotion: "Vídeo e jogos",
     contentDetail: "Texto e código",

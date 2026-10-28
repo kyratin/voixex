@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type ReactNode, type Ref, type RefObject } from "react"
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref, type RefObject } from "react"
 import {
   Eye,
   EyeOff,
@@ -218,6 +218,31 @@ function ParticipantTile({
  * Voice "stage" shown above the open text channel while the member is in voice: participant
  * tiles, or the screen share when someone streams, with a floating control dock.
  */
+/** The inline stage's height chosen by dragging its bottom edge, separately with and without a stream. */
+const STAGE_HEIGHTS_KEY = "voixex-stage-heights"
+type StageHeights = { idle: number | null; video: number | null }
+/** The chat below keeps at least this much room (its header, a few messages, the composer). */
+const CHAT_RESERVE_PX = 260
+const STAGE_MIN_PX = { idle: 150, video: 220 }
+
+function readStageHeights(): StageHeights {
+  try {
+    const v = JSON.parse(localStorage.getItem(STAGE_HEIGHTS_KEY) ?? "{}") as Partial<StageHeights>
+    const ok = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : null)
+    return { idle: ok(v.idle), video: ok(v.video) }
+  } catch {
+    return { idle: null, video: null }
+  }
+}
+
+function saveStageHeights(next: StageHeights) {
+  try {
+    localStorage.setItem(STAGE_HEIGHTS_KEY, JSON.stringify(next))
+  } catch {
+    /* only this session */
+  }
+}
+
 export function VoiceStage({
   roomId,
   channelName,
@@ -283,7 +308,62 @@ export function VoiceStage({
   const canPopOut = Boolean(activeScreenSharerName || hasStream || isScreenSharing)
   const showsVideo = isScreenSharing || hasStream || expectingStream
   const live = Boolean(activeScreenSharerName || isScreenSharing)
-  const largeTiles = participants.length <= 2
+  const sectionRef = useRef<HTMLElement>(null)
+  const [heights, setHeights] = useState<StageHeights>({ idle: null, video: null })
+  useEffect(() => setHeights(readStageHeights()), [])
+  /** Height while the edge is being dragged (no transition then). */
+  const [dragHeight, setDragHeight] = useState<number | null>(null)
+  const heightMode = showsVideo ? "video" : "idle"
+  const chosenHeight = dragHeight ?? heights[heightMode]
+
+  const maxStageHeight = () => {
+    const parent = sectionRef.current?.parentElement
+    return Math.max(STAGE_MIN_PX[heightMode], (parent?.clientHeight ?? window.innerHeight) - CHAT_RESERVE_PX)
+  }
+  const clampHeight = (h: number) => Math.round(Math.min(maxStageHeight(), Math.max(STAGE_MIN_PX[heightMode], h)))
+  const commitHeight = (h: number | null) => {
+    setHeights((prev) => {
+      const next = { ...prev, [heightMode]: h }
+      saveStageHeights(next)
+      return next
+    })
+  }
+  const startResize = (e: ReactPointerEvent) => {
+    const section = sectionRef.current
+    if (!section || e.button !== 0) return
+    e.preventDefault()
+    const startY = e.clientY
+    const startHeight = section.getBoundingClientRect().height
+    let latest = startHeight
+    setDragHeight(startHeight)
+    const move = (ev: PointerEvent) => {
+      latest = clampHeight(startHeight + ev.clientY - startY)
+      setDragHeight(latest)
+    }
+    const end = () => {
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", end)
+      window.removeEventListener("pointercancel", end)
+      document.body.style.cursor = ""
+      document.body.style.userSelect = ""
+      setDragHeight(null)
+      commitHeight(latest)
+    }
+    document.body.style.cursor = "row-resize"
+    document.body.style.userSelect = "none"
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", end)
+    window.addEventListener("pointercancel", end)
+  }
+  const resizeWithKeys = (e: ReactKeyboardEvent) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return
+    e.preventDefault()
+    const current = sectionRef.current?.getBoundingClientRect().height ?? 0
+    commitHeight(clampHeight(current + (e.key === "ArrowDown" ? 32 : -32)))
+  }
+  // A tall stage has room for big tiles in several rows.
+  const roomy = !fullscreen && (chosenHeight ?? 0) >= 420
+  const largeTiles = participants.length <= 2 || roomy
   // "Stream hidden" shows for 1.5 s after hiding, then only the participants remain.
   const [hiddenNotice, setHiddenNotice] = useState(false)
   useEffect(() => {
@@ -299,7 +379,7 @@ export function VoiceStage({
             className={cn(
               fullscreen
                 ? cn("grid w-full gap-3 overflow-y-auto", participants.length > 1 ? "grid-cols-2" : "max-w-xs grid-cols-1")
-                : "flex max-w-full items-center gap-3 overflow-x-auto px-2 pb-1"
+                : "flex max-h-full max-w-full flex-wrap content-center items-center justify-center gap-3 overflow-y-auto px-2 pb-1"
             )}
           >
             {participants.map((user) => {
@@ -328,17 +408,19 @@ export function VoiceStage({
 
   return (
     <section
+      ref={sectionRef}
       className={cn(
         "flex flex-col overflow-hidden bg-stage",
         fullscreen
           ? "fixed inset-0 z-50 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)] animate-in fade-in slide-in-from-bottom-8 duration-300"
           : cn(
               "relative mx-4 mt-4 shrink-0 rounded-xl animate-in fade-in slide-in-from-top-3 duration-300",
-              // Grows and shrinks smoothly when a stream starts or stops.
-              "transition-[height] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
-              showsVideo ? "h-[min(58vh,620px)]" : "h-64"
+              // Grows and shrinks smoothly when a stream starts or stops (not while dragging).
+              dragHeight === null && "transition-[height] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]",
+              chosenHeight === null && (showsVideo ? "h-[min(58vh,620px)]" : "h-64")
             )
       )}
+      style={fullscreen || chosenHeight === null ? undefined : { height: chosenHeight, maxHeight: `calc(100% - ${CHAT_RESERVE_PX}px)` }}
       aria-label={channelName}
     >
       <div
@@ -676,6 +758,28 @@ export function VoiceStage({
           <PhoneOff className="h-4 w-4" />
         </DockButton>
       </div>
+
+      {fullscreen ? null : (
+        // Drag the bottom edge to give the call more or less room; double-click resets.
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label={t("voice.resizeStage")}
+          title={t("voice.resizeStage")}
+          tabIndex={0}
+          onPointerDown={startResize}
+          onDoubleClick={() => commitHeight(null)}
+          onKeyDown={resizeWithKeys}
+          className="group absolute inset-x-0 bottom-0 z-20 flex h-3 cursor-row-resize items-end justify-center pb-0.5 focus-visible:outline-none"
+        >
+          <span
+            className={cn(
+              "h-1 w-10 rounded-full bg-muted-foreground/30 transition-colors group-hover:bg-muted-foreground/70 group-focus-visible:bg-primary",
+              dragHeight !== null && "bg-primary"
+            )}
+          />
+        </div>
+      )}
     </section>
   )
 }
