@@ -3086,7 +3086,15 @@ export default function VoIPApp() {
     // Servers before 0.6.2 ignore purpose=screen and return our own identity, which would kick
     // this phone's voice/stream session out of the LiveKit room.
     if (!jwtSubject(token.token).endsWith(":screen")) throw new Error(t("notices.serverTooOldForPhoneShare"))
-    const result = await startNativeScreenShare(token.url, token.token)
+    const [, heightRaw] = screenResolution.split("x").map((v) => Number(v))
+    const result = await startNativeScreenShare({
+      url: token.url,
+      token: token.token,
+      maxHeight: Number.isFinite(heightRaw) ? heightRaw : 1080,
+      fps: screenFps,
+      bitrateKbps: screenBitrateKbps,
+      content: screenContent
+    })
     if (!result.started) {
       if (result.reason === "denied") return
       throw new Error(result.reason || t("notices.toggleScreenShareFailed"))

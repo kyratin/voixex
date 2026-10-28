@@ -17,13 +17,23 @@ const VoixexCall = registerPlugin<{
 
 /** Native screen capture published to LiveKit (the WebView has no getDisplayMedia). */
 const VoixexScreenShare = registerPlugin<{
-  start(options: { url: string; token: string }): Promise<{ started: boolean; reason?: string }>
+  start(options: NativeScreenShareOptions): Promise<{ started: boolean; reason?: string }>
   stop(): Promise<void>
   addListener(event: "stopped", listener: () => void): Promise<{ remove: () => Promise<void> }>
 }>("VoixexScreenShare")
 
-export async function startNativeScreenShare(url: string, token: string) {
-  return VoixexScreenShare.start({ url, token })
+type NativeScreenShareOptions = {
+  url: string
+  token: string
+  /** Short side of the picture (1080 = 1080p, upright or sideways). */
+  maxHeight?: number
+  fps?: number
+  bitrateKbps?: number
+  content?: "motion" | "detail"
+}
+
+export async function startNativeScreenShare(options: NativeScreenShareOptions) {
+  return VoixexScreenShare.start(options)
 }
 
 export async function stopNativeScreenShare() {
