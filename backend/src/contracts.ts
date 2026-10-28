@@ -12,6 +12,11 @@ export type RosterMember = {
   mediaEngine?: MediaEngineMode
 }
 
+/** Per voice channel rules set by admins; the server enforces them. */
+export type RoomPolicy = { allowMic: boolean; allowStreams: boolean }
+
+export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy }
+
 export type WsClientEvent =
   | { type: "join_room"; roomId: string }
   | { type: "leave_room" }
@@ -46,8 +51,10 @@ export type WsServerEvent =
   | { type: "members_changed"; clientId?: string }
   /** ~10 Hz while someone in the room talks: loudness 0..1 per speaking member (UI rings). */
   | { type: "voice_levels"; roomId: string; levels: Record<string, number> }
-  | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
-  | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
+  | { type: "rooms_snapshot"; rooms: RoomInfo[] }
+  | { type: "rooms_updated"; rooms: RoomInfo[] }
+  /** Something the channel's rules don't allow (the action was not applied). */
+  | { type: "policy_denied"; roomId: string; what: "mic" | "stream" }
   | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
   | {
       type: "presence_snapshot"

@@ -63,6 +63,8 @@ chmod 600 "$cfg"
 export LIVEKIT_API_KEY="$LK_KEY"
 export LIVEKIT_API_SECRET
 export LIVEKIT_URL="${LIVEKIT_PUBLIC_URL:-ws://${PUBLIC_UDP_HOST:-localhost}:${LK_PORT}}"
+# The backend talks to its own SFU directly (channel rules change participants' permissions).
+export LIVEKIT_API_URL="${LIVEKIT_API_URL:-http://127.0.0.1:${LK_PORT}}"
 
 # LiveKit also reads UDP_PORT, NODE_IP, REDIS_* ... from the environment, and those override the
 # config file. The backend's own UDP_PORT (voice mixer, 50000) must not leak into the SFU,

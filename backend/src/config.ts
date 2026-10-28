@@ -43,6 +43,8 @@ export const config = {
   voiceTrace: process.env.VOICE_TRACE === "1" || process.env.VOICE_TRACE === "true",
   /** Optional self-hosted LiveKit SFU endpoint, e.g. wss://livekit.example.com. */
   livekitUrl: process.env.LIVEKIT_URL?.trim() ?? "",
+  /** LiveKit API for the server itself (permission changes); the embedded SFU is on localhost. */
+  livekitApiUrl: (process.env.LIVEKIT_API_URL?.trim() || process.env.LIVEKIT_URL?.trim() || "").replace(/^ws/, "http"),
   livekitApiKey: process.env.LIVEKIT_API_KEY?.trim() ?? "",
   livekitApiSecret: process.env.LIVEKIT_API_SECRET?.trim() ?? "",
   livekitTokenTtlSec: Number(process.env.LIVEKIT_TOKEN_TTL_SEC ?? 60 * 30),
