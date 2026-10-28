@@ -21,6 +21,7 @@ import { MemberSecurityAdmin, MySecurityPanel, ServerSecurityPolicy } from "@/co
 import { RolesAdmin } from "@/components/voip/roles-admin"
 import { DeviceCertificates, type DeviceCertificate } from "@/components/voip/device-certificates"
 import type { VoixexShellAction, VoixexStoredIdentity } from "@/types/electron-voice"
+import type { RoomPolicy } from "@/lib/voip-client"
 import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-sidebar"
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
@@ -61,7 +62,7 @@ import { VoiceMiniBar, VoiceStage } from "@/components/voip/voice-stage"
 import { MiniCallView, MiniCallWindow } from "@/components/voip/mini-call"
 import { TitleBar } from "@/components/voip/title-bar"
 import { useI18n } from "@/lib/i18n/provider"
-import { Headphones, Server } from "lucide-react"
+import { Headphones, Mic, Monitor, Server } from "lucide-react"
 
 /** Build-time defaults for Electron (NEXT_PUBLIC_* inlined at `next build`). */
 function parseNextPublicApiBase(): { host: string; port: string; useHttps: boolean } | null {
@@ -370,6 +371,10 @@ export default function VoIPApp() {
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
   const [categories, setCategories] = useState<ChannelCategory[]>([])
+  /** Rules of the voice channel we are in (null: everything allowed / older server). */
+  const [voiceRoomPolicy, setVoiceRoomPolicy] = useState<RoomPolicy | null>(null)
+  const micLockedRef = useRef(false)
+  const [savingRuleFor, setSavingRuleFor] = useState<string | null>(null)
   const [voiceUsers, setVoiceUsers] = useState<Record<string, Array<{ id: string; name: string; avatar: string; isMuted?: boolean; isDeafened?: boolean; isSpeaking?: boolean; isScreenSharing?: boolean; isWatchingScreen?: boolean }>>>({})
   /** Bumps when peer volume localStorage changes so sidebar sliders re-read stored values. */
   const [peerVolumeRevision, setPeerVolumeRevision] = useState(0)
@@ -708,6 +713,8 @@ export default function VoIPApp() {
 
       const sidebarCategories = uiClient.toSidebarCategories()
       setCategories(sidebarCategories)
+      const voiceRooms = (split && v ? v : u).rooms
+      setVoiceRoomPolicy(voiceRooms.find((r) => r.id === currentVoiceChannel)?.policy ?? null)
       const channelNames: Record<string, string> = {}
       const channelTypes: Record<string, "voice" | "text"> = {}
       for (const category of sidebarCategories) {
@@ -1336,7 +1343,8 @@ export default function VoIPApp() {
     if (!webRtcSessionRef.current?.connected) return
     // UDP/WebSocket voice: nobody listens to the mic in LiveKit, and every republish renegotiates
     // the whole connection, which stalls a screen share for a moment.
-    if (mediaEngineRef.current !== "webrtc") {
+    // A channel without microphones: LiveKit would refuse the track anyway.
+    if (mediaEngineRef.current !== "webrtc" || micLockedRef.current) {
       void webRtcSessionRef.current.unpublishMic()
       return
     }
@@ -1488,7 +1496,7 @@ export default function VoIPApp() {
         const devices = (await window.electronVoice?.getAudioDevices()) as { inputId: string | null; outputId: string | null } | undefined
         await session.setOutputDevice(devices?.outputId ?? null)
         await session.setDeafened(deafenedRef.current)
-        const mic = mediaEngineRef.current === "webrtc" ? getWebRtcMicTrackFromPipeline() : null
+        const mic = mediaEngineRef.current === "webrtc" && !micLockedRef.current ? getWebRtcMicTrackFromPipeline() : null
         if (mic) {
           await session.publishMicTrack(mic)
           await session.setMuted(mutedRef.current)
@@ -2584,6 +2592,10 @@ export default function VoIPApp() {
   }
 
   const applyMute = (next: boolean) => {
+    if (!next && micLockedRef.current) {
+      toast.error(t("channelRules.micLocked"))
+      return
+    }
     localPresenceToggleRef.current = true
     setIsMuted(next)
     getVoiceWsClient().setMute(next)
@@ -3109,6 +3121,7 @@ export default function VoIPApp() {
   }
 
   const startScreenShare = async () => {
+    if (voiceRoomPolicy && !voiceRoomPolicy.allowStreams) throw new Error(t("channelRules.streamsLocked"))
     if (isMobileApp) return startMobileScreenShare()
     if (!hasDesktopBridge || !window.electronVoice) {
       throw new Error(t("notices.screenShareDesktopOnly"))
@@ -4007,6 +4020,50 @@ export default function VoIPApp() {
     setKeybindDraft({ toggleMute: "", toggleDeafen: "", pushToTalk: "" })
   }
 
+  const updateChannelRule = async (roomId: string, rule: keyof RoomPolicy, on: boolean) => {
+    if (!activeServerId) return
+    setSavingRuleFor(`${roomId}:${rule}`)
+    try {
+      await uiClient.setRoomPolicy(activeServerId, roomId, { [rule]: on })
+      await uiClient.getRooms(activeServerId)
+    } catch (e) {
+      toast.error(errorText(e, "channelRules.saveFailed"))
+    } finally {
+      setSavingRuleFor(null)
+    }
+  }
+
+  // Channel rules: a channel without microphones keeps us muted (and restores our own choice
+  // when we leave it or the rule is lifted); a channel without streams ends ours.
+  const micLocked = Boolean(isInVoice && voiceRoomPolicy && !voiceRoomPolicy.allowMic)
+  const streamsLocked = Boolean(isInVoice && voiceRoomPolicy && !voiceRoomPolicy.allowStreams)
+  micLockedRef.current = micLocked
+  const mutedBeforeLockRef = useRef<boolean | null>(null)
+  useEffect(() => {
+    republishWebRtcMicFromPipeline()
+    if (micLocked) {
+      if (mutedBeforeLockRef.current === null) mutedBeforeLockRef.current = mutedRef.current
+      if (!mutedRef.current) applyMute(true)
+    } else if (mutedBeforeLockRef.current !== null) {
+      const previous = mutedBeforeLockRef.current
+      mutedBeforeLockRef.current = null
+      if (isInVoiceRef.current && previous !== mutedRef.current) applyMute(previous)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [micLocked])
+  useEffect(() => {
+    if (!streamsLocked || !isScreenSharing) return
+    toast.error(t("channelRules.streamsLocked"))
+    void stopScreenShare()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamsLocked, isScreenSharing])
+  useEffect(() => {
+    const c = isVoiceSplit ? voiceClient : uiClient
+    return c.subscribePolicyDenied((_roomId, what) => {
+      toast.error(what === "mic" ? t("channelRules.micLocked") : t("channelRules.streamsLocked"))
+    })
+  }, [isVoiceSplit, voiceClient, uiClient, t])
+
   const createChannelFromSettings = async () => {
     if (!activeServerId || !canManageServer || creatingChannel) return
     const name = roomNameInput.trim()
@@ -4654,7 +4711,9 @@ export default function VoIPApp() {
                   streamVideoFullscreen={streamVideoFullscreen}
                   showingStreamWindow={showingStreamWindow}
                   hasDesktopBridge={hasDesktopBridge}
-                  canStartScreenShare={canStartScreenShare}
+                  canStartScreenShare={canStartScreenShare && !streamsLocked}
+                  micLocked={micLocked}
+                  streamsLocked={streamsLocked}
                   desktopControls={!isMobileApp}
                   screenShareWithAudio={screenShareWithAudio}
                   screenSources={screenSources}
@@ -5306,18 +5365,38 @@ export default function VoIPApp() {
                   {creatingChannel ? <><Spinner className="mr-2" /> {t("common.creating")}</> : t("common.create")}
                 </Button>
               </div>
-              <div className="max-h-60 overflow-auto rounded-lg border border-border">
+              <p className="text-xs text-muted-foreground">{t("channelRules.hint")}</p>
+              <div className="max-h-80 overflow-auto rounded-lg border border-border">
                 {allChannels.length === 0 ? (
                   <div className="p-4 text-center text-sm text-muted-foreground">{t("settings.noChannels")}</div>
                 ) : (
                   <div className="divide-y divide-border">
                     {allChannels.map((ch) => (
-                      <div key={ch.id} className="flex items-center justify-between px-3 py-2">
-                        <div className="flex items-center gap-2">
+                      <div key={ch.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-3 py-2">
+                        <div className="flex min-w-0 items-center gap-2">
                           <Badge variant="outline" className="text-[10px]">{ch.type === "voice" ? t("settings.voiceKind") : t("settings.textKind")}</Badge>
-                          <span className="text-sm">{ch.name}</span>
+                          <span className="truncate text-sm">{ch.name}</span>
                         </div>
-                        <span className="text-xs font-mono text-muted-foreground">{ch.id.slice(0, 8)}</span>
+                        {ch.type === "voice" ? (
+                          <div className="ml-auto flex items-center gap-4">
+                            {(["allowMic", "allowStreams"] as const).map((rule) => {
+                              const policy = ch.policy ?? { allowMic: true, allowStreams: true }
+                              return (
+                                <label key={rule} className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                                  {rule === "allowMic" ? <Mic className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
+                                  {rule === "allowMic" ? t("channelRules.mics") : t("channelRules.streams")}
+                                  <Switch
+                                    checked={policy[rule]}
+                                    disabled={!ch.policy || savingRuleFor === `${ch.id}:${rule}`}
+                                    onCheckedChange={(on) => void updateChannelRule(ch.id, rule, on)}
+                                  />
+                                </label>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <span className="text-xs font-mono text-muted-foreground">{ch.id.slice(0, 8)}</span>
+                        )}
                       </div>
                     ))}
                   </div>

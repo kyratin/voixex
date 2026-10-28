@@ -208,6 +208,16 @@ export const ru: TranslationDict = {
     unknownNick: "Профиль",
     unknownServer: "неизвестный сервер"
   },
+  channelRules: {
+    mics: "Микрофоны",
+    streams: "Стримы",
+    hint: "Правила голосового канала сразу действуют на всех, кто в нём: без микрофонов все заглушены, без стримов никто не может показать экран.",
+    micLocked: "Администратор выключил микрофоны в этом канале",
+    streamsLocked: "Администратор запретил стримы в этом канале",
+    micOffShort: "Микрофоны выключены",
+    streamsOffShort: "Стримы запрещены",
+    saveFailed: "Не удалось сохранить правило канала"
+  },
   tray: {
     open: "Открыть Voixex",
     quit: "Выйти из Voixex",
@@ -343,6 +353,7 @@ export const ru: TranslationDict = {
     threshold: "Порог: {label}"
   },
   notices: {
+    serverTooOldForChannelRules: "Правилам каналов нужен сервер новее (0.6.4+)",
     aiNoiseFailed: "ИИ-шумоподавление не запустилось, используются обычные настройки.",
     screenAudioPublishFailed: "Звук трансляции не удалось отправить в LiveKit ({error}): зрители с телефонов его не услышат.",
     screenAudioUnavailable: "Системный звук на этом компьютере захватить не удалось: зрители увидят экран без звука.",

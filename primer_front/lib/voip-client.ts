@@ -49,10 +49,14 @@ export type RegisteredMember = {
   joinedAt: string
 }
 
+/** Voice channel rules set by admins (enforced by the server). */
+export type RoomPolicy = { allowMic: boolean; allowStreams: boolean }
+export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy }
+
 export type RealtimeState = {
   /** Every registered profile (empty until loaded or on servers without the endpoint). */
   registeredMembers: RegisteredMember[]
-  rooms: Array<{ id: string; name: string; kind: "voice" | "text" }>
+  rooms: RoomInfo[]
   rosterByRoom: Record<string, RosterMember[]>
   lobby: RosterMember[]
   messagesByChannel: Record<string, ChatMessage[]>
@@ -272,6 +276,7 @@ export class VoipClient {
   private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
   /** fallback: a viewer needs the WebSocket stream; false (or old servers) = someone joined. */
   private screenResyncListeners = new Set<(roomId: string, fallback: boolean) => void>()
+  private policyDeniedListeners = new Set<(roomId: string, what: "mic" | "stream") => void>()
   
   setApiBase(url: string) {
     this.apiBase = url.replace(/\/+$/, "")
@@ -514,7 +519,7 @@ export class VoipClient {
       headers: { Authorization: `Bearer ${this.authToken}` }
     })
     if (!res.ok) throw new Error("rooms load failed")
-    const body = (await res.json()) as { rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
+    const body = (await res.json()) as { rooms: RoomInfo[] }
     this.state.rooms = body.rooms
     this.emit()
     return body.rooms
@@ -767,12 +772,19 @@ export class VoipClient {
         }
         return
       }
+      if (data.type === "policy_denied") {
+        const denied = data as { roomId?: string; what?: string }
+        if (typeof denied.roomId === "string" && (denied.what === "mic" || denied.what === "stream")) {
+          for (const cb of this.policyDeniedListeners) cb(denied.roomId, denied.what)
+        }
+        return
+      }
       const typed = data as
         | { type: "hello"; clientId: string; serverId: string; serverGeneration?: number; bannerUrl?: string | null }
         | { type: "server_appearance_updated"; bannerUrl: string | null }
         | { type: "members_changed"; clientId?: string }
-        | { type: "rooms_snapshot"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
-        | { type: "rooms_updated"; rooms: Array<{ id: string; name: string; kind: "voice" | "text" }> }
+        | { type: "rooms_snapshot"; rooms: RoomInfo[] }
+        | { type: "rooms_updated"; rooms: RoomInfo[] }
         | { type: "roster_snapshot"; roomId: string | null; members: RosterMember[] }
         | {
             type: "presence_snapshot"
@@ -960,6 +972,26 @@ export class VoipClient {
     }
   }
 
+  /** The server refused something the channel's rules don't allow (mic, stream). */
+  subscribePolicyDenied(cb: (roomId: string, what: "mic" | "stream") => void) {
+    this.policyDeniedListeners.add(cb)
+    return () => {
+      this.policyDeniedListeners.delete(cb)
+    }
+  }
+
+  async setRoomPolicy(serverId: string, roomId: string, patch: Partial<RoomPolicy>) {
+    if (!this.authToken) throw new Error("not authorized")
+    const res = await fetch(`${this.apiBase}/v1/servers/${serverId}/rooms/${roomId}/policy`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${this.authToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    })
+    if (res.status === 404) throw new ApiError("serverTooOldForChannelRules", "channel rules need a newer server")
+    if (!res.ok) throw new Error("channel rules update failed")
+    return ((await res.json()) as { policy: RoomPolicy }).policy
+  }
+
   /** Only the active screen sharer receives this (server targets their socket). */
   subscribeScreenResyncRequests(cb: (roomId: string, fallback: boolean) => void) {
     this.screenResyncListeners.add(cb)
@@ -973,7 +1005,7 @@ export class VoipClient {
     const voiceChannels = this.state.rooms.filter((room) => room.kind === "voice")
     return [
       { id: "text", name: "Text", channels: textChannels.map((room) => ({ id: room.id, name: room.name, type: "text" as const })) },
-      { id: "voice", name: "Voice", channels: voiceChannels.map((room) => ({ id: room.id, name: room.name, type: "voice" as const })) }
+      { id: "voice", name: "Voice", channels: voiceChannels.map((room) => ({ id: room.id, name: room.name, type: "voice" as const, policy: room.policy })) }
     ]
   }
 

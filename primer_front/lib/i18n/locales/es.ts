@@ -208,6 +208,16 @@ export const es: TranslationDict = {
     unknownNick: "Perfil",
     unknownServer: "servidor desconocido"
   },
+  channelRules: {
+    mics: "Micrófonos",
+    streams: "Streams",
+    hint: "Las reglas del canal de voz se aplican al instante a todos: sin micrófonos todos quedan silenciados, sin streams nadie puede compartir pantalla.",
+    micLocked: "Un administrador desactivó los micrófonos en este canal",
+    streamsLocked: "Un administrador desactivó los streams en este canal",
+    micOffShort: "Micrófonos desactivados",
+    streamsOffShort: "Streams desactivados",
+    saveFailed: "No se pudo guardar la regla del canal"
+  },
   tray: {
     open: "Abrir Voixex",
     quit: "Salir de Voixex",
@@ -342,6 +352,7 @@ export const es: TranslationDict = {
     threshold: "Umbral: {label}"
   },
   notices: {
+    serverTooOldForChannelRules: "Las reglas de canal necesitan un servidor más nuevo (0.6.4+)",
     aiNoiseFailed: "La supresión de ruido con IA no pudo iniciarse; se usan los ajustes normales.",
     screenAudioPublishFailed: "No se pudo enviar el sonido de la transmisión a LiveKit ({error}): quienes miran desde el teléfono no lo oirán.",
     screenAudioUnavailable: "No se pudo capturar el audio del sistema en este equipo: verán la pantalla sin sonido.",

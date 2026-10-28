@@ -206,6 +206,16 @@ export const en = {
     unknownNick: "Profile",
     unknownServer: "unknown server"
   },
+  channelRules: {
+    mics: "Microphones",
+    streams: "Streams",
+    hint: "Voice channel rules apply to everyone in the channel at once: without microphones everyone is muted, without streams nobody can share a screen.",
+    micLocked: "Microphones are turned off in this channel by an admin",
+    streamsLocked: "Streams are turned off in this channel by an admin",
+    micOffShort: "Microphones off",
+    streamsOffShort: "Streams off",
+    saveFailed: "Couldn't save the channel rule"
+  },
   tray: {
     open: "Open Voixex",
     quit: "Quit Voixex",
@@ -341,6 +351,7 @@ export const en = {
     threshold: "{label} threshold"
   },
   notices: {
+    serverTooOldForChannelRules: "Channel rules need a newer server (0.6.4+)",
     aiNoiseFailed: "AI noise suppression could not start; the regular settings are used.",
     screenAudioPublishFailed: "Stream sound could not be sent to LiveKit ({error}): phone viewers will not hear it.",
     screenAudioUnavailable: "System audio could not be captured on this computer: viewers see the screen without sound.",

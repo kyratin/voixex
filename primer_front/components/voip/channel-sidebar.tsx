@@ -1,7 +1,7 @@
 "use client"
 
 import { cn } from "@/lib/utils"
-import { ArrowLeft, ChevronDown, Hash, Lock, Settings, Volume2 } from "lucide-react"
+import { ArrowLeft, ChevronDown, Hash, Lock, MicOff, MonitorOff, Settings, Volume2 } from "lucide-react"
 import { useState } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
@@ -14,6 +14,8 @@ export interface Channel {
   id: string
   name: string
   type: "text" | "voice"
+  /** Voice channels: what the admins allow (missing on older servers = everything). */
+  policy?: { allowMic: boolean; allowStreams: boolean }
   isPrivate?: boolean
   unread?: boolean
   mentions?: number
@@ -219,6 +221,16 @@ export function ChannelSidebar({
                         )}
                         {channel.isPrivate ? <Lock className="h-3 w-3 shrink-0 opacity-50" /> : null}
                         <span className="min-w-0 truncate">{channel.name}</span>
+                        {channel.policy && !channel.policy.allowMic ? (
+                          <MicOff className="h-3 w-3 shrink-0 opacity-60" aria-label={t("channelRules.micOffShort")}>
+                            <title>{t("channelRules.micOffShort")}</title>
+                          </MicOff>
+                        ) : null}
+                        {channel.policy && !channel.policy.allowStreams ? (
+                          <MonitorOff className="h-3 w-3 shrink-0 opacity-60" aria-label={t("channelRules.streamsOffShort")}>
+                            <title>{t("channelRules.streamsOffShort")}</title>
+                          </MonitorOff>
+                        ) : null}
                         {live ? (
                           <span className="shrink-0 rounded bg-destructive px-1 py-px text-[9px] font-bold uppercase leading-none text-white">
                             Live

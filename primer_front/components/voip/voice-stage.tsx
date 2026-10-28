@@ -60,6 +60,9 @@ type VoiceStageProps = {
   showingStreamWindow: boolean
   hasDesktopBridge: boolean
   canStartScreenShare?: boolean
+  /** Channel rules: microphones / streams turned off by an admin in this channel. */
+  micLocked?: boolean
+  streamsLocked?: boolean
   /** False on phones: no pop-out windows, no capture source/quality settings, no local preview. */
   desktopControls?: boolean
   /** Phones: the stage covers the whole screen (like a call screen); onCollapse goes back to chat. */
@@ -267,6 +270,8 @@ export function VoiceStage({
   showingStreamWindow,
   hasDesktopBridge,
   canStartScreenShare = true,
+  micLocked = false,
+  streamsLocked = false,
   desktopControls = true,
   screenShareWithAudio,
   screenSources,
@@ -709,7 +714,12 @@ export function VoiceStage({
             : "absolute bottom-3 left-1/2 -translate-x-1/2 gap-1 p-1.5"
         )}
       >
-        <DockButton large={fullscreen} label={isMuted ? t("userPanel.unmute") : t("userPanel.mute")} active={isMuted} onClick={onToggleMute}>
+        <DockButton
+          large={fullscreen}
+          label={micLocked ? t("channelRules.micLocked") : isMuted ? t("userPanel.unmute") : t("userPanel.mute")}
+          active={isMuted}
+          onClick={onToggleMute}
+        >
           {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
         </DockButton>
         <DockButton large={fullscreen} label={isDeafened ? t("userPanel.undeafen") : t("userPanel.deafen")} active={isDeafened} onClick={onToggleDeafen}>
@@ -720,14 +730,16 @@ export function VoiceStage({
         <DockButton
           large={fullscreen}
           label={
-            !isScreenSharing && !canStartScreenShare
+            streamsLocked && !isScreenSharing
+              ? t("channelRules.streamsLocked")
+              : !isScreenSharing && !canStartScreenShare
               ? t("voice.streamBusyTooltip")
               : isScreenSharing
                 ? t("voice.stopSharingTooltip")
                 : t("voice.shareScreenTooltip")
           }
           active={isScreenSharing}
-          disabled={!hasDesktopBridge || (!isScreenSharing && !canStartScreenShare)}
+          disabled={!hasDesktopBridge || (!isScreenSharing && !canStartScreenShare && !streamsLocked)}
           onClick={onScreenShareToggle}
         >
           {isScreenSharing ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
