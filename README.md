@@ -122,11 +122,12 @@ docker run -d --name voixex \
   -p 18080:8080 -p 50000:50000/udp -p 50000:50000/tcp \
   -p 7880:7880 -p 7881:7881/tcp -p 7882:7882/udp \
   -e TOKEN_SECRET=<long-random> -e SUPERUSER_PASSWORD=<password> \
-  -e PUBLIC_UDP_HOST=<your-host> -v voixex-data:/data \
+  -e PUBLIC_UDP_HOST=<your-host> -e LIVEKIT_NODE_IP=<public-ip> \
+  -e DB_PATH=/data/voip.sqlite -v voixex-data:/data \
   kyratinkokko/voixex:latest
 ```
 
-Then add the server in the app by its address. HTTPS, LiveKit and Kubernetes notes are in the server branch README.
+`DB_PATH=/data/voip.sqlite` keeps the database on the volume (the image default is inside the container and is lost when it is recreated). Then add the server in the app by `<your-host>:18080`. HTTPS, LiveKit and Kubernetes notes are in the server branch README.
 
 ---
 
