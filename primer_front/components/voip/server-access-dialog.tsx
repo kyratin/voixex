@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Archive, ArrowRight, Check, FileKey, KeyRound, Lock, LockOpen, ShieldCheck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -235,6 +235,18 @@ export function ServerAccessDialog({
   const secure =
     mode && "secure" in mode ? mode.secure : kind === "add" || kind === "import" ? address.apiUseHttps : true
 
+  const shakeRef = useRef<HTMLDivElement>(null)
+  /** Shows the problem and shakes the form, like a wrong password on a lock screen. */
+  const fail = (described: DescribedError) => {
+    setError(described)
+    const el = shakeRef.current
+    if (!el || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return
+    el.animate(
+      [0, -8, 8, -6, 6, -3, 3, 0].map((x) => ({ transform: `translateX(${x}px)` })),
+      { duration: 420, easing: "ease-in-out" }
+    )
+  }
+
   const run = async (action: () => Promise<void>) => {
     setBusy(true)
     setError(null)
@@ -252,7 +264,7 @@ export function ServerAccessDialog({
       if (kind === "add" && described.code === "invalidServerPassword") setStep("serverPassword")
       if (kind === "add" && (described.code === "nickTaken" || described.code === "invalidNick")) setStep("nick")
       if (kind === "add" && described.code === "serverNotFound") setStep("address")
-      setError(described)
+      fail(described)
     } finally {
       setBusy(false)
     }
@@ -281,19 +293,19 @@ export function ServerAccessDialog({
     if (!mode) return
     if (mode.kind === "login") {
       if (modeNeedsPassword(mode.authMode) && (!nick.trim() || !password)) {
-        return setError({ text: t("access.fillNickPassword") })
+        return fail({ text: t("access.fillNickPassword") })
       }
       return void run(() => onLogin({ nick: nick.trim(), password, superuserPassword }))
     }
     if (mode.kind === "claim") {
       const problem = checkNick() ?? (needsNewPassword(level) ? checkNewPassword() : null)
-      if (problem) return setError({ text: problem })
+      if (problem) return fail({ text: problem })
       return void run(() => onClaim({ nick: nick.trim(), authMode: level, password }))
     }
     if (mode.kind === "upgrade") {
-      if (authLevel(level) < mode.minLevel) return setError({ text: t("levels.belowServerMinimum") })
+      if (authLevel(level) < mode.minLevel) return fail({ text: t("levels.belowServerMinimum") })
       const problem = needsNewPassword(level) ? checkNewPassword() : null
-      if (problem) return setError({ text: problem })
+      if (problem) return fail({ text: problem })
       return void run(() => onUpgrade({ authMode: level, newPassword: needsNewPassword(level) ? password : "" }))
     }
     if (addTab === "new") {
@@ -303,22 +315,22 @@ export function ServerAccessDialog({
       }
       if (step === "address") {
         const parsed = parseAddressInput(address.apiHost, address)
-        if (!parsed.apiHost) return setError({ text: t("access.fillAddress") })
+        if (!parsed.apiHost) return fail({ text: t("access.fillAddress") })
         setAddress(parsed)
         return next("serverPassword")
       }
       if (step === "serverPassword") {
-        if (!serverPassword) return setError({ text: t("access.fillServerPassword") })
+        if (!serverPassword) return fail({ text: t("access.fillServerPassword") })
         return next("nick")
       }
       if (step === "nick") {
         const problem = checkNick()
-        if (problem) return setError({ text: problem })
+        if (problem) return fail({ text: problem })
         return next("protection")
       }
       if (step === "protection" && needsNewPassword(level)) return next("password")
       const problem = needsNewPassword(level) ? checkNewPassword() : null
-      if (problem) return setError({ text: problem })
+      if (problem) return fail({ text: problem })
       return void run(() =>
         onRegister({
           ...address,
@@ -331,8 +343,8 @@ export function ServerAccessDialog({
         })
       )
     }
-    if (!file && !stored) return setError({ text: t("access.pickFileFirst") })
-    if (file && !filePassphrase) return setError({ text: t("access.fillFilePassphrase") })
+    if (!file && !stored) return fail({ text: t("access.pickFileFirst") })
+    if (file && !filePassphrase) return fail({ text: t("access.fillFilePassphrase") })
     return void run(() =>
       onImport({
         ...(address.apiHost.trim() ? { ...address, apiHost: address.apiHost.trim() } : {}),
@@ -774,8 +786,11 @@ export function ServerAccessDialog({
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-3">
-          {body}
-          {error ? <p className="mt-3 text-sm text-destructive">{error.text}</p> : null}
+          <div ref={shakeRef}>{body}</div>
+          {/* The line is always there, so a message doesn't push the dialog taller. */}
+          <p className="mt-3 min-h-5 text-sm text-destructive" aria-live="polite">
+            {error?.text}
+          </p>
           {legacyFallback ? <div className="mt-3">{legacyFallback}</div> : null}
         </div>
 
