@@ -5377,17 +5377,20 @@ export default function VoIPApp() {
                           <Badge variant="outline" className="text-[10px]">{ch.type === "voice" ? t("settings.voiceKind") : t("settings.textKind")}</Badge>
                           <span className="truncate text-sm">{ch.name}</span>
                         </div>
-                        {ch.type === "voice" ? (
+                        {ch.type === "voice" && !ch.policy ? (
+                          // Servers before 0.6.4 don't send channel rules and can't change them.
+                          <span className="ml-auto text-xs text-muted-foreground">{t("notices.serverTooOldForChannelRules")}</span>
+                        ) : ch.type === "voice" ? (
                           <div className="ml-auto flex items-center gap-4">
                             {(["allowMic", "allowStreams"] as const).map((rule) => {
-                              const policy = ch.policy ?? { allowMic: true, allowStreams: true }
+                              const policy = ch.policy!
                               return (
                                 <label key={rule} className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
                                   {rule === "allowMic" ? <Mic className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
                                   {rule === "allowMic" ? t("channelRules.mics") : t("channelRules.streams")}
                                   <Switch
                                     checked={policy[rule]}
-                                    disabled={!ch.policy || savingRuleFor === `${ch.id}:${rule}`}
+                                    disabled={savingRuleFor === `${ch.id}:${rule}`}
                                     onCheckedChange={(on) => void updateChannelRule(ch.id, rule, on)}
                                   />
                                 </label>
