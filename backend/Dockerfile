@@ -16,6 +16,10 @@ RUN npm run build
 FROM node:22-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
+# Everything that must survive an image update lives on the /data volume.
+ENV DB_PATH=/data/voip.sqlite \
+    UPLOAD_DIR=/data/uploads
+VOLUME /data
 RUN apt-get update \
   && apt-get install -y --no-install-recommends tini \
   && rm -rf /var/lib/apt/lists/*

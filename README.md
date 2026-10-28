@@ -28,7 +28,7 @@ Older lines (`server-auth`, `server-livekit`) are kept as tags `archive/<name>`.
 | Tag | Meaning |
 |-----|---------|
 | `latest` | Newest stable build |
-| `0.6.2`, `0.5.0`, … | Fixed versions = `version` in [`backend/package.json`](backend/package.json). Pin one in production. |
+| `0.6.3`, `0.6.2`, … | Fixed versions = `version` in [`backend/package.json`](backend/package.json). Pin one in production. |
 
 Published images are **linux/amd64**.
 
@@ -55,7 +55,7 @@ docker run -d --name voixex --restart unless-stopped \
   -e TOKEN_SECRET=<long-random> -e SUPERUSER_PASSWORD=<password> \
   -e PUBLIC_UDP_HOST=<public host or IP> \
   -e LIVEKIT_NODE_IP=<public IP> \
-  -e DB_PATH=/data/voip.sqlite -v voixex-data:/data \
+  -v voixex-data:/data \
   kyratinkokko/voixex:latest
 ```
 
@@ -89,8 +89,7 @@ All options with comments are in [`.env.example`](.env.example). The important o
 | `LIVEKIT_PUBLIC_URL` | What clients connect to for LiveKit. Behind HTTPS: proxy `/livekit` → `7880` and set `wss://your.domain/livekit`. |
 | `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Use an external SFU instead of the built-in one. `LIVEKIT_EMBEDDED=false` disables it. |
 | `TLS_ENABLED`, `TLS_CERT_PATH`, `TLS_KEY_PATH` | Serve HTTPS/WSS directly from the container (or terminate TLS in a reverse proxy). |
-| `DB_PATH` | SQLite file. **Set `/data/voip.sqlite` with `docker run`**: the image default `./data/voip.sqlite` lives inside the container and is lost when it is recreated (`docker-compose.yml` already sets it). |
-| `UPLOAD_DIR` | Attachments, default `/data/uploads`. Keep `/data` on a volume. |
+| `DB_PATH`, `UPLOAD_DIR` | Default `/data/voip.sqlite` and `/data/uploads` (since 0.6.3; older images need `DB_PATH=/data/voip.sqlite` set explicitly). Keep `/data` on a volume. |
 
 The LiveKit API secret is generated once into `/data/livekit-api-secret`.
 
