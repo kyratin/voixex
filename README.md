@@ -1,7 +1,8 @@
 # Voixex
 
 <p align="center">
-  <strong>Voixex</strong> — voice and text channels with a Discord-like layout: <strong>Electron</strong> desktop app, <strong>Next.js</strong> web UI, and a <strong>Fastify + WebSocket + UDP mixer</strong> server.
+  <strong>Voixex</strong> — self-hosted voice, screen sharing and text chat for your own closed server.<br/>
+  One app for <strong>Windows</strong>, <strong>macOS</strong>, <strong>Linux</strong> and <strong>Android</strong>; the server is a single <strong>Docker</strong> image.
 </p>
 
 <p align="center">
@@ -9,116 +10,138 @@
 </p>
 
 <p align="center">
-  <em>Example: desktop client connected to a server.</em>
-</p>
-
-<p align="center">
-  <a href="https://github.com/kyratin/voixex"><strong>github.com/kyratin/voixex</strong></a> — source code, issues, contributions (MIT)
+  <a href="https://github.com/kyratin/voixex/releases/latest"><strong>Download the latest release</strong></a> ·
+  <a href="https://hub.docker.com/r/kyratinkokko/voixex"><strong>Server image on Docker Hub</strong></a> ·
+  MIT license
 </p>
 
 ---
 
-This branch is **`windows`** — the client line used for Windows-focused releases. It contains `primer_front`, `desktop-client`, and `voice-client`.
+## Branches
+
+| Branch | What it is | Runs on | How you get it |
+|--------|------------|---------|----------------|
+| **`client`** (this one, default) | The app: UI, desktop shell, Android app, voice engine | Windows · macOS · Linux · Android | [GitHub Releases](https://github.com/kyratin/voixex/releases) (`.exe`, `.dmg`, `.apk`) |
+| **[`server`](https://github.com/kyratin/voixex/tree/server)** | 🐳 Backend **Docker image**: API, voice mixer, built-in LiveKit SFU, SQLite | Any Docker host / Kubernetes (linux/amd64) | `docker pull kyratinkokko/voixex` |
+
+There are no per-OS branches: one codebase builds every platform. The former `windows`, `linux`, `macos`, `server-auth` and `server-livekit` branches are kept as tags `archive/<name>`.
+
+---
+
+## Download
+
+Every `v*` tag publishes a [release](https://github.com/kyratin/voixex/releases/latest) built by CI:
+
+| System | File | Notes |
+|--------|------|-------|
+| **Windows** 10/11 x64 | `Voixex-<version>-win-x64.exe` | NSIS installer. SmartScreen may warn about an unknown publisher → *More info* → *Run anyway*. |
+| **macOS** (Apple Silicon) | `Voixex-<version>-mac-arm64.dmg` | Not notarized. On first launch: *System Settings → Privacy & Security → Open Anyway*, or `xattr -dr com.apple.quarantine /Applications/Voixex.app`. |
+| **Android** 7.0+ (arm64 / armv7) | `Voixex-<version>-android.apk` | Allow installing from this source. Phone screen sharing needs a server ≥ 0.6.2. |
+| **Linux** x64 | build locally (below) | AppImage and `.deb` from `npm run dist:linux`. |
+
+The app version is `version` in [`desktop-client/package.json`](desktop-client/package.json); the Android `versionCode` is derived from it.
+
+---
+
+## How it works
+
+- **One server at a time, closed by default.** Nothing is visible until you join. Switching to another server disconnects from the current one.
+- **Per-server identity.** On first join you enter the server password, pick a nick and a protection level:
+  1 — password · 2 — device certificate · 3 — password + certificate. Certificates (`.voixexkey`) can be exported to another device and are listed in the app's certificate storage. The admin can require a minimum level.
+- **Voice** — Opus over UDP, TCP or WebSocket with jitter buffer, redundancy and packet-loss concealment; or WebRTC through the server's built-in LiveKit.
+- **AI noise suppression** (RNNoise, on by default) plus manual DSP: Speex, gate, echo cancellation.
+- **Screen sharing** — WebRTC (H.264, simulcast) with stream sound; viewers choose quality like on Twitch; motion / detail modes. Phones share their screen natively.
+- **Text channels** with attachments, member list (online and offline), roles (admins can promote others), speaking rings that follow voice volume.
+- UI in English, Russian, Spanish and Portuguese.
+
+---
+
+## Repository layout
 
 | Path | Description |
 |------|-------------|
-| [`primer_front/`](primer_front) | Next.js UI; static export is copied into `desktop-client/ui` for Electron |
-| [`desktop-client/`](desktop-client) | Electron shell, IPC, screen capture, installers |
-| [`voice-client/`](voice-client) | UDP voice engine (`file:` dependency of the desktop app) |
-
-**Desktop app version** — the `version` field in [`desktop-client/package.json`](desktop-client/package.json).
-
-**Backend** (REST, WebSocket, UDP mixer, SQLite) lives on the **`server`** branch. In the app, connect to your API at `http://<host>:<port>` (typically `18080`).
+| [`primer_front/`](primer_front) | Next.js UI (static export) shared by all platforms |
+| [`primer_front/android/`](primer_front/android) | Android app (Capacitor) with native plugins for calls and screen capture |
+| [`desktop-client/`](desktop-client) | Electron shell for Windows / macOS / Linux, installers |
+| [`voice-client/`](voice-client) | Desktop voice engine (UDP/TCP, Opus) |
+| [`.github/workflows/release.yml`](.github/workflows/release.yml) | CI: APK check on push, full release on tag |
 
 ---
 
-## Latest updates
+## Building
 
-- Client **`0.2.18`** builds published (Opus uplink on by default; backend **`0.1.14`** Docker).
-- Docker build script now generates **macOS arm64**, **Linux (AppImage/deb)**, and **Windows NSIS** installers.
-- Presence lists are now stable and sorted alphabetically (no reordering when someone starts speaking).
-- Voice path updates include IPC optimization and playback DSP tuning options.
+Requirements: **Node.js 22**, npm. Android additionally needs **JDK 21** and the Android SDK.
 
----
-
-## Requirements
-
-- **Node.js** 20+ (22 recommended)
-- **npm**
-- A running **backend** (local or VPS) for full functionality
-
----
-
-## Quick start (desktop, dev)
+### Desktop — dev run (any OS)
 
 ```bash
-cd voice-client && npm install && npm run build
-cd ../desktop-client && npm install && npm run build && npm start
+(cd primer_front && npm ci)
+(cd voice-client && npm ci && npm run build)
+cd desktop-client && npm ci && npm run build && npm start
 ```
 
-Set API URL and server password (if needed) in the app.
+### Desktop — installers
 
----
+Run in [`desktop-client/`](desktop-client); output goes to `desktop-client/release/`.
 
-## Web UI (optional)
+| Command | Result | Build on |
+|---------|--------|----------|
+| `npm run dist:win` | Windows NSIS `.exe` | Windows (or Docker below) |
+| `npm run dist:mac` | macOS `.dmg` (ad-hoc signed) | macOS |
+| `npm run dist:linux` | Linux AppImage + `.deb` | Linux (or Docker below) |
+| `npm run dist:docker` | Windows + Linux + macOS zip | Any host with Docker (`electronuserland/builder:wine`) |
 
-Requires a running backend.
+### Android
 
 ```bash
-cp .env.example .env
-# adjust NEXT_PUBLIC_API_BASE if needed
-docker compose up --build
+cd primer_front
+npm ci && npm run build          # static UI into out/
+npx cap sync android
+cd android && ./gradlew assembleDebug    # or assembleRelease with your signing key
 ```
 
-Open **http://localhost:3000**. Electron uses bundled files from `desktop-client/ui`.
+The APK lands in `primer_front/android/app/build/outputs/apk/`. Release signing in CI uses the secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
 
----
-
-## Building installers
-
-From [`desktop-client/`](desktop-client):
-
-| Command | Output |
-|---------|--------|
-| `npm run dist` | Current OS |
-| `npm run dist:win` | Windows NSIS |
-| `npm run dist:linux` | Linux AppImage / deb |
-| `npm run dist:mac:zip` | macOS zip for current architecture |
-| `npm run dist:docker` | **macOS arm64 zip + Linux + Windows NSIS** via Docker (DMG: `dist:mac` on macOS) |
-
-Cross-build from repo root:
+### Release
 
 ```bash
-docker pull electronuserland/builder:wine
-./desktop-client/scripts/docker-electron-build.sh
+# bump desktop-client/package.json "version", commit to client, then:
+git tag v0.6.12 && git push origin client v0.6.12
 ```
 
-Artifacts are written to `desktop-client/release/`.
+CI builds the APK, the Windows installer and the macOS DMG and attaches them to the GitHub release.
 
 ---
 
-## Features (client)
+## Server
 
-- Voice over UDP with stats (loss, ping, jitter)
-- Text channels and attachments
-- Screen sharing over WebSocket (`screen_chunk`; server relay required)
-- Device settings and DSP controls
-- Per-participant voice levels in a voice channel
+The backend lives on the **[`server`](https://github.com/kyratin/voixex/tree/server)** branch and ships as the Docker image **`kyratinkokko/voixex`**:
+
+```bash
+docker run -d --name voixex \
+  -p 18080:8080 -p 50000:50000/udp -p 50000:50000/tcp \
+  -p 7880:7880 -p 7881:7881/tcp -p 7882:7882/udp \
+  -e TOKEN_SECRET=<long-random> -e SUPERUSER_PASSWORD=<password> \
+  -e PUBLIC_UDP_HOST=<your-host> -v voixex-data:/data \
+  kyratinkokko/voixex:latest
+```
+
+Then add the server in the app by its address. HTTPS, LiveKit and Kubernetes notes are in the server branch README.
 
 ---
 
 ## Troubleshooting
 
-| Issue | What to check |
-|-------|----------------|
-| Empty mic list | OS microphone permission; restart app |
-| No audio / dropouts | Firewall (TCP API + UDP media); `PUBLIC_UDP_HOST` on server |
-| TCP voice always falls back to UDP | Expose media port for **TCP** too (`50000:50000/tcp` in docker-compose); backend needs TCP media (`server` branch, image newer than `0.1.14`) |
-| Metallic/robotic voice through server | Update backend to image `kyratinkokko/voixex:0.1.14` or newer |
-| `npm install` EACCES after Docker build | Re-run `docker-electron-build.sh` (it fixes ownership) |
+| Problem | What to check |
+|---------|---------------|
+| macOS says the app is damaged / can't be verified | See the macOS note in [Download](#download). |
+| Nobody hears you / you hear nobody | Firewall: TCP API port and UDP/TCP `50000`; `PUBLIC_UDP_HOST` on the server. Try another voice transport in settings. |
+| Stream doesn't start or stays black | Ports `7880`, `7881/tcp`, `7882/udp`; `LIVEKIT_NODE_IP` and `LIVEKIT_PUBLIC_URL` (`wss://` behind HTTPS). |
+| Empty microphone list | OS microphone permission, then restart the app. |
+| Phone screen sharing says the server is too old | Update the server image to 0.6.2 or newer. |
 
 ---
 
-## Backend
+## License
 
-Deploy backend from the **`server`** branch (Docker image `kyratinkokko/voixex`).
+MIT — see [LICENSE](LICENSE).

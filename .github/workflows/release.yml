@@ -1,10 +1,10 @@
 name: Build and release
 
-# Push to `windows`: build the Android APK as a check.
+# Push to `client`: build the Android APK as a check.
 # Tag `v*`: build the APK and the desktop installers and publish a GitHub release.
 on:
   push:
-    branches: [windows]
+    branches: [client]
     paths: ["primer_front/**", "voice-client/**", "desktop-client/**", ".github/workflows/release.yml"]
     tags: ["v*"]
 
