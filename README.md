@@ -1,70 +1,130 @@
-# Voixex — backend (`server` branch)
+# Voixex — server (🐳 Docker image)
 
-REST API, WebSocket signaling, UDP voice mixer, SQLite — **Fastify** + **better-sqlite3**.  
-Desktop and web clients live on branches **`windows`**, **`linux`**, **`macos`** (and GitHub mirror).
+> **This is the `server` branch: the backend, shipped as the Docker image [`kyratinkokko/voixex`](https://hub.docker.com/r/kyratinkokko/voixex).**
+> The app for Windows, macOS, Linux and Android lives on the **[`client`](https://github.com/kyratin/voixex/tree/client)** branch.
 
-## Layout
+One container runs everything a Voixex server needs:
 
-| Path | Description |
-|------|-------------|
-| [`backend/`](backend) | Server source, `Dockerfile`, npm package |
-| [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) | Build and push Docker image (run on a dev machine or CI, not on a tiny VPS) |
+- **API + WebSocket** (Fastify): accounts, channels, chat, attachments, presence, roles
+- **Voice media** in its own worker thread: Opus mixer with jitter buffer, redundancy and loss concealment over **UDP**, **TCP** or **WebSocket**
+- **LiveKit SFU** (built in) for WebRTC voice and screen sharing
+- **SQLite** database and uploads in `/data`
 
-## Quick start (development)
+---
+
+## Branches
+
+| Branch | What it is | Get it |
+|--------|------------|--------|
+| **`server`** (this one) | Backend source + `Dockerfile` | `docker pull kyratinkokko/voixex` |
+| **[`client`](https://github.com/kyratin/voixex/tree/client)** | App for Windows · macOS · Linux · Android | [GitHub Releases](https://github.com/kyratin/voixex/releases) |
+
+Older lines (`server-auth`, `server-livekit`) are kept as tags `archive/<name>`.
+
+---
+
+## Image tags
+
+| Tag | Meaning |
+|-----|---------|
+| `latest` | Newest stable build |
+| `0.6.2`, `0.5.0`, … | Fixed versions = `version` in [`backend/package.json`](backend/package.json). Pin one in production. |
+
+Published images are **linux/amd64**.
+
+---
+
+## Run with Docker Compose
 
 ```bash
-cd backend && npm install && npm run dev
-```
-
-Default HTTP port **8080** (set `PORT`). UDP voice default **50000**.
-
-## Docker
-
-From repository root (this branch):
-
-```bash
+git clone -b server https://github.com/kyratin/voixex.git voixex-server
+cd voixex-server
 cp .env.example .env
-# edit TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST for production
-docker compose up --build -d
+# set TOKEN_SECRET, SUPERUSER_PASSWORD, PUBLIC_UDP_HOST (and LiveKit vars below)
+docker compose up -d
 ```
 
-HTTP is exposed on **`18080`** → container `8080` by default (see `HTTP_PORT` in `.env`).
+[`docker-compose.yml`](docker-compose.yml) builds from `backend/`; to use the prebuilt image replace `build:` with `image: kyratinkokko/voixex:<tag>`.
 
-### HTTPS inside the container (optional)
+### Or a single `docker run`
 
-Set in `.env`:
+```bash
+docker run -d --name voixex --restart unless-stopped \
+  -p 18080:8080 -p 50000:50000/udp -p 50000:50000/tcp \
+  -p 7880:7880 -p 7881:7881/tcp -p 7882:7882/udp \
+  -e TOKEN_SECRET=<long-random> -e SUPERUSER_PASSWORD=<password> \
+  -e PUBLIC_UDP_HOST=<public host or IP> \
+  -e LIVEKIT_NODE_IP=<public IP> \
+  -v voixex-data:/data \
+  kyratinkokko/voixex:latest
+```
 
-- `TLS_ENABLED=true` (alias: `HTTPS=true`)
-- `TLS_CERT_PATH` — PEM full chain
-- `TLS_KEY_PATH` — PEM private key
+In the app: **Add server** → `your-host:18080` → server password → nick → protection level.
+The **first** registration on an empty server sets the server password that everyone else then uses to join.
 
-The server then listens with TLS on the same `PORT` (still `8080` in the container). Map the host port you need, e.g. `443:8080` or `18081:8080`. Mount certificate files into the container and point the paths at them — see comments in [`.env.example`](.env.example).
+---
 
-Prebuilt images: **`kyratinkokko/voixex`** on Docker Hub — pin a version tag for production.
-
-### WebRTC / LiveKit (built in)
-
-The image bundles a [LiveKit](https://livekit.io) SFU, so voice and screen share in **WebRTC (LiveKit)** mode work without extra services. `docker-entrypoint.sh` starts it next to the backend, generates the API secret once (kept in `/data/livekit-api-secret`) and passes the same key to the backend, which issues the client tokens. If either process exits the container stops, so the orchestrator restarts both.
-
-Open these ports in addition to HTTP and `50000`:
+## Ports
 
 | Port | Purpose |
 |------|---------|
-| `7880/tcp` | LiveKit signalling (ws/http) |
-| `7881/tcp` | WebRTC over TCP (fallback) |
+| `8080/tcp` (host `18080`) | HTTP API + WebSocket, media over WebSocket (`/v1/media/ws`) |
+| `50000/udp` + `50000/tcp` | Voice media (UDP preferred, TCP fallback) |
+| `7880/tcp` | LiveKit signalling |
+| `7881/tcp` | WebRTC over TCP |
 | `7882/udp` | WebRTC media |
 
-Set these for a real deployment (see [`.env.example`](.env.example)):
+---
 
-- `LIVEKIT_NODE_IP` — public IP announced in ICE candidates. Without it LiveKit uses STUN, which reports the wrong address behind NAT or a load balancer.
-- `LIVEKIT_PUBLIC_URL` — what clients connect to. Browsers and the desktop app on HTTPS need `wss://`, so put a reverse proxy in front: route `/livekit` to port `7880` (strip the prefix) and use `wss://your.domain/livekit`.
+## Configuration
 
-To use your own SFU set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`; the embedded one is then not started. `LIVEKIT_EMBEDDED=false` turns it off explicitly.
+All options with comments are in [`.env.example`](.env.example). The important ones:
 
-## Requirements
+| Variable | Description |
+|----------|-------------|
+| `TOKEN_SECRET` | **Required.** Long random secret for session tokens. |
+| `SUPERUSER_PASSWORD` | **Required.** Root password: entered at login, it gives admin rights. |
+| `PUBLIC_UDP_HOST` | Host or IP clients use for voice media. |
+| `LIVEKIT_NODE_IP` | Public IP announced for WebRTC (otherwise STUN guesses, wrong behind NAT/LB). |
+| `LIVEKIT_PUBLIC_URL` | What clients connect to for LiveKit. Behind HTTPS: proxy `/livekit` → `7880` and set `wss://your.domain/livekit`. |
+| `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Use an external SFU instead of the built-in one. `LIVEKIT_EMBEDDED=false` disables it. |
+| `TLS_ENABLED`, `TLS_CERT_PATH`, `TLS_KEY_PATH` | Serve HTTPS/WSS directly from the container (or terminate TLS in a reverse proxy). |
+| `DB_PATH`, `UPLOAD_DIR` | Default `/data/voip.sqlite` and `/data/uploads` — keep `/data` on a volume. |
 
-- **Node.js** 22+ (for local dev)
-- **Docker** + Compose (for container deploy)
+The LiveKit API secret is generated once into `/data/livekit-api-secret`.
+
+---
+
+## HTTPS and Kubernetes
+
+The app shows the server as secure only over HTTPS, so production servers should sit behind TLS:
+
+- **Reverse proxy / Ingress** (Traefik, nginx, Caddy): route the domain to `8080` and `/livekit` (prefix stripped) to `7880`; set `LIVEKIT_PUBLIC_URL=wss://<domain>/livekit`.
+- UDP `50000`, `7882` and TCP `7881` can't go through an HTTP proxy — expose them directly (NodePort/hostPort or a LoadBalancer) and set `PUBLIC_UDP_HOST` / `LIVEKIT_NODE_IP` to that address.
+- Run **one replica** with a persistent volume on `/data` (SQLite); use the `Recreate` update strategy.
+- Back up `/data/voip.sqlite` before upgrades.
+
+---
+
+## Development
+
+```bash
+cd backend
+npm install
+npm run dev        # HTTP on 8080, voice on 50000
+```
+
+Requires **Node.js 22+**. The LiveKit SFU is not started in dev; point `LIVEKIT_URL` at one if you need WebRTC.
+
+### Building and publishing the image
+
+```bash
+docker buildx build --platform linux/amd64 -t kyratinkokko/voixex:<version> -t kyratinkokko/voixex:latest --push backend
+```
+
+Always build for the server's architecture (`linux/amd64`): an image built on Apple Silicon without `--platform` is arm64 and won't start on amd64 nodes. [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) does the same (multi-arch by default).
+
+---
 
 ## License
 
