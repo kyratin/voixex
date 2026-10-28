@@ -12,7 +12,7 @@ import { z } from "zod"
 import { config } from "./config.js"
 import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
-import type { WsClientEvent, WsServerEvent, RosterMember, RoomInfo, RoomPolicy } from "./contracts.js"
+import type { WsClientEvent, WsServerEvent, RosterMember, RoomInfo, RoomPolicy, ServerAppearance } from "./contracts.js"
 import { attachMediaSocket, createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 import {
   AttemptLimiter,
@@ -44,6 +44,12 @@ const app = Fastify({
       }
     : {})
 })
+// Request bodies are checked with zod: a malformed request is the client's mistake (400), not 500.
+app.setErrorHandler((err, _req, rep) => {
+  if ((err as { name?: string }).name === "ZodError") return rep.code(400).send({ message: "invalid request", code: "invalid_request" })
+  return rep.send(err)
+})
+
 await app.register(cors, {
   origin: true,
   methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
@@ -268,6 +274,23 @@ function getServerBannerUrl(serverId: string): string | null {
   return url || null
 }
 
+function getServerAppearance(serverId: string): ServerAppearance {
+  const row = db.prepare("SELECT name, banner_url, icon_url FROM servers WHERE id = ?").get(serverId) as
+    | { name: string; banner_url: string | null; icon_url: string | null }
+    | undefined
+  return { name: row?.name ?? "", bannerUrl: row?.banner_url?.trim() || null, iconUrl: row?.icon_url?.trim() || null }
+}
+
+/** http(s) image links and small inline images (the app uploads icons as data: URLs). */
+const IMAGE_URL = /^(https?:\/\/\S+|data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+)$/
+const imageUrlField = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .nullable()
+    .optional()
+    .refine((v) => v === undefined || v === null || v.trim() === "" || IMAGE_URL.test(v.trim()), { message: "not an image URL" })
+
 function isVoiceRoomId(serverId: string, roomId: string): boolean {
   const row = db.prepare("SELECT kind FROM rooms WHERE server_id = ? AND id = ? LIMIT 1").get(serverId, roomId) as { kind: string } | undefined
   return row?.kind === "voice"
@@ -491,7 +514,13 @@ function policyOf(row: Pick<RoomRow, "name" | "kind" | "options">): RoomPolicy {
 
 function getRooms(serverId: string): RoomInfo[] {
   const rows = db.prepare("SELECT id, name, kind, options FROM rooms WHERE server_id = ? ORDER BY created_at ASC").all(serverId) as RoomRow[]
-  return rows.map((r) => (r.kind === "voice" ? { id: r.id, name: r.name, kind: r.kind, policy: policyOf(r) } : { id: r.id, name: r.name, kind: r.kind }))
+  return rows.map((r) => {
+    const banner = parseRoomOptions(r.options).bannerUrl
+    const bannerUrl = typeof banner === "string" && banner.trim() ? banner.trim() : null
+    return r.kind === "voice"
+      ? { id: r.id, name: r.name, kind: r.kind, policy: policyOf(r), bannerUrl }
+      : { id: r.id, name: r.name, kind: r.kind, bannerUrl }
+  })
 }
 
 function getRoomPolicy(serverId: string, roomId: string): RoomPolicy {
@@ -894,7 +923,7 @@ app.post("/v1/join", async (req, rep) => {
     displayName: body.displayName,
     superuserPassword: body.superuserPassword
   })
-  return rep.send({ ...joined, serverName: server.name, bannerUrl: getServerBannerUrl(server.id) })
+  return rep.send({ ...joined, serverName: server.name, bannerUrl: getServerBannerUrl(server.id), serverIconUrl: getServerAppearance(server.id).iconUrl })
 })
 
 app.post("/v1/servers/:serverId/join", async (req, rep) => {
@@ -1243,6 +1272,7 @@ async function finishLogin(serverId: string, creds: CredentialsRow, superuserPas
     ...joined,
     serverName: server.name,
     bannerUrl: getServerBannerUrl(server.id),
+    serverIconUrl: getServerAppearance(server.id).iconUrl,
     authMode: credentialsMode(creds),
     ...(certId ? { certId } : {}),
     ...(limited ? { upgradeRequired: { minLevel } } : {})
@@ -1560,23 +1590,32 @@ app.get("/v1/servers/:serverId", async (req, rep) => {
     .prepare("SELECT id, name, banner_url FROM servers WHERE id = ?")
     .get(params.serverId) as { id: string; name: string; banner_url: string | null } | undefined
   if (!server) return rep.code(404).send({ message: "server not found" })
-  return rep.send({ id: server.id, name: server.name, bannerUrl: getServerBannerUrl(server.id) })
+  return rep.send({ id: server.id, ...getServerAppearance(server.id) })
 })
 
 app.patch("/v1/servers/:serverId", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1) }).parse(req.params)
-  const body = z.object({ bannerUrl: z.string().max(2048).nullable().optional() }).parse(req.body)
+  const body = z
+    .object({
+      name: z.string().trim().min(1).max(64).optional(),
+      bannerUrl: imageUrlField(2048),
+      iconUrl: imageUrlField(300_000)
+    })
+    .parse(req.body)
   const auth = (req as any).auth as { serverId: string; clientId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   if (!requirePermission(rep, params.serverId, auth.clientId, "manage_server")) return
-  let bannerUrl: string | null = null
-  if (body.bannerUrl !== undefined && body.bannerUrl !== null) {
-    const trimmed = body.bannerUrl.trim()
-    bannerUrl = trimmed || null
+  // Only the fields sent change (older apps send just bannerUrl).
+  if (body.name !== undefined) db.prepare("UPDATE servers SET name = ? WHERE id = ?").run(body.name, params.serverId)
+  if (body.bannerUrl !== undefined) {
+    db.prepare("UPDATE servers SET banner_url = ? WHERE id = ?").run(body.bannerUrl?.trim() || null, params.serverId)
   }
-  db.prepare("UPDATE servers SET banner_url = ? WHERE id = ?").run(bannerUrl, params.serverId)
-  emitToServer(params.serverId, { type: "server_appearance_updated", bannerUrl })
-  return rep.send({ bannerUrl })
+  if (body.iconUrl !== undefined) {
+    db.prepare("UPDATE servers SET icon_url = ? WHERE id = ?").run(body.iconUrl?.trim() || null, params.serverId)
+  }
+  const appearance = getServerAppearance(params.serverId)
+  emitToServer(params.serverId, { type: "server_appearance_updated", ...appearance })
+  return rep.send(appearance)
 })
 
 app.get("/v1/servers/:serverId/me", async (req, rep) => {
@@ -1794,6 +1833,26 @@ app.delete("/v1/servers/:serverId/members/:clientId/roles/:roleId", async (req, 
     params.roleId
   )
   return rep.send({ ok: true })
+})
+
+/** Picture in the channel's header (text and voice), shared with everyone on the server. */
+app.put("/v1/servers/:serverId/rooms/:roomId/banner", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), roomId: z.string().min(1) }).parse(req.params)
+  const body = z.object({ bannerUrl: imageUrlField(2048) }).parse(req.body ?? {})
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  if (!requirePermission(rep, params.serverId, auth.clientId, "manage_channels")) return
+  const row = db.prepare("SELECT options FROM rooms WHERE server_id = ? AND id = ? LIMIT 1").get(params.serverId, params.roomId) as
+    | { options: string | null }
+    | undefined
+  if (!row) return rep.code(404).send({ message: "room not found" })
+  const options = { ...parseRoomOptions(row.options) }
+  const url = body.bannerUrl?.trim() || null
+  if (url) options.bannerUrl = url
+  else delete options.bannerUrl
+  db.prepare("UPDATE rooms SET options = ? WHERE server_id = ? AND id = ?").run(JSON.stringify(options), params.serverId, params.roomId)
+  emitToServer(params.serverId, { type: "rooms_updated", rooms: getRooms(params.serverId) })
+  return rep.send({ ok: true, bannerUrl: url })
 })
 
 /** Channel rules: microphones and/or streams allowed in a voice channel (admins). */
@@ -2141,7 +2200,9 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
       clientId: auth.clientId,
       serverId: auth.serverId,
       serverGeneration,
-      bannerUrl: getServerBannerUrl(auth.serverId)
+      bannerUrl: getServerBannerUrl(auth.serverId),
+      serverName: getServerAppearance(auth.serverId).name,
+      iconUrl: getServerAppearance(auth.serverId).iconUrl
     } satisfies WsServerEvent)
   )
   socket.send(JSON.stringify({ type: "rooms_snapshot", rooms: getRooms(auth.serverId) } satisfies WsServerEvent))

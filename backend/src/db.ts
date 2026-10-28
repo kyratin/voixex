@@ -201,6 +201,10 @@ export function initDb(dbPath: string) {
   if (!serverColumns.some((c) => c.name === "banner_url")) {
     db.exec("ALTER TABLE servers ADD COLUMN banner_url TEXT")
   }
+  if (!serverColumns.some((c) => c.name === "icon_url")) {
+    // Image URL or a small data: URL (the app resizes uploads to 128 px).
+    db.exec("ALTER TABLE servers ADD COLUMN icon_url TEXT")
+  }
 
   return db
 }

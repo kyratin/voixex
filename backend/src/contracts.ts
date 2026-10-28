@@ -15,7 +15,10 @@ export type RosterMember = {
 /** Per voice channel rules set by admins; the server enforces them. */
 export type RoomPolicy = { allowMic: boolean; allowStreams: boolean }
 
-export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy }
+export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy; bannerUrl?: string | null }
+
+/** How the server presents itself to members: name, icon, banner (set by admins). */
+export type ServerAppearance = { name: string; iconUrl: string | null; bannerUrl: string | null }
 
 export type WsClientEvent =
   | { type: "join_room"; roomId: string }
@@ -46,8 +49,16 @@ export type WsClientEvent =
   | { type: "ping"; ts: number }
 
 export type WsServerEvent =
-  | { type: "hello"; clientId: string; serverId: string; serverGeneration: number; bannerUrl?: string | null }
-  | { type: "server_appearance_updated"; bannerUrl: string | null }
+  | {
+      type: "hello"
+      clientId: string
+      serverId: string
+      serverGeneration: number
+      bannerUrl?: string | null
+      serverName?: string
+      iconUrl?: string | null
+    }
+  | { type: "server_appearance_updated"; bannerUrl: string | null; name?: string; iconUrl?: string | null }
   | { type: "members_changed"; clientId?: string }
   /** ~10 Hz while someone in the room talks: loudness 0..1 per speaking member (UI rings). */
   | { type: "voice_levels"; roomId: string; levels: Record<string, number> }
