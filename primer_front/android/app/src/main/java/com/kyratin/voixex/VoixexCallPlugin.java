@@ -24,6 +24,53 @@ import com.getcapacitor.annotation.PermissionCallback;
 public class VoixexCallPlugin extends Plugin {
     /** Read by MainActivity: keep the WebView running in the background during a call. */
     static volatile boolean inCall = false;
+    /** Picture-in-picture when leaving the app during a call (the app's "Mini call window" setting). */
+    static volatile boolean pipEnabled = true;
+    private static VoixexCallPlugin instance;
+
+    @Override
+    public void load() {
+        instance = this;
+    }
+
+    /** Notification / picture-in-picture button pressed: "toggle_mute" or "leave". */
+    static void emitAction(String action) {
+        VoixexCallPlugin plugin = instance;
+        if (plugin != null) plugin.notifyListeners("action", new JSObject().put("action", action));
+    }
+
+    static void emitPip(boolean active) {
+        VoixexCallPlugin plugin = instance;
+        if (plugin != null) plugin.notifyListeners("pip", new JSObject().put("active", active));
+    }
+
+    private void refreshPip() {
+        if (getActivity() instanceof MainActivity) {
+            MainActivity activity = (MainActivity) getActivity();
+            activity.runOnUiThread(activity::updatePictureInPicture);
+        }
+    }
+
+    /** Channel name, mute state and translated button labels for the notification and PiP. */
+    @PluginMethod
+    public void update(PluginCall call) {
+        VoixexCallService.title = call.getString("title", VoixexCallService.title);
+        VoixexCallService.text = call.getString("text", VoixexCallService.text);
+        VoixexCallService.muted = Boolean.TRUE.equals(call.getBoolean("muted", VoixexCallService.muted));
+        VoixexCallService.muteLabel = call.getString("muteLabel", VoixexCallService.muteLabel);
+        VoixexCallService.unmuteLabel = call.getString("unmuteLabel", VoixexCallService.unmuteLabel);
+        VoixexCallService.leaveLabel = call.getString("leaveLabel", VoixexCallService.leaveLabel);
+        VoixexCallService.refresh(getContext());
+        refreshPip();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setPip(PluginCall call) {
+        pipEnabled = Boolean.TRUE.equals(call.getBoolean("enabled", true));
+        refreshPip();
+        call.resolve();
+    }
 
     @PluginMethod
     public void start(PluginCall call) {
@@ -63,6 +110,7 @@ public class VoixexCallPlugin extends Plugin {
         try {
             ContextCompat.startForegroundService(getContext(), intent);
             inCall = true;
+            refreshPip();
             call.resolve(new JSObject().put("started", true));
         } catch (Exception e) {
             // Android refuses to start it from the background; the call still works in the foreground.
@@ -88,6 +136,7 @@ public class VoixexCallPlugin extends Plugin {
     public void stop(PluginCall call) {
         inCall = false;
         getContext().stopService(new Intent(getContext(), VoixexCallService.class));
+        refreshPip();
         call.resolve();
     }
 }

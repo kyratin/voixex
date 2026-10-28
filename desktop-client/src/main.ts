@@ -5,6 +5,7 @@ import { join, normalize, relative } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { IdentityStore, type IdentityMeta, type IdentityServerInfo, type ServerCertificate } from "./identity-store.js"
 import { VoiceService } from "./voice-service.js"
+import { createShell } from "./shell.js"
 
 const voice = new VoiceService()
 let preferredScreenSourceId: string | null = null
@@ -189,7 +190,9 @@ function createWindow() {
   })
   win.once("ready-to-show", () => win.show())
   const bundledEntry = getBundledUiEntryUrl()
-  win.webContents.setWindowOpenHandler(() => ({
+  win.webContents.setWindowOpenHandler((details) => {
+    if (details.frameName === MINI_WINDOW_NAME) return { action: "allow", overrideBrowserWindowOptions: miniWindowOptions() }
+    return {
     action: "allow",
     overrideBrowserWindowOptions: {
       width: 1280,
@@ -203,7 +206,12 @@ function createWindow() {
         backgroundThrottling: false
       }
     }
-  }))
+    }
+  })
+  win.webContents.on("did-create-window", (child, details) => {
+    if (details.frameName === MINI_WINDOW_NAME) shell.placeMiniWindow(child, win)
+  })
+  shell.attachMainWindow(win)
   win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
     if (!isMainFrame) return
     loadFallbackErrorPage(
@@ -222,7 +230,36 @@ function createWindow() {
   }
 }
 
+/** The small always-on-top call window the UI opens while the main window is minimized. */
+const MINI_WINDOW_NAME = "voixex-mini"
+
+function miniWindowOptions(): Electron.BrowserWindowConstructorOptions {
+  return {
+    width: 320,
+    height: 236,
+    minWidth: 240,
+    minHeight: 160,
+    frame: false,
+    show: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    backgroundColor: "#0f0f14",
+    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false }
+  }
+}
+
+const shell = createShell({ iconsDir: () => join(__dirname, "../build/icons") })
+
+// One app instance: a second launch (e.g. from the Start menu while it sits in the tray) shows it.
+const primaryInstance = app.requestSingleInstanceLock()
+if (!primaryInstance) app.quit()
+app.on("second-instance", () => shell.showMain())
+
 app.whenReady().then(async () => {
+  if (!primaryInstance) return
   await registerBundledUiProtocol()
   if (process.platform === "win32") {
     app.setAppUserModelId("com.voixex.desktop")
@@ -398,6 +435,13 @@ app.whenReady().then(async () => {
   })
 
   createWindow()
+  shell.createTray()
+})
+
+app.on("activate", () => {
+  // macOS dock icon: bring back a window that was closed to the tray.
+  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  else shell.showMain()
 })
 
 app.on("window-all-closed", () => {

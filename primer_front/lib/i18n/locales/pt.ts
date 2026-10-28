@@ -207,7 +207,24 @@ export const pt: TranslationDict = {
     unknownNick: "Perfil",
     unknownServer: "servidor desconhecido"
   },
+  tray: {
+    open: "Abrir o Voixex",
+    quit: "Sair do Voixex",
+    notInVoice: "Fora de um canal de voz"
+  },
+  mini: {
+    open: "Abrir a app",
+    hide: "Ocultar",
+    empty: "Ainda não há ninguém"
+  },
   settings: {
+    tabWindow: "Janela",
+    closeToTray: "Fechar para a bandeja",
+    closeToTrayHint: "O botão de fechar esconde o Voixex na bandeja (barra de menus no macOS) e a chamada continua. Saia pelo menu da bandeja.",
+    miniCall: "Janela mini da chamada",
+    miniCallHint: "Ao minimizar o Voixex durante uma chamada, uma janela pequena fica por cima com quem está no canal, quem fala e silenciar / ensurdecer / sair.",
+    miniCallPip: "Imagem em imagem",
+    miniCallPipHint: "Ao sair da app durante uma chamada, uma pequena janela flutuante mostra quem está no canal e quem fala.",
     aiNoise: "Supressão de ruído com IA",
     aiNoiseHint: "Uma rede neural (RNNoise) neste dispositivo remove teclado, ventiladores, rua e zumbido e mantém sua voz. Substitui o noise gate e a supressão do navegador.",
     serverTitle: "Configurações do servidor — {name}",

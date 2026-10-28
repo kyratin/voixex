@@ -51,6 +51,7 @@ The app version is `version` in [`desktop-client/package.json`](desktop-client/p
 - **Voice** — Opus over UDP, TCP or WebSocket with jitter buffer, redundancy and packet-loss concealment; or WebRTC through the server's built-in LiveKit.
 - **AI noise suppression** (RNNoise, on by default) plus manual DSP: Speex, gate, echo cancellation.
 - **Screen sharing** — WebRTC (H.264, simulcast) with stream sound; viewers choose quality like on Twitch; motion / detail modes. Phones share their screen natively.
+- **Tray and mini call window** — closing the window keeps Voixex in the tray (menu bar on macOS) with mute / deafen / leave; minimizing during a call shows a small always-on-top window with who is in the channel and who is talking, like Google Meet. On Android: call notification with mute / leave and picture-in-picture.
 - **Text channels** with attachments, member list (online and offline), roles (admins can promote others), speaking rings that follow voice volume.
 - UI in English, Russian, Spanish and Portuguese.
 

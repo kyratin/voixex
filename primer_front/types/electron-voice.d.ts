@@ -22,10 +22,46 @@ export type VoixexStoredIdentity = {
   meta: VoixexIdentityMeta
 }
 
+export type VoixexShellAction = "toggle_mute" | "toggle_deafen" | "leave" | "show"
+
+export type VoixexCallState = {
+  inVoice: boolean
+  channel: string
+  muted: boolean
+  deafened: boolean
+  /** Translated menu / notification texts. */
+  labels: {
+    open: string
+    mute: string
+    unmute: string
+    deafen: string
+    undeafen: string
+    leave: string
+    quit: string
+    notInVoice: string
+  }
+}
+
+export type VoixexShell = {
+  kind: "desktop" | "android"
+  setCallState: (state: VoixexCallState) => void
+  setPreferences: (prefs: { closeToTray?: boolean; miniWindow?: boolean }) => void
+  showMain: () => void
+  isMinimized: () => Promise<boolean>
+  onAction: (listener: (action: VoixexShellAction) => void) => () => void
+  /** Desktop: the main window was minimized / hidden to the tray. Android: picture-in-picture. */
+  onMinimizedChange: (listener: (minimized: boolean) => void) => () => void
+}
+
 declare global {
   interface Window {
     /** Desktop window info; customTitleBar = the system title bar is hidden and the UI draws one. */
     voixexWindow?: { platform: string; customTitleBar: boolean }
+    /**
+     * The app around the UI: tray / call notification and the minimized call view.
+     * Desktop: tray icon + a small always-on-top window. Android: call notification + picture-in-picture.
+     */
+    voixexShell?: VoixexShell
     /** Per-server device certificates (desktop only). Private keys never leave the main process. */
     voixexIdentity?: {
       create: () => Promise<{ ref: string; publicKey: string }>

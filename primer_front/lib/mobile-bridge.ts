@@ -1,6 +1,7 @@
 import { registerPlugin } from "@capacitor/core"
 import { WebVoiceEngine } from "@/lib/web-voice/engine"
 import { webIdentity } from "@/lib/web-identity"
+import type { VoixexShellAction } from "@/types/electron-voice"
 
 /**
  * Android app (Capacitor): provides the same window.electronVoice / voixexIdentity / voixexWindow
@@ -13,7 +14,43 @@ const VoixexCall = registerPlugin<{
   start(options: { title: string; text: string }): Promise<void>
   stop(): Promise<void>
   setOrientation(options: { mode: "landscape" | "auto" }): Promise<void>
+  update(options: { title: string; text: string; muted: boolean; muteLabel: string; unmuteLabel: string; leaveLabel: string }): Promise<void>
+  setPip(options: { enabled: boolean }): Promise<void>
+  addListener(event: "action", listener: (e: { action: VoixexShellAction }) => void): Promise<{ remove: () => Promise<void> }>
+  addListener(event: "pip", listener: (e: { active: boolean }) => void): Promise<{ remove: () => Promise<void> }>
 }>("VoixexCall")
+
+/** Phone side of window.voixexShell: the call notification's buttons and picture-in-picture. */
+function installShell() {
+  const listen = <T,>(event: "action" | "pip", handler: (e: T) => void) => {
+    const handle = VoixexCall.addListener(event as "action", handler as never)
+    return () => {
+      void handle.then((h) => h.remove())
+    }
+  }
+  window.voixexShell = {
+    kind: "android",
+    setCallState(state) {
+      if (!state.inVoice) return
+      void VoixexCall.update({
+        title: state.channel || "Voixex",
+        text: state.muted ? `🔇 ${state.labels.unmute}` : "Voixex",
+        muted: state.muted,
+        muteLabel: state.labels.mute,
+        unmuteLabel: state.labels.unmute,
+        leaveLabel: state.labels.leave
+      }).catch(() => {})
+    },
+    setPreferences(prefs) {
+      if (typeof prefs.miniWindow === "boolean") void VoixexCall.setPip({ enabled: prefs.miniWindow }).catch(() => {})
+    },
+    // Tapping the floating window brings the app back by itself.
+    showMain() {},
+    isMinimized: async () => false,
+    onAction: (listener) => listen<{ action: VoixexShellAction }>("action", (e) => listener(e.action)),
+    onMinimizedChange: (listener) => listen<{ active: boolean }>("pip", (e) => listener(Boolean(e.active)))
+  }
+}
 
 /** Native screen capture published to LiveKit (the WebView has no getDisplayMedia). */
 const VoixexScreenShare = registerPlugin<{
@@ -183,6 +220,7 @@ export function installMobileBridge() {
   if (!isNativeApp() || window.electronVoice) return
   window.voixexWindow = { platform: "android", customTitleBar: false }
   window.voixexIdentity = webIdentity
+  installShell()
   if (WebVoiceEngine.supported()) installVoiceBridge()
 }
 

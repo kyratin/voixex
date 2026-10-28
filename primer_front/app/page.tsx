@@ -20,7 +20,7 @@ import {
 import { MemberSecurityAdmin, MySecurityPanel, ServerSecurityPolicy } from "@/components/voip/security-panel"
 import { RolesAdmin } from "@/components/voip/roles-admin"
 import { DeviceCertificates, type DeviceCertificate } from "@/components/voip/device-certificates"
-import type { VoixexStoredIdentity } from "@/types/electron-voice"
+import type { VoixexShellAction, VoixexStoredIdentity } from "@/types/electron-voice"
 import { ChannelSidebar, type ChannelCategory } from "@/components/voip/channel-sidebar"
 import { UserPanel } from "@/components/voip/user-panel"
 import { ChatArea, type Message } from "@/components/voip/chat-area"
@@ -58,6 +58,7 @@ import { MicLevelMeter, type MicLevelMeterSample } from "@/components/voip/mic-l
 import { ConnectServerDialog, type ConnectionDraft } from "@/components/voip/connect-server-dialog"
 import { LanguageSelector } from "@/components/voip/language-selector"
 import { VoiceMiniBar, VoiceStage } from "@/components/voip/voice-stage"
+import { MiniCallView, MiniCallWindow } from "@/components/voip/mini-call"
 import { TitleBar } from "@/components/voip/title-bar"
 import { useI18n } from "@/lib/i18n/provider"
 import { Headphones, Server } from "lucide-react"
@@ -164,6 +165,8 @@ const SCREEN_AUDIO_KEY = "voixex-screen-with-audio-v2"
 
 /** Phone layout: narrow screens, and phones held sideways (short and touch-only). */
 const NARROW_QUERY = "(max-width: 767px), (pointer: coarse) and (max-height: 520px)"
+/** Tray and minimized-call preferences (desktop and Android). */
+const SHELL_PREFS_KEY = "voixex-shell-prefs"
 
 /** Member-list group id for admins (the only role the UI manages). */
 const ADMIN_ROLE_GROUP = "admin"
@@ -232,6 +235,7 @@ export default function VoIPApp() {
     | "language"
     | "voice"
     | "keybinds"
+    | "window"
     | "security"
     | "server_general"
     | "server_channels"
@@ -3465,6 +3469,95 @@ export default function VoIPApp() {
   const activeChannel = categories.flatMap((c) => c.channels).find((c) => c.id === activeChannelId)
   const allChannels = categories.flatMap((c) => c.channels)
   const voiceChannelName = categories.flatMap((c) => c.channels).find((c) => c.id === currentVoiceChannel)?.name || ""
+
+  // Tray (desktop) / call notification (Android), and the call view while the app is minimized:
+  // a small always-on-top window on desktop, picture-in-picture on Android.
+  const [hasShell, setHasShell] = useState(false)
+  const [closeToTray, setCloseToTray] = useState(true)
+  const [miniCallEnabled, setMiniCallEnabled] = useState(true)
+  const [appMinimized, setAppMinimized] = useState(false)
+  const [miniCallDismissed, setMiniCallDismissed] = useState(false)
+  const shellActionRef = useRef<(action: VoixexShellAction) => void>(() => {})
+  shellActionRef.current = (action) => {
+    if (action === "toggle_mute") {
+      if (pttTimerRef.current) clearTimeout(pttTimerRef.current)
+      applyMute(!mutedRef.current)
+    } else if (action === "toggle_deafen") {
+      applyDeafen(!deafenedRef.current)
+    } else if (action === "leave") {
+      if (isInVoiceRef.current) handleDisconnect()
+    } else if (action === "show") {
+      window.voixexShell?.showMain()
+    }
+  }
+  useEffect(() => {
+    const shell = window.voixexShell
+    if (!shell) return
+    setHasShell(true)
+    try {
+      const saved = JSON.parse(localStorage.getItem(SHELL_PREFS_KEY) ?? "{}") as { closeToTray?: boolean; miniCall?: boolean }
+      if (typeof saved.closeToTray === "boolean") setCloseToTray(saved.closeToTray)
+      if (typeof saved.miniCall === "boolean") setMiniCallEnabled(saved.miniCall)
+    } catch {
+      /* defaults */
+    }
+    const offAction = shell.onAction((action) => shellActionRef.current(action))
+    const offMinimized = shell.onMinimizedChange((minimized) => {
+      setAppMinimized(minimized)
+      // Hiding the mini window lasts until the app is opened again.
+      if (!minimized) setMiniCallDismissed(false)
+    })
+    void shell.isMinimized().then(setAppMinimized, () => {})
+    return () => {
+      offAction()
+      offMinimized()
+    }
+  }, [])
+  useEffect(() => {
+    if (!hasShell) return
+    window.voixexShell?.setPreferences({ closeToTray, miniWindow: miniCallEnabled })
+    try {
+      localStorage.setItem(SHELL_PREFS_KEY, JSON.stringify({ closeToTray, miniCall: miniCallEnabled }))
+    } catch {
+      /* not persisted */
+    }
+  }, [hasShell, closeToTray, miniCallEnabled])
+  const inVoiceCall = isInVoice && Boolean(currentVoiceChannel)
+  useEffect(() => {
+    if (!hasShell) return
+    window.voixexShell?.setCallState({
+      inVoice: inVoiceCall,
+      channel: voiceChannelName,
+      muted: isMuted,
+      deafened: isDeafened,
+      labels: {
+        open: t("tray.open"),
+        mute: t("userPanel.mute"),
+        unmute: t("userPanel.unmute"),
+        deafen: t("userPanel.deafen"),
+        undeafen: t("userPanel.undeafen"),
+        leave: t("userPanel.leaveVoiceChannel"),
+        quit: t("tray.quit"),
+        notInVoice: t("tray.notInVoice")
+      }
+    })
+  }, [hasShell, inVoiceCall, voiceChannelName, isMuted, isDeafened, t])
+  const miniCallVisible = hasShell && miniCallEnabled && appMinimized && inVoiceCall
+  const miniCallView = (pip: boolean) => (
+    <MiniCallView
+      channelName={voiceChannelName}
+      participants={voiceUsers[currentVoiceChannel] ?? []}
+      live={activeScreenSharerName || (isScreenSharing ? "Live" : null)}
+      isMuted={isMuted}
+      isDeafened={isDeafened}
+      onToggleMute={() => shellActionRef.current("toggle_mute")}
+      onToggleDeafen={() => shellActionRef.current("toggle_deafen")}
+      onLeave={() => shellActionRef.current("leave")}
+      onOpen={() => window.voixexShell?.showMain()}
+      onClose={pip ? undefined : () => setMiniCallDismissed(true)}
+      pip={pip}
+    />
+  )
   const isTextChannel = activeChannel?.type === "text"
   const canOpenServerSettings = Boolean(activeServerId && canManageServer)
   const serverSettingsScope = appSettingsTab.startsWith("server_")
@@ -4606,6 +4699,13 @@ export default function VoIPApp() {
 
   return (
     <>
+      {isMobileApp ? (
+        miniCallVisible ? <div className="fixed inset-0 z-[200]">{miniCallView(true)}</div> : null
+      ) : (
+        <MiniCallWindow open={miniCallVisible && !miniCallDismissed} onClosed={() => setMiniCallDismissed(true)}>
+          {miniCallView(false)}
+        </MiniCallWindow>
+      )}
       <div className="flex h-dvh flex-col bg-background">
       <TitleBar title={activeServerId ? `Voixex — ${servers.find((s) => s.id === activeServerId)?.name ?? ""}` : "Voixex"} />
       <main className="flex min-h-0 flex-1 overflow-hidden bg-background">
@@ -4832,6 +4932,11 @@ export default function VoIPApp() {
                     <TabsTrigger value="keybinds" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
                       {t("settings.tabKeybinds")}
                     </TabsTrigger>
+                    {hasShell ? (
+                      <TabsTrigger value="window" className="shrink-0 justify-start px-3 py-2 text-xs sm:w-full sm:text-sm">
+                        {t("settings.tabWindow")}
+                      </TabsTrigger>
+                    ) : null}
                   </>
                 ) : null}
                 {!serverSettingsScope && activeServerId && activeProfile?.authMode ? (
@@ -5105,6 +5210,25 @@ export default function VoIPApp() {
                   deafen: keybinds.toggleDeafen ?? t("common.none"),
                   ptt: keybinds.pushToTalk ?? t("common.none")
                 })}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="window" className="mt-0 space-y-3">
+              {isMobileApp ? null : (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
+                  <div>
+                    <Label>{t("settings.closeToTray")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("settings.closeToTrayHint")}</p>
+                  </div>
+                  <Switch checked={closeToTray} onCheckedChange={setCloseToTray} />
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
+                <div>
+                  <Label>{isMobileApp ? t("settings.miniCallPip") : t("settings.miniCall")}</Label>
+                  <p className="text-xs text-muted-foreground">{isMobileApp ? t("settings.miniCallPipHint") : t("settings.miniCallHint")}</p>
+                </div>
+                <Switch checked={miniCallEnabled} onCheckedChange={setMiniCallEnabled} />
               </div>
             </TabsContent>
 

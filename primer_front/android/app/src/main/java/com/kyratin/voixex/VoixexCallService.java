@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
@@ -24,21 +25,69 @@ public class VoixexCallService extends Service {
 
     private PowerManager.WakeLock wakeLock;
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        String title = intent != null && intent.getStringExtra(EXTRA_TITLE) != null ? intent.getStringExtra(EXTRA_TITLE) : "Voixex";
-        String text = intent != null && intent.getStringExtra(EXTRA_TEXT) != null ? intent.getStringExtra(EXTRA_TEXT) : "";
-        createChannel();
-        Intent open = new Intent(this, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent contentIntent = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+    /** Buttons in the notification and in picture-in-picture; handled by the page. */
+    static final String ACTION_TOGGLE_MUTE = "com.kyratin.voixex.TOGGLE_MUTE";
+    static final String ACTION_LEAVE = "com.kyratin.voixex.LEAVE";
+
+    /** What the notification shows; the page keeps it current through VoixexCall.update(). */
+    static volatile String title = "Voixex";
+    static volatile String text = "";
+    static volatile boolean muted = false;
+    static volatile String muteLabel = "Mute";
+    static volatile String unmuteLabel = "Unmute";
+    static volatile String leaveLabel = "Leave";
+
+    static PendingIntent actionIntent(Context context, String action, int requestCode) {
+        Intent intent = new Intent(context, VoixexCallService.class).setAction(action);
+        return PendingIntent.getService(context, requestCode, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    static Notification buildNotification(Context context) {
+        Intent open = new Intent(context, MainActivity.class).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(context, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        return new NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(contentIntent)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .addAction(
+                muted ? android.R.drawable.ic_btn_speak_now : android.R.drawable.ic_lock_silent_mode,
+                muted ? unmuteLabel : muteLabel,
+                actionIntent(context, ACTION_TOGGLE_MUTE, 1)
+            )
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, leaveLabel, actionIntent(context, ACTION_LEAVE, 2))
             .build();
+    }
+
+    /** Redraws the running notification after the page changed its state. */
+    static void refresh(Context context) {
+        if (!VoixexCallPlugin.inCall) return;
+        NotificationManager nm = context.getSystemService(NotificationManager.class);
+        try {
+            nm.notify(NOTIFICATION_ID, buildNotification(context));
+        } catch (SecurityException e) {
+            // Notifications not allowed: the buttons are still in picture-in-picture.
+        }
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent != null ? intent.getAction() : null;
+        if (ACTION_TOGGLE_MUTE.equals(action)) {
+            VoixexCallPlugin.emitAction("toggle_mute");
+            return START_NOT_STICKY;
+        }
+        if (ACTION_LEAVE.equals(action)) {
+            VoixexCallPlugin.emitAction("leave");
+            return START_NOT_STICKY;
+        }
+        if (intent != null && intent.getStringExtra(EXTRA_TITLE) != null) title = intent.getStringExtra(EXTRA_TITLE);
+        if (intent != null && intent.getStringExtra(EXTRA_TEXT) != null) text = intent.getStringExtra(EXTRA_TEXT);
+        createChannel();
+        Notification notification = buildNotification(this);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);

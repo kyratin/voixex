@@ -205,7 +205,24 @@ export const en = {
     unknownNick: "Profile",
     unknownServer: "unknown server"
   },
+  tray: {
+    open: "Open Voixex",
+    quit: "Quit Voixex",
+    notInVoice: "Not in a voice channel"
+  },
+  mini: {
+    open: "Open the app",
+    hide: "Hide",
+    empty: "Nobody here yet"
+  },
   settings: {
+    tabWindow: "Window",
+    closeToTray: "Close to the tray",
+    closeToTrayHint: "The close button hides Voixex to the tray (menu bar on macOS) and keeps the call going. Quit from the tray menu.",
+    miniCall: "Mini call window",
+    miniCallHint: "When you minimize Voixex during a call, a small window stays on top with who is in the channel, who is talking, and mute / deafen / leave.",
+    miniCallPip: "Picture-in-picture",
+    miniCallPipHint: "When you leave the app during a call, a small floating window shows who is in the channel and who is talking.",
     aiNoise: "AI noise suppression",
     aiNoiseHint: "A neural network (RNNoise) on this device removes keyboard, fans, street and hum, and keeps your voice. Replaces the noise gate and the browser's noise suppression.",
     serverTitle: "Server settings — {name}",

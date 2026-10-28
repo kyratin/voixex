@@ -55,4 +55,23 @@ const voixexIdentity = {
 contextBridge.exposeInMainWorld("electronVoice", electronVoice)
 /** Lets the UI draw its own title bar where the system one is hidden (Windows/Linux). */
 contextBridge.exposeInMainWorld("voixexWindow", { platform: process.platform, customTitleBar: true })
+
+/** Tray, close-to-tray and the mini call window (see src/shell.ts). */
+contextBridge.exposeInMainWorld("voixexShell", {
+  kind: "desktop",
+  setCallState: (state) => ipcRenderer.send("shell:callState", state),
+  setPreferences: (prefs) => ipcRenderer.send("shell:setPreferences", prefs),
+  showMain: () => ipcRenderer.send("shell:showMain"),
+  isMinimized: () => ipcRenderer.invoke("shell:isMinimized"),
+  onAction: (listener) => {
+    const handler = (_event, action) => listener(action)
+    ipcRenderer.on("shell:action", handler)
+    return () => ipcRenderer.removeListener("shell:action", handler)
+  },
+  onMinimizedChange: (listener) => {
+    const handler = (_event, minimized) => listener(Boolean(minimized))
+    ipcRenderer.on("shell:minimized", handler)
+    return () => ipcRenderer.removeListener("shell:minimized", handler)
+  }
+})
 contextBridge.exposeInMainWorld("voixexIdentity", voixexIdentity)
