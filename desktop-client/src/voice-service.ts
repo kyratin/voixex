@@ -59,6 +59,12 @@ export class VoiceService {
     return this.state
   }
 
+  /** The server renewed the session: same key, new token for the next HELLO. */
+  setMediaToken(mediaToken: string) {
+    this.engine?.setMediaToken(mediaToken)
+    return this.state
+  }
+
   joinRoom(roomId: string) {
     this.engine?.joinRoom(roomId)
     this.state.joinedRoomId = roomId

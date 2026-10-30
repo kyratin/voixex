@@ -371,6 +371,8 @@ export default function VoIPApp() {
   const [voiceTransport, setVoiceTransport] = useState<"udp" | "tcp">("udp")
   const [mediaEngine, setMediaEngine] = useState<"legacy" | "webrtc">("legacy")
   const mediaEngineRef = useRef(mediaEngine)
+  /** Everyone else in our voice channel uses WebRTC voice too (otherwise only the server mix has them all). */
+  const roomAllWebRtcRef = useRef(false)
   const [displayNameInput, setDisplayNameInput] = useState("User")
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
@@ -569,7 +571,9 @@ export default function VoIPApp() {
   const pendingLegacyStreamResyncRef = useRef(false)
   const screenVideoUrlRef = useRef<string | null>(null)
   const legacyStreamHasBufferedRef = useRef(false)
-  const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number } | null>(null)
+  const lastWsVoiceJoinSyncRef = useRef<{ room: string; at: number; epoch: number } | null>(null)
+  /** Bumps on every WebSocket (re)connect of the voice server's client. */
+  const [voiceWsEpoch, setVoiceWsEpoch] = useState(0)
   const localPresenceToggleRef = useRef(false)
   const isWatchingScreenRef = useRef(false)
   const resetRemoteStreamPlaybackRef = useRef<() => void>(() => {})
@@ -741,6 +745,16 @@ export default function VoIPApp() {
       setMyVoiceClientId(voiceWs.getMeState()?.clientId ?? null)
 
       const meId = voiceWs.getMeState()?.clientId
+      {
+        const rt = split && v ? v : u
+        const room = currentVoiceChannelRef.current
+        const others = (room ? rt.rosterByRoom[room] ?? [] : []).filter((m) => m.clientId !== meId)
+        const allWebRtc = others.every((m) => m.mediaEngine === "webrtc")
+        if (allWebRtc !== roomAllWebRtcRef.current) {
+          roomAllWebRtcRef.current = allWebRtc
+          webRtcSessionRef.current?.setPlayRemoteVoice(playsLiveKitVoiceRef.current())
+        }
+      }
       if (meId && !localPresenceToggleRef.current) {
         const rt = split && v ? v : u
         const room = currentVoiceChannelRef.current
@@ -762,6 +776,7 @@ export default function VoIPApp() {
 
       setWsConnected(u.connection.wsConnected)
       setWsReconnecting(u.connection.reconnecting)
+      setVoiceWsEpoch(((split && v ? v : u).connection.epoch ?? 0))
       setSessionRevoked(Boolean(u.connection.revoked))
       setSessionLevelTooLow(Boolean(u.connection.levelTooLow))
       if (split && v) {
@@ -947,8 +962,9 @@ export default function VoIPApp() {
     const now = Date.now()
     const roomKey = isInVoice && currentVoiceChannel ? currentVoiceChannel : "__lobby__"
     const prev = lastWsVoiceJoinSyncRef.current
-    if (prev && prev.room === roomKey && now - prev.at < 3000) return
-    lastWsVoiceJoinSyncRef.current = { room: roomKey, at: now }
+    // A new connection always gets the full state: the server dropped it with the old one.
+    if (prev && prev.room === roomKey && prev.epoch === voiceWsEpoch && now - prev.at < 3000) return
+    lastWsVoiceJoinSyncRef.current = { room: roomKey, at: now, epoch: voiceWsEpoch }
     getVoiceWsClient().syncPresence({
       roomId: isInVoice && currentVoiceChannel ? currentVoiceChannel : null,
       muted: mutedRef.current,
@@ -957,7 +973,7 @@ export default function VoIPApp() {
       watchingScreen: isWatchingScreenRef.current,
       mediaEngine: mediaEngineRef.current
     })
-  }, [wsForVoiceJoin, isVoiceSplit, wsConnected, isInVoice, currentVoiceChannel, mediaEngine, uiClient, voiceClient])
+  }, [wsForVoiceJoin, voiceWsEpoch, isVoiceSplit, wsConnected, isInVoice, currentVoiceChannel, mediaEngine, uiClient, voiceClient])
 
   useEffect(() => {
     const watching = Boolean(
@@ -1199,7 +1215,7 @@ export default function VoIPApp() {
 
   useEffect(() => {
     mediaEngineRef.current = mediaEngine
-    webRtcSessionRef.current?.setPlayRemoteVoice(mediaEngine === "webrtc")
+    webRtcSessionRef.current?.setPlayRemoteVoice(playsLiveKitVoiceRef.current())
     republishWebRtcMicFromPipeline()
     if (wsForVoiceJoin) {
       getVoiceWsClient().syncPresence(buildPresenceSync())
@@ -1488,7 +1504,7 @@ export default function VoIPApp() {
       if (superseded()) return
       const session = new WebRtcMediaSession({
         audioSink: sink,
-        playRemoteVoice: mediaEngineRef.current === "webrtc",
+        playRemoteVoice: mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current,
         onStatus: setStatus,
         onScreenShareChange: () => {
           /* screen share state is driven by server set_screen_share + local capture */
@@ -1498,6 +1514,17 @@ export default function VoIPApp() {
         },
         onRemoteVideo: (active, participantIdentity) => {
           applyRemoteWebRtcVideo(active, participantIdentity)
+        },
+        onLost: () => {
+          // Voice falls back to the server mix right away; LiveKit (streams, WebRTC voice) comes back shortly.
+          if (webRtcSessionRef.current === session) {
+            webRtcSessionRef.current = null
+            webRtcSessionKeyRef.current = ""
+          }
+          window.setTimeout(() => {
+            if (!isInVoiceRef.current || currentVoiceChannelRef.current !== roomId || voiceServerIdRef.current !== serverId) return
+            void ensureLiveKitForVoiceRoomRef.current(serverId, roomId)
+          }, 2000)
         }
       })
       try {
@@ -1547,6 +1574,38 @@ export default function VoIPApp() {
       // LiveKit is optional; legacy WS screen chunks and UDP voice still work.
     }
   }
+  const ensureLiveKitForVoiceRoomRef = useRef(ensureLiveKitForVoiceRoom)
+  ensureLiveKitForVoiceRoomRef.current = ensureLiveKitForVoiceRoom
+
+  /**
+   * Voice from LiveKit only when everyone else in the channel sends it there and the session is up;
+   * otherwise the server mix (everyone always sends to it) — so mixed engines still hear each other.
+   */
+  const playsLiveKitVoice = () =>
+    mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current && Boolean(webRtcSessionRef.current?.live)
+  const playsLiveKitVoiceRef = useRef(playsLiveKitVoice)
+  playsLiveKitVoiceRef.current = playsLiveKitVoice
+
+  // After a reconnect: give the voice engine the renewed token, and bring LiveKit back if it died.
+  useEffect(() => {
+    const clients = [uiClient, voiceClient]
+    const unsubs = clients.map((client) =>
+      client.subscribeTokens(({ mediaToken }) => {
+        const voiceWs = getVoiceWsClientRef.current()
+        if (client === voiceWs) void window.electronVoice?.setMediaToken?.(mediaToken)
+      })
+    )
+    return () => {
+      for (const unsub of unsubs) unsub()
+    }
+  }, [uiClient, voiceClient])
+
+  useEffect(() => {
+    if (!voiceWsEpoch || !isInVoiceRef.current) return
+    const serverId = voiceServerIdRef.current
+    const roomId = currentVoiceChannelRef.current
+    if (serverId && roomId) void ensureLiveKitForVoiceRoomRef.current(serverId, roomId)
+  }, [voiceWsEpoch])
 
   const encodePcm16Base64 = (frame: Int16Array) => {
     const bytes = new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength)
@@ -2285,7 +2344,7 @@ export default function VoIPApp() {
         }
 
         runtime.unsubscribeIncoming = !sendsToServer ? null : window.electronVoice?.onPcm16Frame((pcm16Base64) => {
-          if (mediaEngineRef.current === "webrtc") return
+          if (playsLiveKitVoiceRef.current()) return
           if (deafenedRef.current) return
           const frame48k = decodePcm16Base64(pcm16Base64)
           const resampled = resampleInt16Chunk(frame48k, 48000, runtime.playbackSampleRate, runtime)

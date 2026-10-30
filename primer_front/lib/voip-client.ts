@@ -4,6 +4,10 @@ import type { ChannelCategory, VoiceUser } from "@/components/voip/channel-sideb
 import { clearVoiceLevels, setRoomVoiceLevels } from "@/lib/voice-levels"
 
 const DEFAULT_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:18080"
+/** Keepalive; the server answers each ping, so silence for ~2.5 intervals means a dead socket. */
+const PING_INTERVAL_MS = 10_000
+/** Sessions last 12 h on the server; renewing every 20 min keeps a reconnect from ever finding one expired. */
+const SESSION_REFRESH_MS = 20 * 60_000
 
 export type JoinResult = {
   serverId: string
@@ -82,7 +86,14 @@ export type RealtimeState = {
    * revoked: the server ended the session (certificate revoked or access reset);
    * levelTooLow: the server now requires a higher protection level than this profile has.
    */
-  connection: { wsConnected: boolean; reconnecting: boolean; revoked?: boolean; levelTooLow?: boolean }
+  connection: {
+    wsConnected: boolean
+    reconnecting: boolean
+    revoked?: boolean
+    levelTooLow?: boolean
+    /** Goes up on every successful (re)connect: the server forgot our channel and flags. */
+    epoch?: number
+  }
 }
 
 export type ChatMessage = {
@@ -278,7 +289,13 @@ export class VoipClient {
   private electronVoiceParams: { host: string; port: number; mediaToken: string } | null = null
   private pendingWsMessages: string[] = []
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectDelayMs = 1000
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private lastRxAt = 0
+  private connectionEpoch = 0
+  private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private networkListenersInstalled = false
+  private tokenListeners = new Set<(tokens: { authToken: string; mediaToken: string }) => void>()
   private lastServerGeneration: number | null = null
   private screenChunkListeners = new Set<(fromClientId: string, chunkBase64: string) => void>()
   /** fallback: a viewer needs the WebSocket stream; false (or old servers) = someone joined. */
@@ -708,6 +725,11 @@ export class VoipClient {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer)
+      this.refreshTimer = null
+    }
+    this.reconnectDelayMs = 1000
     this.stopPing()
     const socket = this.ws
     if (socket) {
@@ -743,6 +765,15 @@ export class VoipClient {
 
   connectWs() {
     if (!this.authToken) throw new Error("not authorized")
+    this.installNetworkListeners()
+    if (!this.refreshTimer) {
+      // Renew the session long before it expires, so a reconnect never meets an expired token.
+      this.refreshTimer = setInterval(() => void this.refreshSession(), SESSION_REFRESH_MS)
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     // Always replace the socket when (re)connecting: after a new /v1/join the token changes; keeping an
     // OPEN socket would skip opening WSS with the new token and leave the old session (broken UI / "can't connect").
     const existing = this.ws
@@ -761,7 +792,10 @@ export class VoipClient {
     this.ws = new WebSocket(wsUrl)
     this.ws.binaryType = "arraybuffer"
     this.ws.onopen = () => {
-      this.state.connection = { wsConnected: true, reconnecting: false }
+      this.reconnectDelayMs = 1000
+      this.lastRxAt = Date.now()
+      this.connectionEpoch += 1
+      this.state.connection = { wsConnected: true, reconnecting: false, epoch: this.connectionEpoch }
       this.emit()
       for (const message of this.pendingWsMessages) {
         this.ws?.send(message)
@@ -770,6 +804,7 @@ export class VoipClient {
       this.startPing()
     }
     this.ws.onmessage = (event) => {
+      this.lastRxAt = Date.now()
       const raw = String(event.data)
       let data: Record<string, unknown>
       try {
@@ -930,24 +965,136 @@ export class VoipClient {
       }
       this.emit()
     }
+    const socket = this.ws
     this.ws.onclose = (event) => {
+      if (this.ws !== socket) return
       this.ws = null
       this.stopPing()
-      // 4002 invalid token / 4003 session ended / 4004 level too low: retrying with the same token cannot succeed.
-      if (event.code === 4002 || event.code === 4003 || event.code === 4004) {
-        this.state.connection = {
-          wsConnected: false,
-          reconnecting: false,
-          revoked: event.code !== 4004,
-          levelTooLow: event.code === 4004
-        }
-        this.emit()
+      // 4003 session ended / 4004 level too low: retrying cannot succeed.
+      if (event.code === 4003 || event.code === 4004) {
+        this.endSession(event.code === 4004 ? "level" : "revoked")
         return
       }
-      this.state.connection = { wsConnected: false, reconnecting: true }
-      this.emit()
-      if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = setTimeout(() => this.connectWs(), 1500)
+      // 4002: the token expired (long sleep, long call). Renew it and carry on.
+      if (event.code === 4002) {
+        this.state.connection = { wsConnected: false, reconnecting: true }
+        this.emit()
+        void this.refreshSession().then((result) => {
+          if (!this.authToken) return
+          if (result === "ok") this.scheduleReconnect(0)
+          else if (result === "offline") this.scheduleReconnect()
+          else this.endSession(result === "level" ? "level" : "revoked")
+        })
+        return
+      }
+      this.scheduleReconnect()
+    }
+  }
+
+  private endSession(reason: "revoked" | "level") {
+    this.state.connection = {
+      wsConnected: false,
+      reconnecting: false,
+      revoked: reason === "revoked",
+      levelTooLow: reason === "level"
+    }
+    this.emit()
+  }
+
+  /** Lost the connection: try again, waiting a little longer each time (up to 10 s). */
+  private scheduleReconnect(delayMs = this.reconnectDelayMs) {
+    if (!this.authToken) return
+    this.state.connection = { wsConnected: false, reconnecting: true }
+    this.emit()
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (!this.authToken) return
+      try {
+        this.connectWs()
+      } catch {
+        this.scheduleReconnect()
+      }
+    }, delayMs)
+    this.reconnectDelayMs = Math.min(10_000, Math.max(1000, this.reconnectDelayMs * 2))
+  }
+
+  /** The socket looks open but nothing arrives (Wi-Fi switch, new IP, sleep): replace it now. */
+  private dropDeadSocket() {
+    const socket = this.ws
+    if (!socket) return
+    socket.onclose = null
+    socket.onmessage = null
+    try {
+      socket.close()
+    } catch {
+      /* ignore */
+    }
+    this.ws = null
+    this.stopPing()
+    this.scheduleReconnect(0)
+  }
+
+  /** Network back, or the app/window came back to the foreground: check the connection right away. */
+  private installNetworkListeners() {
+    if (this.networkListenersInstalled || typeof window === "undefined") return
+    this.networkListenersInstalled = true
+    const check = () => {
+      if (!this.authToken || this.state.connection.revoked || this.state.connection.levelTooLow) return
+      if (!this.ws) {
+        this.reconnectDelayMs = 1000
+        this.scheduleReconnect(0)
+      } else if (this.ws.readyState === WebSocket.OPEN && Date.now() - this.lastRxAt > PING_INTERVAL_MS + 2000) {
+        // Possibly dead after sleep: a ping must come back soon, or the watchdog replaces the socket.
+        this.sendWsEvent({ type: "ping", ts: Date.now() })
+      }
+    }
+    window.addEventListener("online", check)
+    window.addEventListener("focus", check)
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") check()
+    })
+  }
+
+  /**
+   * Renews the session on the server (0.6.5+) without signing in again; the voice engine gets the
+   * new media token through subscribeTokens. "unsupported" = older server.
+   */
+  async refreshSession(): Promise<"ok" | "revoked" | "level" | "offline" | "unsupported"> {
+    const token = this.authToken
+    if (!token) return "revoked"
+    let res: Response
+    try {
+      res = await fetch(`${this.apiBase}/v1/session/refresh`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: "{}"
+      })
+    } catch {
+      return "offline"
+    }
+    if (res.status === 404) return "unsupported"
+    if (res.status === 401) return "revoked"
+    if (res.status === 403) {
+      const body = (await res.json().catch(() => ({}))) as { code?: string }
+      return body.code === "level_too_low" ? "level" : "revoked"
+    }
+    if (!res.ok) return "offline"
+    const out = (await res.json()) as { authToken: string; mediaToken: string }
+    // Left the server while the request was in flight.
+    if (this.authToken !== token) return "ok"
+    this.authToken = out.authToken
+    this.mediaToken = out.mediaToken
+    if (this.electronVoiceParams) this.electronVoiceParams = { ...this.electronVoiceParams, mediaToken: out.mediaToken }
+    for (const cb of this.tokenListeners) cb(out)
+    return "ok"
+  }
+
+  /** Fresh tokens after refreshSession: hand the media token to the voice engine. */
+  subscribeTokens(cb: (tokens: { authToken: string; mediaToken: string }) => void) {
+    this.tokenListeners.add(cb)
+    return () => {
+      this.tokenListeners.delete(cb)
     }
   }
 
@@ -1134,8 +1281,13 @@ export class VoipClient {
   private startPing() {
     this.stopPing()
     this.pingTimer = setInterval(() => {
+      // The server answers every ping; this long without a word means the connection is gone.
+      if (Date.now() - this.lastRxAt > PING_INTERVAL_MS * 2.5) {
+        this.dropDeadSocket()
+        return
+      }
       this.sendWsEvent({ type: "ping", ts: Date.now() })
-    }, 15_000)
+    }, PING_INTERVAL_MS)
   }
 
   private stopPing() {

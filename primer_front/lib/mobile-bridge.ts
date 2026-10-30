@@ -112,6 +112,8 @@ function pcmFromBase64(b64: string) {
 
 function installVoiceBridge() {
   const engine = new WebVoiceEngine()
+  // Phones switch between Wi-Fi and mobile data: reconnect as soon as a network is back.
+  window.addEventListener("online", () => engine.reconnectNow())
   let devices = { inputId: null as string | null, outputId: null as string | null }
   let inCall = false
   const callOn = (on: boolean) => {
@@ -136,6 +138,10 @@ function installVoiceBridge() {
       if (!apiBase) throw new Error("Voice needs the server address")
       await engine.connect({ apiBase, mediaToken: payload.mediaToken })
       return engine.getStats()
+    },
+    async setMediaToken(mediaToken) {
+      engine.setMediaToken(mediaToken)
+      return null
     },
     async joinRoom(roomId) {
       engine.joinRoom(roomId)

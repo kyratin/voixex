@@ -84,6 +84,8 @@ declare global {
       requestMicrophoneAccess?: () => Promise<{ granted: boolean }>
       /** apiBase: used by the Android app, whose voice goes over WebSocket to the API host. */
       connect: (payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp"; apiBase?: string }) => Promise<unknown>
+      /** Renewed media token (same key) for the next HELLO; older desktop builds lack it. */
+      setMediaToken?: (mediaToken: string) => Promise<unknown>
       joinRoom: (roomId: string) => Promise<unknown>
       leaveRoom: () => Promise<unknown>
       setMute: (muted: boolean) => Promise<unknown>

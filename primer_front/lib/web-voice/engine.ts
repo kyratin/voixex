@@ -69,6 +69,7 @@ export class WebVoiceEngine {
   private connected = false
   private closing = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectDelayMs = 1000
   private roomId: string | null = null
   private muted = false
   private deafened = false
@@ -179,11 +180,33 @@ export class WebVoiceEngine {
   }
 
   private scheduleReconnect() {
-    if (this.reconnectTimer) return
+    if (this.reconnectTimer || this.closing) return
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
-      void this.open().catch(() => this.scheduleReconnect())
-    }, 1500)
+      void this.open()
+        .then(() => {
+          // A new connection is a new session on the server: its frame numbers start over.
+          this.reconnectDelayMs = 1000
+          this.resetDownlink()
+          this.lastSendMs = 0
+        })
+        .catch(() => this.scheduleReconnect())
+    }, this.reconnectDelayMs)
+    this.reconnectDelayMs = Math.min(10_000, this.reconnectDelayMs * 2)
+  }
+
+  /** The server renewed the session: same key, new token for the next HELLO. */
+  setMediaToken(token: string) {
+    this.mediaToken = token
+  }
+
+  /** The network came back (or the app returned to the foreground): don't wait for the timer. */
+  reconnectNow() {
+    if (!this.connected || this.closing || this.ws) return
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+    this.reconnectDelayMs = 0
+    this.scheduleReconnect()
   }
 
   joinRoom(roomId: string) {

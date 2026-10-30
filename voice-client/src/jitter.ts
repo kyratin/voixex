@@ -254,6 +254,11 @@ export class SpeakerStream {
     this.maxFrameNo = -1
   }
 
+  /** Forget the sender's numbering (it starts over after a new session). */
+  reset() {
+    this.resetFor(this.mode)
+  }
+
   private resetFor(mode: "legacy" | "numbered") {
     this.stop()
     this.mode = mode

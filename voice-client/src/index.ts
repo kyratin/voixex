@@ -64,6 +64,8 @@ const SEND_GAP_MS = 80
 /** How long to wait for an "opus2" HELLO_ACK before falling back to the original protocol. */
 const HELLO2_WAIT_MS = 1200
 const TCP_MAX_BACKLOG_BYTES = 16 * 1024
+/** In a row of packets that all look like replays: the server started a new session (restart, new endpoint). */
+const STALE_RUN_RESET = 25
 
 /**
  * Desktop voice transport.
@@ -80,12 +82,17 @@ export class VoiceEngine {
   private readonly key: Buffer
   private seqOut = 1
   private connected = false
+  private closing = false
+  private tcpReconnectTimer: NodeJS.Timeout | null = null
+  private tcpReconnectDelayMs = 1000
+  /** Packets in a row rejected by the replay window (see STALE_RUN_RESET). */
+  private staleRun = 0
   private muted = false
   private deafened = false
   private roomId: string | null = null
   private readonly host: string
   private readonly port: number
-  private readonly mediaToken: string
+  private mediaToken: string
   private readonly transport: "udp" | "tcp"
   private txTimer: NodeJS.Timeout | null = null
   private probeTimer: NodeJS.Timeout | null = null
@@ -143,6 +150,7 @@ export class VoiceEngine {
 
   async connect() {
     if (this.connected) return
+    this.closing = false
     this.helloConfirmed = false
     if (this.transport === "udp") {
       const socket = dgram.createSocket({ type: "udp4", recvBufferSize: 1 << 20, sendBufferSize: 1 << 20 })
@@ -233,11 +241,18 @@ export class VoiceEngine {
     this.sendPacket(this.encrypt(this.roomId, chunk, KIND_SCREEN))
   }
 
+  /** A fresh token from the server (same key); used for HELLO from now on. */
+  setMediaToken(token: string) {
+    this.mediaToken = token
+  }
+
   close() {
+    this.closing = true
     this.stopSelfTestTone()
-    for (const t of [this.probeTimer, this.playoutTimer]) if (t) clearTimeout(t)
+    for (const t of [this.probeTimer, this.playoutTimer, this.tcpReconnectTimer]) if (t) clearTimeout(t)
     this.probeTimer = null
     this.playoutTimer = null
+    this.tcpReconnectTimer = null
     this.failHello(new Error("voice transport closed before HELLO ack"))
     try {
       this.udp?.close()
@@ -359,6 +374,43 @@ export class VoiceEngine {
     this.rxLoss = { expected: 0, received: 0, highest: -1 }
   }
 
+  /** The server's side starts over: forget its packet and frame numbers. */
+  private restartDownlink() {
+    this.replay.reset()
+    this.staleRun = 0
+    this.lastSeqIn = 0
+    this.stream.reset()
+    this.rxLoss = { expected: 0, received: 0, highest: -1 }
+  }
+
+  /** TCP voice dropped mid-call (network change, server restart): reconnect until it works. */
+  private scheduleTcpReconnect() {
+    if (this.closing || this.tcpReconnectTimer) return
+    this.tcpReconnectTimer = setTimeout(() => {
+      this.tcpReconnectTimer = null
+      void this.reconnectTcp()
+    }, this.tcpReconnectDelayMs)
+    this.tcpReconnectDelayMs = Math.min(10_000, this.tcpReconnectDelayMs * 2)
+  }
+
+  private async reconnectTcp() {
+    if (this.closing) return
+    try {
+      this.helloConfirmed = false
+      await this.connectTcpSocket()
+      this.sendHello()
+      await this.waitForHello(3500)
+      if (this.closing) return
+      this.restartDownlink()
+      this.lastSendMs = 0
+      this.recentEncoded = []
+      this.connected = true
+      this.tcpReconnectDelayMs = 1000
+    } catch {
+      this.scheduleTcpReconnect()
+    }
+  }
+
   /** Server's view of our uplink: lower the bitrate and add redundancy when packets get lost. */
   private adaptUplink(lossPct: number) {
     this.uplinkLossPct = lossPct
@@ -453,7 +505,16 @@ export class VoiceEngine {
     const frame = decryptPacket(this.key, buf)
     if (!frame) return
     this.markHelloConfirmed()
-    if (!this.replay.accept(frame.seq)) return
+    if (!this.replay.accept(frame.seq)) {
+      // The server numbers its packets per session. After it restarts, or opens a new session for
+      // a new address or TCP connection, it counts from 1 again and every packet would look like a
+      // replay: the call would go silent while the speaking rings keep moving.
+      this.staleRun += 1
+      if (this.staleRun < STALE_RUN_RESET) return
+      this.restartDownlink()
+      this.replay.accept(frame.seq)
+    }
+    this.staleRun = 0
     this.rxPackets += 1
     if (this.lastSeqIn > 0 && frame.seq > this.lastSeqIn + 1) this.rxLostEstimated += frame.seq - this.lastSeqIn - 1
     this.lastSeqIn = Math.max(this.lastSeqIn, frame.seq)
@@ -618,8 +679,12 @@ export class VoiceEngine {
     })
     sock.on("close", () => {
       if (this.tcpSocket !== sock) return
-      if (!this.connected) this.failHello(new Error("Voice TCP socket closed before HELLO ack"))
+      if (!this.connected) {
+        this.failHello(new Error("Voice TCP socket closed before HELLO ack"))
+        return
+      }
       this.connected = false
+      this.scheduleTcpReconnect()
     })
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Voice TCP connect timeout")), 3000)

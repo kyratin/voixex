@@ -351,6 +351,9 @@ app.whenReady().then(async () => {
   ipcMain.handle("voice:connect", (_event, payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) => {
     return voice.connect(payload)
   })
+  ipcMain.handle("voice:setMediaToken", (_event, mediaToken: string) => {
+    return voice.setMediaToken(mediaToken)
+  })
   ipcMain.handle("voice:joinRoom", (_event, roomId: string) => {
     return voice.joinRoom(roomId)
   })

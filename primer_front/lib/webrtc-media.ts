@@ -1,5 +1,6 @@
 import {
   ConnectionState,
+  DisconnectReason,
   LocalAudioTrack,
   LocalTrack,
   LocalVideoTrack,
@@ -39,6 +40,8 @@ type WebRtcMediaOptions = {
   onRemoteVideo?: (active: boolean, participantIdentity: string | null) => void
   onScreenShareChange?: (active: boolean) => void
   onWatchingScreenChange?: (watching: boolean) => void
+  /** LiveKit gave up reconnecting by itself (not our own disconnect): the owner starts a new session. */
+  onLost?: () => void
 }
 
 export class WebRtcMediaSession {
@@ -94,9 +97,10 @@ export class WebRtcMediaSession {
       .on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
         this.detachRemoteTrack(track, publication, participant.identity)
       })
-      .on(RoomEvent.Disconnected, () => {
+      .on(RoomEvent.Disconnected, (reason) => {
         this.cleanupRemoteTracks()
         this.opts.onStatus?.("WebRTC disconnected")
+        if (reason !== DisconnectReason.CLIENT_INITIATED && this.room === room) this.opts.onLost?.()
       })
 
     await room.connect(input.url, input.token, { autoSubscribe: true })
