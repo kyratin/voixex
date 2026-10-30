@@ -28,7 +28,7 @@ Older lines (`server-auth`, `server-livekit`) are kept as tags `archive/<name>`.
 | Tag | Meaning |
 |-----|---------|
 | `latest` | Newest stable build |
-| `0.6.3`, `0.6.2`, … | Fixed versions = `version` in [`backend/package.json`](backend/package.json). Pin one in production. |
+| `0.6.5`, `0.6.4`, … | Fixed versions = `version` in [`backend/package.json`](backend/package.json). Pin one in production. |
 
 Published images are **linux/amd64**.
 
@@ -90,6 +90,8 @@ All options with comments are in [`.env.example`](.env.example). The important o
 | `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | Use an external SFU instead of the built-in one. `LIVEKIT_EMBEDDED=false` disables it. |
 | `TLS_ENABLED`, `TLS_CERT_PATH`, `TLS_KEY_PATH` | Serve HTTPS/WSS directly from the container (or terminate TLS in a reverse proxy). |
 | `DB_PATH`, `UPLOAD_DIR` | Default `/data/voip.sqlite` and `/data/uploads` (since 0.6.3; older images need `DB_PATH=/data/voip.sqlite` set explicitly). Keep `/data` on a volume. |
+| `RECONNECT_GRACE_SEC` | Default `20`. A member whose connection drops (new IP, Wi-Fi switch) keeps their place in the voice channel this long; reconnecting in time is seamless. |
+| `SESSION_REFRESH_GRACE_SEC` | Default 7 days. Clients renew their session themselves (0.6.5+); an expired session can still be renewed within this window, e.g. after a laptop slept. |
 
 The LiveKit API secret is generated once into `/data/livekit-api-secret`.
 

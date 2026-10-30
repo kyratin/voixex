@@ -82,6 +82,12 @@ const loginFailuresByNick = new AttemptLimiter(10, 10 * 60_000)
 /** Server-password checks on register/claim, for all clients together (they share one proxy IP). */
 const serverPasswordAttempts = new AttemptLimiter(30, 10 * 60_000)
 const clients = new Map<string, Set<WebSocket>>()
+/** Last client → server message per socket; silent sockets are dead (half-open TCP). */
+const socketLastRx = new Map<WebSocket, number>()
+/** Members whose last socket closed, waiting for config.reconnectGraceSec before leaving the channel. */
+const pendingEvictions = new Map<string, ReturnType<typeof setTimeout>>()
+/** Clients ping every 10–15 s; a socket silent for this long lost its network without closing. */
+const WS_SILENT_TIMEOUT_MS = 75_000
 /** Map WebSocket → client for targeted broadcast (screen chunks). */
 const wsClientMeta = new Map<
   WebSocket,
@@ -246,11 +252,30 @@ function sweepStalePresence() {
       touchLastSeen(row.server_id, row.client_id)
       continue
     }
+    if (pendingEvictions.has(key)) continue
     evictMemberPresence(row.server_id, row.client_id)
   }
 }
 
 setInterval(sweepStalePresence, config.presenceSweepSec * 1000).unref?.()
+
+/** Drop sockets whose client vanished without closing them, so its reconnect is the only session. */
+function sweepSilentSockets() {
+  const now = Date.now()
+  for (const [socket, at] of socketLastRx) {
+    if (now - at < WS_SILENT_TIMEOUT_MS) continue
+    socketLastRx.delete(socket)
+    const ws = socket as WebSocket & { terminate?: () => void }
+    try {
+      if (ws.terminate) ws.terminate()
+      else ws.close(4000, "silent")
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+setInterval(sweepSilentSockets, 15_000).unref?.()
 
 type PermissionKey = "manage_server" | "manage_channels" | "manage_roles" | "manage_chat"
 type PermissionMap = Record<PermissionKey, boolean>
@@ -878,6 +903,44 @@ async function issueJoinForServer(input: {
     udp: { host: config.publicUdpHost, port: config.udpPort }
   }
 }
+
+/**
+ * Renews a session without signing in again: same member, same media key, fresh expiry. Clients
+ * call it periodically and after a reconnect, so a dropped connection (new IP, sleep, server
+ * restart) comes back on its own. Everything a login checks is checked again.
+ */
+app.post("/v1/session/refresh", async (req, rep) => {
+  const token = req.headers.authorization?.replace("Bearer ", "")
+  if (!token) return rep.code(401).send({ message: "missing auth token" })
+  const payload = verifyToken(token, config.tokenSecret, config.sessionRefreshGraceSec)
+  if (!payload || payload.sub !== "auth" || !payload.mediaSeed) return rep.code(401).send({ message: "invalid token" })
+  if (payload.limited) return rep.code(403).send(levelTooLow(serverMinLevel(payload.serverId)))
+  if (payload.certId && !isCertificateActive(payload.certId)) {
+    return rep.code(401).send({ message: "certificate revoked", code: "cert_revoked" })
+  }
+  const member = db
+    .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ?")
+    .get(payload.serverId, payload.clientId) as { display_name: string } | undefined
+  if (!member) return rep.code(401).send({ message: "not a member", code: "session_expired" })
+  if (payload.credentialed) {
+    const creds = getCredentials(payload.serverId, payload.clientId)
+    if (!creds) return rep.code(401).send({ message: "access was reset by an admin", code: "session_expired" })
+    const minLevel = serverMinLevel(payload.serverId)
+    if (authLevel(credentialsMode(creds)) < minLevel) return rep.code(403).send(levelTooLow(minLevel))
+  } else {
+    const refused = legacyJoinError(payload.serverId, payload.clientId)
+    if (refused) return rep.code(403).send(refused)
+  }
+  const { sub: _sub, exp: _exp, ...rest } = payload
+  const displayName = member.display_name || payload.displayName
+  return {
+    authToken: makeAuthToken({ ...rest, displayName }, config.tokenSecret),
+    mediaToken: makeMediaToken(
+      { serverId: payload.serverId, clientId: payload.clientId, displayName, mediaSeed: payload.mediaSeed },
+      config.tokenSecret
+    )
+  }
+})
 
 app.post("/v1/servers", async (req, rep) => {
   const body = z.object({ name: z.string().min(1), password: z.string().min(4) }).parse(req.body)
@@ -2193,6 +2256,13 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   sockSet.add(socket)
   clientSockets.set(sockKey, sockSet)
   touchLastSeen(auth.serverId, auth.clientId)
+  // Came back within the grace period: still in the voice channel, nobody saw them leave.
+  const pendingEviction = pendingEvictions.get(sockKey)
+  if (pendingEviction) {
+    clearTimeout(pendingEviction)
+    pendingEvictions.delete(sockKey)
+  }
+  socketLastRx.set(socket, Date.now())
 
   socket.send(
     JSON.stringify({
@@ -2213,6 +2283,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
   }
 
   socket.onmessage = (msg: { data: unknown }) => {
+    socketLastRx.set(socket, Date.now())
     try {
       const event = JSON.parse(String(msg.data)) as WsClientEvent
       if (event.type === "join_room") {
@@ -2478,8 +2549,21 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
     const bucket = clients.get(key)
     bucket?.delete(socket)
     if (bucket && bucket.size === 0) clients.delete(key)
+    socketLastRx.delete(socket)
     if (sockSet && sockSet.size > 0) return
-    evictMemberPresence(auth.serverId, auth.clientId)
+    // A dropped connection (network change, new IP) usually comes back within seconds: keep the
+    // member in the channel for a while instead of making everyone see them leave and rejoin.
+    touchLastSeen(auth.serverId, auth.clientId)
+    const previous = pendingEvictions.get(sockKey)
+    if (previous) clearTimeout(previous)
+    pendingEvictions.set(
+      sockKey,
+      setTimeout(() => {
+        pendingEvictions.delete(sockKey)
+        if ((clientSockets.get(sockKey)?.size ?? 0) > 0) return
+        evictMemberPresence(auth.serverId, auth.clientId)
+      }, config.reconnectGraceSec * 1000)
+    )
   }
 })
 

@@ -34,14 +34,15 @@ export function signToken(payload: Payload, secret: string): string {
   return `${header}.${body}.${b64url(sig)}`
 }
 
-export function verifyToken(token: string, secret: string): Payload | null {
+/** graceSec: also accept a token that expired at most this long ago (session refresh only). */
+export function verifyToken(token: string, secret: string, graceSec = 0): Payload | null {
   const parts = token.split(".")
   if (parts.length !== 3) return null
   const [header, body, signature] = parts
   const expected = b64url(createHmac("sha256", secret).update(`${header}.${body}`).digest())
   if (expected !== signature) return null
   const payload = JSON.parse(unb64url(body).toString()) as Payload
-  if (Date.now() / 1000 > payload.exp) return null
+  if (Date.now() / 1000 > payload.exp + graceSec) return null
   return payload
 }
 

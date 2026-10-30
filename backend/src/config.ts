@@ -49,6 +49,10 @@ export const config = {
   livekitApiSecret: process.env.LIVEKIT_API_SECRET?.trim() ?? "",
   livekitTokenTtlSec: Number(process.env.LIVEKIT_TOKEN_TTL_SEC ?? 60 * 30),
   /** Evict member_state when last_seen is older than this (seconds). */
+  /** A dropped client keeps its place in the voice channel this long, to come back seamlessly. */
+  reconnectGraceSec: Number(process.env.RECONNECT_GRACE_SEC ?? 20),
+  /** An expired session can still be renewed this long (laptop asleep, phone offline). */
+  sessionRefreshGraceSec: Number(process.env.SESSION_REFRESH_GRACE_SEC ?? 60 * 60 * 24 * 7),
   presenceTtlSec: Number(process.env.PRESENCE_TTL_SEC ?? 45),
   /** How often the server scans for stale presence rows (seconds). */
   presenceSweepSec: Number(process.env.PRESENCE_SWEEP_SEC ?? 30),
