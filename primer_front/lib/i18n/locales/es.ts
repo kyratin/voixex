@@ -231,6 +231,9 @@ export const es: TranslationDict = {
     notInVoice: "No estás en un canal de voz"
   },
   mini: {
+    viewMode: "Vista de miniventana",
+    showAvatars: "Mostrar avatares",
+    showCameras: "Mostrar cámaras",
     open: "Abrir la app",
     hide: "Ocultar",
     empty: "Aún no hay nadie"

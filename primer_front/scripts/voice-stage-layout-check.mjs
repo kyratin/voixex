@@ -22,6 +22,27 @@ try {
   const page = await browser.newPage({ locale: 'en-US', viewport: { width: 1440, height: 900 } })
   await page.goto(`http://127.0.0.1:${server.address().port}`)
   await page.evaluate(async () => { const module = await import('/bundle.js'); window.fixture = module.mountStageHarness(); window.Detector = module.VoiceActivityDetector })
+  const captureLoad = await page.evaluate(async () => {
+    const { loadVoiceCaptureWorklet } = await import('/bundle.js')
+    const context = new AudioContext({ sampleRate: 48000 })
+    const capture = await loadVoiceCaptureWorklet(context)
+    const oscillator = context.createOscillator()
+    oscillator.frequency.value = 700
+    const sink = context.createGain(); sink.gain.value = 0
+    oscillator.connect(capture); capture.connect(sink); sink.connect(context.destination)
+    const times = []
+    let valid = true
+    capture.port.onmessage = event => { times.push(event.data.capturedAt); valid &&= event.data.data.length === 960 }
+    oscillator.start(); await context.resume()
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const start = performance.now()
+    while (performance.now() - start < 180) { /* simulate UI/video load */ }
+    await new Promise(resolve => setTimeout(resolve, 350))
+    oscillator.stop(); capture.disconnect(); await context.close()
+    return { count: times.length, valid, largestGap: Math.max(...times.slice(1).map((time, i) => time - times[i])) }
+  })
+  assert.ok(captureLoad.valid && captureLoad.count >= 25 && captureLoad.largestGap < 0.03, JSON.stringify(captureLoad))
+  console.log('PASS real browser microphone worklet continues 20ms framing during 180ms renderer stall')
   await page.waitForSelector('[data-participant-grid]')
   await page.waitForFunction(() => document.querySelector('[data-participant-grid] video').videoWidth > 0)
   const measure = () => page.evaluate(() => {
@@ -52,6 +73,28 @@ try {
   await page.evaluate(() => window.fixture.update({ count: 4 }))
   await page.waitForFunction(() => document.querySelectorAll('[data-participant-grid] [data-participant-id]').length === 4)
   console.log('PASS paging limits visible participants to 12 and clamps when members leave')
+  await page.evaluate(() => window.fixture.update({ watching: true, popup: true }))
+  await page.waitForFunction(() => document.querySelectorAll('section video').length > 0)
+  const decoder = page.locator('section video').last()
+  assert.equal(await decoder.isVisible(), false, 'main stream hidden while popup owns presentation')
+  assert.equal(await decoder.evaluate(video => video.srcObject.getVideoTracks()[0].readyState), 'live')
+  await page.evaluate(() => window.fixture.update({ popup: false }))
+  await page.waitForFunction(() => [...document.querySelectorAll('section video')].some(video => video.getBoundingClientRect().width > 0))
+  await page.getByRole('button', { name: 'Back to chat' }).first().click()
+  assert.equal(await page.locator('section').isVisible(), false)
+  assert.equal(await decoder.evaluate(video => video.srcObject.getVideoTracks()[0].readyState), 'live')
+  console.log('PASS popup hides main stream and collapsing activities preserves the media source')
+  await page.evaluate(() => window.fixture.update({ watching: false, collapsed: false, mini: true, count: 2 }))
+  await page.waitForSelector('[data-mini-camera-grid] video')
+  await page.getByRole('button', { name: 'Show avatars' }).click()
+  assert.equal(await page.locator('[data-mini-camera-grid]').count(), 0)
+  await page.getByRole('button', { name: 'Show cameras' }).click()
+  await page.waitForSelector('[data-mini-camera-grid] video')
+  assert.equal(await page.locator('[data-mini-camera-grid] video').evaluate(video => video.srcObject.getVideoTracks()[0].readyState), 'live')
+  await page.evaluate(() => window.fixture.update({ cameras: false }))
+  await page.waitForFunction(() => !document.querySelector('[data-mini-camera-grid]'))
+  console.log('PASS mini window switches cameras/avatars without stopping capture and falls back when cameras stop')
+  await page.evaluate(() => window.fixture.update({ cameras: true, mini: false, count: 4 }))
   await page.setViewportSize({ width: 390, height: 844 })
   await page.evaluate(() => window.fixture.update({ count: 12, fullscreen: true }))
   await page.waitForFunction(() => document.querySelector('section').getBoundingClientRect().width === 390)

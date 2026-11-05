@@ -39,7 +39,7 @@ import { useI18n } from "@/lib/i18n/provider"
 
 import type { CameraControls, CameraPicture } from "@/lib/camera/use-camera"
 
-function CameraVideo({ picture, mirror }: { picture: CameraPicture; mirror: boolean }) {
+export function CameraVideo({ picture, mirror }: { picture: CameraPicture; mirror: boolean }) {
   const ref = useRef<HTMLVideoElement>(null)
   useEffect(() => {
     const el = ref.current
@@ -171,7 +171,7 @@ function DockButton({
   )
 }
 
-function ParticipantTile({
+export function ParticipantTile({
   user,
   picture,
   mirror = false,
@@ -335,7 +335,7 @@ export function VoiceStage({
   const expectingStream = Boolean(activeScreenSharerName && !isScreenSharing && !hasStream && !streamHiddenByUser)
   const canHideStream = Boolean(!isScreenSharing && activeScreenSharerName && !streamHiddenByUser)
   const canPopOut = Boolean(activeScreenSharerName || hasStream || isScreenSharing)
-  const hasScreenVideo = isScreenSharing || hasStream || expectingStream
+  const hasScreenVideo = !showingStreamWindow && (isScreenSharing || hasStream || expectingStream)
   const hasCameraVideo = Boolean(camera?.local || (camera && Object.keys(camera.pictures).length > 0))
   const showsVideo = hasScreenVideo || hasCameraVideo
   const live = Boolean(activeScreenSharerName || isScreenSharing)
@@ -478,7 +478,7 @@ export function VoiceStage({
           immersive && "hidden"
         )}
       >
-        {fullscreen && onCollapse ? (
+        {onCollapse ? (
           <button
             type="button"
             onClick={onCollapse}
@@ -695,7 +695,7 @@ export function VoiceStage({
             <Monitor className="h-8 w-8 text-accent" />
             <p className="text-sm font-medium text-foreground">{t("voice.sharingFromPhone")}</p>
           </div>
-        ) : isScreenSharing ? (
+        ) : isScreenSharing && !showingStreamWindow ? (
           <video
             ref={localPreviewVideoRef}
             autoPlay
@@ -704,7 +704,9 @@ export function VoiceStage({
             className="max-h-full max-w-full rounded-lg bg-black object-contain shadow-2xl animate-in fade-in zoom-in-95 duration-500"
           />
         ) : hasStream || expectingStream ? (
-          <div className="relative flex h-full w-full items-center justify-center animate-in fade-in zoom-in-95 duration-500">
+          <>
+          {showingStreamWindow ? participantsGrid : null}
+          <div className={showingStreamWindow ? "hidden" : "relative flex h-full w-full items-center justify-center animate-in fade-in zoom-in-95 duration-500"}>
             {(streamLoading || expectingStream) && !hasStream ? (
               <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-card/60 animate-in fade-in duration-300">
                 <Loader2 className="h-7 w-7 animate-spin text-primary" />
@@ -730,6 +732,7 @@ export function VoiceStage({
               </button>
             ) : null}
           </div>
+          </>
         ) : streamHiddenByUser && activeScreenSharerName ? (
           // Hidden stream: the call looks like there is no stream; a short notice says so.
           <>

@@ -40,7 +40,7 @@ import {
 } from "@/lib/voip-client"
 import { getPeerVolume, setPeerVolumeStored } from "@/lib/peer-volume-storage"
 import { resampleFloat32Chunk, resampleInt16Chunk } from "@/lib/voice-resample"
-import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet } from "@/lib/voice-playout"
+import { VoicePlayoutPrefetch, loadVoicePlaybackWorklet, loadVoiceCaptureWorklet } from "@/lib/voice-playout"
 import { WebRtcMediaSession } from "@/lib/webrtc-media"
 import { connectMonoSourceToTap, createMonoMediaStreamTap, createRnnoiseWorklet, createSpeexNoiseWorklet } from "@/lib/speex-capture"
 import type { RnnoiseWorkletNode, SpeexWorkletNode } from "@sapphi-red/web-noise-suppressor"
@@ -301,7 +301,7 @@ export default function VoIPApp() {
   type VoicePipelineRuntime = {
     stream: MediaStream
     captureCtx: AudioContext
-    captureNode: ScriptProcessorNode
+    captureNode: ScriptProcessorNode | AudioWorkletNode
     captureSource: MediaStreamAudioSourceNode
     micGainNode: GainNode
     captureHighpass: BiquadFilterNode
@@ -343,6 +343,7 @@ export default function VoIPApp() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   /** Phones: the call screen is open (covers the app), or collapsed to a bar above the chat. */
   const [voiceViewOpen, setVoiceViewOpen] = useState(false)
+  const [voiceActivitiesHidden, setVoiceActivitiesHidden] = useState(false)
   const [isMobileApp, setIsMobileApp] = useState(false)
   const isMobileAppRef = useRef(false)
   isMobileAppRef.current = isMobileApp
@@ -1296,7 +1297,8 @@ export default function VoIPApp() {
       }
     }
     runtime.captureNode.disconnect()
-    runtime.captureNode.onaudioprocess = null
+    if ("onaudioprocess" in runtime.captureNode) runtime.captureNode.onaudioprocess = null
+    else runtime.captureNode.port.onmessage = null
     runtime.captureSource.disconnect()
     runtime.micGainNode.disconnect()
     runtime.captureHighpass.disconnect()
@@ -2189,7 +2191,9 @@ export default function VoIPApp() {
         const captureSource = captureCtx.createMediaStreamSource(stream)
         // Keep 0.2.28 behavior: ScriptProcessor on some Electron stacks is
         // stable only with power-of-two buffer sizes.
-        const captureNode = captureCtx.createScriptProcessor(1024, 1, 1)
+        const captureNode = isMobileApp
+          ? await loadVoiceCaptureWorklet(captureCtx)
+          : captureCtx.createScriptProcessor(1024, 1, 1)
         const micGainNode = captureCtx.createGain()
         micGainNode.gain.value = micVolumePctRef.current / 100
         const captureHighpass = captureCtx.createBiquadFilter()
@@ -2207,8 +2211,8 @@ export default function VoIPApp() {
         const captureSinkNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
         const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
-          startMs: 60,
-          maxQueuedSec: 0.4
+          startMs: isMobileApp ? 120 : 60,
+          maxQueuedSec: isMobileApp ? 0.6 : 0.4
         })
         playbackWorklet.port.onmessage = (ev: MessageEvent) => {
           const d = ev.data as { type?: string; bufferedSamples?: number; underruns?: number; overflowDrops?: number }
@@ -2286,10 +2290,8 @@ export default function VoIPApp() {
         let lastMeterEmitAt = 0
         let lastActivityEmitAt = 0
         const activityDetector = new VoiceActivityDetector()
-        captureNode.onaudioprocess = (ev) => {
+        const onCaptureSamples = (input: Float32Array, output?: Float32Array) => {
           if (!voicePipelineRef.current || voicePipelineRef.current !== runtime) return
-          const input = ev.inputBuffer.getChannelData(0)
-          const output = ev.outputBuffer.getChannelData(0)
           const resampled = resampleFloat32Chunk(input, runtime.captureCtx.sampleRate, 48000, runtime)
           const pcm = new Int16Array(resampled.length)
           for (let i = 0; i < resampled.length; i += 1) {
@@ -2302,7 +2304,7 @@ export default function VoIPApp() {
           const gateFloorRatio = Math.max(0.01, Math.min(0.5, gateFloorPctRef.current / 100))
           // The neural network already removes the noise between words; a gate on top would only
           // clip quiet speech.
-          const gatedPcm = gateEnabledRef.current && !aiActive
+          const gatedPcm = !isMobileApp && gateEnabledRef.current && !aiActive
             ? applyUplinkNoiseGate(pcm, muteAmp, openAmp, gateFloorRatio)
             : pcm
           // The mute button applies to the call; a mic test should still show and play the mic.
@@ -2328,7 +2330,7 @@ export default function VoIPApp() {
             })
           }
 
-          for (let i = 0; i < output.length; i += 1) {
+          for (let i = 0; output && i < output.length; i += 1) {
             output[i] = i < txPcm.length ? txPcm[i] / 32768 : 0
           }
 
@@ -2362,6 +2364,25 @@ export default function VoIPApp() {
               })
               traceRef.current.txFrames = 0
             }
+          }
+        }
+
+        if ("onaudioprocess" in captureNode) {
+          captureNode.onaudioprocess = ev => onCaptureSamples(ev.inputBuffer.getChannelData(0), ev.outputBuffer.getChannelData(0))
+        } else {
+          let gateSignature = ""
+          const syncCaptureGate = () => {
+            const config = { type: "gate", enabled: gateEnabledRef.current && !aiActive, muteThreshold: gateMuteThresholdRef.current, openThreshold: gateOpenThresholdRef.current, floorRatio: gateFloorPctRef.current / 100, releaseMs: gateReleaseMsRef.current }
+            const signature = JSON.stringify(config)
+            if (signature !== gateSignature) { gateSignature = signature; captureNode.port.postMessage(config) }
+          }
+          syncCaptureGate()
+          captureNode.port.onmessage = (event: MessageEvent<{ type: string; data: Float32Array; capturedAt: number }>) => {
+            if (event.data.type !== "frame") return
+            syncCaptureGate()
+            // A blocked WebView must resume with live speech instead of sending a stale burst.
+            if (captureCtx.currentTime - event.data.capturedAt > 0.16) return
+            onCaptureSamples(event.data.data)
           }
         }
 
@@ -2670,7 +2691,7 @@ export default function VoIPApp() {
     if (isScreenSharing) {
       void video.play().catch(() => {})
     }
-  }, [isScreenSharing, currentVoiceChannel])
+  }, [isScreenSharing, currentVoiceChannel, showingStreamWindow, voiceViewOpen])
 
   useEffect(() => {
     if (!screenVideoUrl || isScreenSharing) return
@@ -3135,6 +3156,7 @@ export default function VoIPApp() {
         /* ignore */
       }
       stopPopupMirrorTracks()
+      webRtcSessionRef.current?.unbindPopupScreenVideo()
       webRtcSessionRef.current?.relocateScreenAudio(null)
       streamWindowRef.current.close()
       streamWindowRef.current = null
@@ -3147,6 +3169,15 @@ export default function VoIPApp() {
       return
     }
     streamWindowRef.current = popup
+    popup.addEventListener("pagehide", () => {
+      if (streamWindowRef.current !== popup) return
+      stopPopupMirrorTracks()
+      webRtcSessionRef.current?.unbindPopupScreenVideo()
+      webRtcSessionRef.current?.relocateScreenAudio(null)
+      streamWindowRef.current = null
+      setShowingStreamWindow(false)
+    }, { once: true })
+    if (streamHiddenByUserRef.current) handleShowStream()
     setShowingStreamWindow(true)
     renderStreamWindow()
     window.setTimeout(() => renderStreamWindowRef.current(), 400)
@@ -3604,6 +3635,7 @@ export default function VoIPApp() {
   const [hasShell, setHasShell] = useState(false)
   const [closeToTray, setCloseToTray] = useState(true)
   const [miniCallEnabled, setMiniCallEnabled] = useState(true)
+  const [miniCallDisplay, setMiniCallDisplay] = useState<"cameras" | "avatars">("cameras")
   const [appMinimized, setAppMinimized] = useState(false)
   const [miniCallDismissed, setMiniCallDismissed] = useState(false)
   const shellActionRef = useRef<(action: VoixexShellAction) => void>(() => {})
@@ -3624,9 +3656,10 @@ export default function VoIPApp() {
     if (!shell) return
     setHasShell(true)
     try {
-      const saved = JSON.parse(localStorage.getItem(SHELL_PREFS_KEY) ?? "{}") as { closeToTray?: boolean; miniCall?: boolean }
+      const saved = JSON.parse(localStorage.getItem(SHELL_PREFS_KEY) ?? "{}") as { closeToTray?: boolean; miniCall?: boolean; miniView?: "cameras" | "avatars" }
       if (typeof saved.closeToTray === "boolean") setCloseToTray(saved.closeToTray)
       if (typeof saved.miniCall === "boolean") setMiniCallEnabled(saved.miniCall)
+      if (saved.miniView === "cameras" || saved.miniView === "avatars") setMiniCallDisplay(saved.miniView)
     } catch {
       /* defaults */
     }
@@ -3646,11 +3679,11 @@ export default function VoIPApp() {
     if (!hasShell) return
     window.voixexShell?.setPreferences({ closeToTray, miniWindow: miniCallEnabled })
     try {
-      localStorage.setItem(SHELL_PREFS_KEY, JSON.stringify({ closeToTray, miniCall: miniCallEnabled }))
+      localStorage.setItem(SHELL_PREFS_KEY, JSON.stringify({ closeToTray, miniCall: miniCallEnabled, miniView: miniCallDisplay }))
     } catch {
       /* not persisted */
     }
-  }, [hasShell, closeToTray, miniCallEnabled])
+  }, [hasShell, closeToTray, miniCallEnabled, miniCallDisplay])
   const inVoiceCall = isInVoice && Boolean(currentVoiceChannel)
   useEffect(() => {
     if (!hasShell) return
@@ -3671,6 +3704,7 @@ export default function VoIPApp() {
       }
     })
   }, [hasShell, inVoiceCall, voiceChannelName, isMuted, isDeafened, t])
+  useEffect(() => setVoiceActivitiesHidden(false), [currentVoiceChannel])
   const miniCallVisible = hasShell && miniCallEnabled && appMinimized && inVoiceCall
   const miniCallView = (pip: boolean) => (
     <MiniCallView
@@ -3685,6 +3719,10 @@ export default function VoIPApp() {
       onOpen={() => window.voixexShell?.showMain()}
       onClose={pip ? undefined : () => setMiniCallDismissed(true)}
       pip={pip}
+      camera={camera.controls}
+      selfClientId={myVoiceClientId}
+      preferredView={miniCallDisplay}
+      onViewChange={setMiniCallDisplay}
     />
   )
   const isTextChannel = activeChannel?.type === "text"
@@ -4880,7 +4918,7 @@ export default function VoIPApp() {
                   enablePeerVolume={hasDesktopBridge && isInVoice && wsForVoiceJoin}
                   onPeerVolumeChange={handlePeerVolumeChange}
                   fullscreen={fullscreen}
-                  onCollapse={() => setVoiceViewOpen(false)}
+                  onCollapse={() => { setVoiceViewOpen(false); setVoiceActivitiesHidden(true) }}
                 />
   )
 
@@ -5025,11 +5063,14 @@ export default function VoIPApp() {
                         applyMute(!isMuted)
                       }}
                       onLeave={handleDisconnect}
-                      onOpen={() => setVoiceViewOpen(true)}
+                      onOpen={() => { setVoiceActivitiesHidden(false); setVoiceViewOpen(true) }}
                     />
                   )
                 ) : (
-                  inlineStage
+                  <>
+                    <div className={voiceActivitiesHidden ? "hidden" : "contents"}>{inlineStage}</div>
+                    {voiceActivitiesHidden ? <VoiceMiniBar channelName={voiceChannelName} participants={voiceUsers[currentVoiceChannel] ?? []} live={Boolean(activeScreenSharerName || isScreenSharing)} isMuted={isMuted} onToggleMute={() => applyMute(!isMuted)} onLeave={handleDisconnect} onOpen={() => setVoiceActivitiesHidden(false)} /> : null}
+                  </>
                 )
               ) : inlineStageLeaving ? (
                 <div className="animate-out fade-out slide-out-to-top-3 duration-200 fill-mode-forwards">{inlineStageLeaving}</div>
@@ -5422,7 +5463,13 @@ export default function VoIPApp() {
                   <Label>{isMobileApp ? t("settings.miniCallPip") : t("settings.miniCall")}</Label>
                   <p className="text-xs text-muted-foreground">{isMobileApp ? t("settings.miniCallPipHint") : t("settings.miniCallHint")}</p>
                 </div>
-                <Switch checked={miniCallEnabled} onCheckedChange={setMiniCallEnabled} />
+                <div className="flex items-center gap-3">
+                  <Select value={miniCallDisplay} onValueChange={value => setMiniCallDisplay(value as "cameras" | "avatars")}>
+                    <SelectTrigger aria-label={t("mini.viewMode")} className="w-44"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="cameras">{t("mini.showCameras")}</SelectItem><SelectItem value="avatars">{t("mini.showAvatars")}</SelectItem></SelectContent>
+                  </Select>
+                  <Switch checked={miniCallEnabled} onCheckedChange={setMiniCallEnabled} />
+                </div>
               </div>
             </TabsContent>
 

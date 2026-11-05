@@ -127,9 +127,6 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
     }
     const L = this.buf.length
     let hadUnderrun = false
-    // More than ~2x the target queued: skip near-silent samples until back near the target.
-    // Latency drains during pauses without pitch shifts or jumps inside words.
-    let catchUp = this._used() > this.startThreshold * 2 + 960
     for (let i = 0; i < n; i++) {
       if (this.r === this.w) {
         hadUnderrun = true
@@ -139,12 +136,6 @@ class VoicePlaybackProcessor extends AudioWorkletProcessor {
       }
       let s = this.buf[this.r]
       this.r = (this.r + 1) % L
-      if (catchUp && s > -0.004 && s < 0.004 && this.r !== this.w) {
-        s = this.buf[this.r]
-        this.r = (this.r + 1) % L
-        this.catchupDrops += 1
-        if (this._used() <= this.startThreshold + 480) catchUp = false
-      }
       this.lastOut = s
       out[i] = s
     }
@@ -177,8 +168,13 @@ class VoiceCaptureFramerProcessor extends AudioWorkletProcessor {
     this.w = 0
     this.r = 0
     this.frameSize = 960
+    this.gate = null
+    this.env = 0
+    this.gain = 1
+    this.zone = "open"
     this.port.onmessage = (e) => {
       const m = e.data
+      if (m.type === "gate") this.gate = m.enabled ? m : null
       if (m.type === "reset") {
         this.w = 0
         this.r = 0
@@ -198,11 +194,35 @@ class VoiceCaptureFramerProcessor extends AudioWorkletProcessor {
       this.r = (this.r + 1) % L
     }
   }
-  process(inputs) {
+  process(inputs, outputs) {
     const input = inputs[0] && inputs[0][0]
     if (!input || input.length === 0) return true
+    // Keep the processed microphone path on the audio thread (LiveKit and monitoring).
+    const output = outputs[0] && outputs[0][0]
+    const g = this.gate
+    const muteT = g ? Math.max(8, g.muteThreshold) : 0
+    const openT = g ? Math.max(muteT + 24, g.openThreshold) : 0
+    const release = Math.exp(-1 / (sampleRate * ((g ? Math.max(80, g.releaseMs) : 80) / 1000)))
+    const attack = Math.exp(-1 / (sampleRate * 0.004))
+    const up = Math.exp(-1 / (sampleRate * 0.003))
+    const down = Math.exp(-1 / (sampleRate * 0.012))
     for (let i = 0; i < input.length; i++) {
-      this._push(input[i])
+      let s = input[i]
+      if (g) {
+        const p = Math.abs(s * 32768)
+        this.env = p >= this.env ? this.env + (p - this.env) * (1 - attack) : this.env * release
+        if (this.zone === "open") {
+          if (this.env < openT * 0.9) this.zone = this.env >= muteT ? "duck" : "mute"
+        } else if (this.zone === "duck") {
+          if (this.env >= openT) this.zone = "open"
+          else if (this.env < muteT * 0.88) this.zone = "mute"
+        } else this.zone = this.env >= openT ? "open" : this.env >= muteT ? "duck" : "mute"
+        const target = this.zone === "open" ? 1 : this.zone === "duck" ? Math.max(0.01, Math.min(0.5, g.floorRatio)) : 0
+        this.gain += (target - this.gain) * (1 - (target > this.gain ? up : down))
+        s *= this.gain
+      }
+      if (output) output[i] = s
+      this._push(s)
     }
     while (this._used() >= this.frameSize) {
       const out = new Float32Array(this.frameSize)
@@ -210,7 +230,7 @@ class VoiceCaptureFramerProcessor extends AudioWorkletProcessor {
         out[i] = this.buf[this.r]
         this.r = (this.r + 1) % this.buf.length
       }
-      this.port.postMessage({ type: "frame", data: out }, [out.buffer])
+      this.port.postMessage({ type: "frame", data: out, capturedAt: currentTime }, [out.buffer])
     }
     return true
   }

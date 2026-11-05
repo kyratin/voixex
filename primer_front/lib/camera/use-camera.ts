@@ -155,7 +155,7 @@ export function useCamera(options: {
     const media = navigator.mediaDevices
     void refreshDevices()
     media?.addEventListener("devicechange", refreshDevices)
-    const hidden = () => { if (document.hidden) stop() }
+    const hidden = () => { if (document.hidden && !window.voixexShell) stop() }
     // All platforms release camera when the app is hidden; no background camera capture.
     const background = () => stop()
     window.addEventListener("voixex-camera-background", background)
@@ -182,7 +182,7 @@ export function useCamera(options: {
         }
         if (previous?.image) URL.revokeObjectURL(previous.image)
         remote.current.set(sender, { ...previous, image, last: performance.now() })
-        setPictures(Object.fromEntries(remote.current))
+        if (!previous?.stream) setPictures(Object.fromEntries(remote.current))
       } catch { /* malformed or expired frame */ }
     })
     const timer = setInterval(() => {

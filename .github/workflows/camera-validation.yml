@@ -58,6 +58,7 @@ jobs:
           npx tsc --noEmit
           npm run build
           npx playwright install --with-deps chromium
+          node scripts/voice-worklet-check.mjs
           node scripts/voice-browser-check.mjs
           node scripts/camera-browser-check.mjs
           node scripts/voice-stage-layout-check.mjs

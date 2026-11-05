@@ -2,11 +2,14 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
-import { Headphones, HeadphoneOff, Maximize2, Mic, MicOff, PhoneOff, Volume2, X } from "lucide-react"
+import { Headphones, HeadphoneOff, Maximize2, Mic, MicOff, PhoneOff, Volume2, Video, Users, X } from "lucide-react"
 import type { VoiceUser } from "@/components/voip/channel-sidebar"
 import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
 import { useI18n } from "@/lib/i18n/provider"
 import { cn } from "@/lib/utils"
+
+import type { CameraControls } from "@/lib/camera/use-camera"
+import { ParticipantTile } from "@/components/voip/voice-stage"
 
 /** Window name the desktop app recognizes (frameless, always on top, bottom-right corner). */
 const MINI_WINDOW_NAME = "voixex-mini"
@@ -30,7 +33,11 @@ export function MiniCallView({
   onLeave,
   onOpen,
   onClose,
-  pip = false
+  pip = false,
+  camera,
+  selfClientId,
+  preferredView,
+  onViewChange
 }: {
   channelName: string
   participants: VoiceUser[]
@@ -44,8 +51,23 @@ export function MiniCallView({
   onOpen: () => void
   onClose?: () => void
   pip?: boolean
+  camera?: CameraControls
+  selfClientId?: string | null
+  preferredView?: "cameras" | "avatars"
+  onViewChange?: (view: "cameras" | "avatars") => void
 }) {
   const { t } = useI18n()
+  const [view, setView] = useState<"cameras" | "avatars">("cameras")
+  useEffect(() => {
+    try { if (localStorage.getItem("voixex-mini-view") === "avatars") setView("avatars") } catch {}
+  }, [])
+  const hasCameras = Boolean(camera?.local || Object.keys(camera?.pictures ?? {}).length)
+  const showCameras = hasCameras && (preferredView ?? view) === "cameras"
+  const [page, setPage] = useState(0)
+  const pages = Math.max(1, Math.ceil(participants.length / 12))
+  const currentPage = Math.min(page, pages - 1)
+  const visible = participants.slice(currentPage * 12, (currentPage + 1) * 12)
+  const columns = visible.length <= 1 ? 1 : visible.length <= 4 ? 2 : visible.length <= 6 ? 3 : 4
   const speaking = participants.filter((u) => u.isSpeaking)
   const many = participants.length > 4
   return (
@@ -60,6 +82,12 @@ export function MiniCallView({
         ) : null}
         {pip ? null : (
           <span className="flex shrink-0 items-center" style={noDrag}>
+            {hasCameras ? <HeaderButton label={t(showCameras ? "mini.showAvatars" : "mini.showCameras")} onClick={() => {
+              const next = showCameras ? "avatars" : "cameras"
+              setView(next)
+              onViewChange?.(next)
+              try { localStorage.setItem("voixex-mini-view", next) } catch {}
+            }}>{showCameras ? <Users className="size-3.5" /> : <Video className="size-3.5" />}</HeaderButton> : null}
             <HeaderButton label={t("mini.open")} onClick={onOpen}>
               <Maximize2 className="h-3.5 w-3.5" />
             </HeaderButton>
@@ -72,7 +100,9 @@ export function MiniCallView({
         )}
       </div>
 
-      <button
+      {showCameras ? <div data-mini-camera-grid onDoubleClick={onOpen} className="grid min-h-0 flex-1 gap-1 p-1" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${Math.max(1, Math.ceil(visible.length / columns))}, minmax(0, 1fr))` }}>
+        {visible.map(user => <ParticipantTile key={user.id} user={user} picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]} mirror={user.id === selfClientId} />)}
+      </div> : <button
         type="button"
         onDoubleClick={onOpen}
         className="flex min-h-0 flex-1 flex-wrap content-center items-center justify-center gap-x-3 gap-y-2 overflow-y-auto px-3 py-2"
@@ -102,7 +132,12 @@ export function MiniCallView({
             </span>
           ))
         )}
-      </button>
+      </button>}
+      {showCameras && pages > 1 ? <div className="flex justify-center gap-3 text-xs">
+        <button aria-label={t("camera.previousParticipants")} disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>‹</button>
+        <span>{currentPage + 1} / {pages}</span>
+        <button aria-label={t("camera.nextParticipants")} disabled={currentPage + 1 === pages} onClick={() => setPage(currentPage + 1)}>›</button>
+      </div> : null}
 
       {pip ? (
         <p className="shrink-0 truncate px-3 pb-2 text-center text-[10px] text-muted-foreground">

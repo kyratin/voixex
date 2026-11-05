@@ -231,6 +231,9 @@ export const ru: TranslationDict = {
     notInVoice: "Не в голосовом канале"
   },
   mini: {
+    viewMode: "Вид мини-окна",
+    showAvatars: "Показать аватары",
+    showCameras: "Показать камеры",
     open: "Открыть приложение",
     hide: "Скрыть",
     empty: "Пока никого нет"

@@ -228,6 +228,9 @@ export const en = {
     notInVoice: "Not in a voice channel"
   },
   mini: {
+    viewMode: "Mini window view",
+    showAvatars: "Show avatars",
+    showCameras: "Show cameras",
     open: "Open the app",
     hide: "Hide",
     empty: "Nobody here yet"

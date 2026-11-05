@@ -1,3 +1,16 @@
+# 0.7.4 — Stream windows, camera mini view and mobile voice
+
+- Pop-out stream hides its main-window presentation while retaining the legacy decoder. Closing the pop-out restores the main view and cleans up popup tracks and audio routing.
+- Opening a previously hidden stream in a pop-out resumes its subscription/playback instead of leaving an empty player.
+- Mini call shows a camera grid when cameras are active, with an avatar-only toggle and a saved view preference in settings (also available for Android PiP). Without cameras it retains the compact avatar view.
+- Desktop cameras remain active when minimizing into the mini call. Android still releases local capture when backgrounded.
+- Collapse the voice stage above chat into a compact control bar without disconnecting, stopping media sources or leaving the room.
+- Android microphone capture and its noise gate run in an AudioWorklet; the LiveKit audio branch no longer waits for renderer callbacks. Frames more than 160 ms behind are not sent in a stale burst.
+- Remove individual-sample playback catch-up, which could distort quiet speech under queue pressure. Increase the initial mobile playout buffer and avoid redundant camera UI updates when a WebRTC camera track is available.
+- Browser checks cover camera/avatars switching, pop-out visibility, activity collapse, and uninterrupted worklet framing during a 180 ms renderer stall. Sample-accurate processor checks cover pitch preservation and capture/gate behavior.
+
+Server unchanged: compatible with server 0.7.3. Physical Android/Wi-Fi testing remains necessary to assess device-specific load and actual network RTT.
+
 # 0.7.3 — Fix progressive voice loss
 
 - Fix Opus WASM scratch-buffer allocation/addressing that could corrupt neighbouring codecs during participant churn and packet-loss concealment, eventually stopping voice or crashing the media worker.
