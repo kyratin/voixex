@@ -1,6 +1,7 @@
 import { parentPort } from "node:worker_threads"
 import {
   removeMember,
+  setMemberCameraAllowed,
   setMemberFlags,
   setMemberRoom,
   setMemberSpeaking,
@@ -19,6 +20,7 @@ import {
  */
 
 export type HostToWorker =
+  | { t: "camera"; clientId: string; allowed: boolean }
   | { t: "room"; clientId: string; roomId: string | null }
   | { t: "flags"; clientId: string; muted: boolean; deafened: boolean }
   | { t: "speaking"; clientId: string; speaking: boolean }
@@ -49,6 +51,8 @@ const log: MediaLogger = {
 
 port.on("message", (m: HostToWorker) => {
   switch (m.t) {
+    case "camera":
+      return setMemberCameraAllowed(m.clientId, m.allowed)
     case "room":
       return setMemberRoom(m.clientId, m.roomId)
     case "flags":

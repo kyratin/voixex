@@ -1,3 +1,4 @@
+import { CAMERA_KIND, parseCameraFragment } from "./camera-protocol.js"
 import dgram, { type RemoteInfo } from "node:dgram"
 import net, { type Socket } from "node:net"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
@@ -42,9 +43,12 @@ export type MediaHooks = {
 }
 
 /** Capabilities a client announces in HELLO2 (space separated after the token). */
-type Caps = { opus2: boolean }
+type Caps = { opus2: boolean; camera1: boolean }
 
 type Session = {
+  serverId: string
+  cameraBytes: number
+  cameraSecond: number
   clientId: string
   roomId: string | null
   /** tcp and ws (WebSocket, browsers/phones) are reliable streams; both use `tcp` for sending. */
@@ -122,6 +126,9 @@ const TCP_MAX_BACKLOG_BYTES = 24 * 1024
 const SPEAKING_RMS = 0.02
 const SPEAKING_HOLD_MS = 250
 
+const cameraAllowed = new Map<string, boolean>()
+export function setMemberCameraAllowed(clientId: string, allowed: boolean) { cameraAllowed.set(clientId, allowed) }
+
 const sessions = new Map<string, Session>()
 /** "address:port" → session, so a UDP packet is decrypted once instead of trying every key. */
 const sessionsByRemote = new Map<string, Session>()
@@ -178,6 +185,7 @@ export function setPeerVolume(listenerClientId: string, targetClientId: string, 
 }
 
 export function removeMember(clientId: string) {
+  cameraAllowed.delete(clientId)
   peerGainByListener.delete(clientId)
   for (const m of peerGainByListener.values()) m.delete(clientId)
   dropSession(clientId)
@@ -209,9 +217,9 @@ function newStream(s: { decoder: OpusScript | null }) {
 function parseHello(text: string): { token: string; caps: Caps } | null {
   if (text.startsWith("HELLO2 ")) {
     const [token, ...rest] = text.slice(7).trim().split(/\s+/)
-    return { token, caps: { opus2: rest.includes("opus2") } }
+    return { token, caps: { opus2: rest.includes("opus2"), camera1: rest.includes("camera1") } }
   }
-  if (text.startsWith("HELLO ")) return { token: text.slice(6).trim(), caps: { opus2: false } }
+  if (text.startsWith("HELLO ")) return { token: text.slice(6).trim(), caps: { opus2: false, camera1: false } }
   return null
 }
 
@@ -245,6 +253,9 @@ function acceptHello(
   const flags = desiredFlagsByClient.get(clientId)
   const session: Session = {
     clientId,
+    serverId: payload.serverId,
+    cameraBytes: 0,
+    cameraSecond: 0,
     roomId: desiredRoomByClient.get(clientId) ?? null,
     transport: transport.kind,
     remote: transport.kind === "udp" ? transport.remote : undefined,
@@ -285,7 +296,7 @@ function acceptHello(
   return { ok: true, session, ack: helloAck(hello.caps) }
 }
 
-const helloAck = (caps: Caps) => Buffer.from(caps.opus2 ? "HELLO_ACK opus2" : "HELLO_ACK")
+const helloAck = (caps: Caps) => Buffer.from(`HELLO_ACK${caps.opus2 ? " opus2" : ""}${caps.camera1 ? " camera1" : ""}`)
 
 function send(session: Session, kind: number, payload: Buffer, ts = Date.now()) {
   if (!session.roomId && kind !== KIND_PROBE_ACK) return
@@ -350,6 +361,20 @@ function handlePacket(session: Session, decoded: DecryptedPacket, packetLength: 
     return
   }
 
+  if (decoded.kind === CAMERA_KIND) {
+    session.legacyNonAudio += 1
+    if (!session.caps.camera1 || !cameraAllowed.get(session.clientId) || !parseCameraFragment(decoded.payload)) return
+    if (session.cameraSecond !== sec) { session.cameraSecond = sec; session.cameraBytes = 0 }
+    session.cameraBytes += packetLength
+    if (session.cameraBytes > 256 * 1024) return
+    const identity = Buffer.from(session.clientId)
+    if (identity.length > 255) return
+    const payload = Buffer.concat([Buffer.from([identity.length]), identity, decoded.payload])
+    for (const receiver of sessions.values()) {
+      if (receiver !== session && receiver.roomId === session.roomId && receiver.serverId === session.serverId && receiver.caps.camera1) send(receiver, CAMERA_KIND, payload)
+    }
+    return
+  }
   if (decoded.kind === KIND_SCREEN) {
     session.legacyNonAudio += 1
     const list = screenChunksByRoom.get(session.roomId) ?? []

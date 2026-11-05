@@ -13,7 +13,7 @@ export type RosterMember = {
 }
 
 /** Per voice channel rules set by admins; the server enforces them. */
-export type RoomPolicy = { allowMic: boolean; allowStreams: boolean }
+export type RoomPolicy = { allowMic: boolean; allowStreams: boolean; allowCamera: boolean }
 
 export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy; bannerUrl?: string | null }
 

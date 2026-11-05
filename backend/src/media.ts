@@ -14,6 +14,12 @@ type MediaHooks = {
  * that crashes is restarted with every member's room, flags and volumes.
  */
 
+const cameraAllowed = new Map<string, boolean>()
+export function setMemberCameraAllowed(clientId: string, allowed: boolean) {
+  cameraAllowed.set(clientId, allowed)
+  post({ t: "camera", clientId, allowed })
+}
+
 const roomByClient = new Map<string, string | null>()
 const flagsByClient = new Map<string, { muted: boolean; deafened: boolean }>()
 const volumes = new Map<string, Map<string, number>>()
@@ -52,6 +58,7 @@ export function setPeerVolume(listener: string, target: string, pct: number) {
 }
 
 export function removeMember(clientId: string) {
+  cameraAllowed.delete(clientId)
   roomByClient.delete(clientId)
   flagsByClient.delete(clientId)
   volumes.delete(clientId)
@@ -94,6 +101,7 @@ export function createMediaServer(logger: FastifyBaseLogger, hooks: MediaHooks =
     })
     // Media sockets belonged to the old worker's sessions; clients reconnect.
     for (const sock of mediaSockets.values()) sock.close()
+    for (const [clientId, allowed] of cameraAllowed) w.postMessage({ t: "camera", clientId, allowed } satisfies HostToWorker)
     for (const [clientId, roomId] of roomByClient) w.postMessage({ t: "room", clientId, roomId } satisfies HostToWorker)
     for (const [clientId, f] of flagsByClient) w.postMessage({ t: "flags", clientId, ...f } satisfies HostToWorker)
     for (const [listener, m] of volumes) {

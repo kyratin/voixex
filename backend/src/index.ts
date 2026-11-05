@@ -13,7 +13,7 @@ import { config } from "./config.js"
 import { initDb } from "./db.js"
 import { makeAuthToken, makeMediaToken, verifyToken } from "./token.js"
 import type { WsClientEvent, WsServerEvent, RosterMember, RoomInfo, RoomPolicy, ServerAppearance } from "./contracts.js"
-import { attachMediaSocket, createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
+import { setMemberCameraAllowed, attachMediaSocket, createMediaServer, removeMember, setMemberFlags, setMemberRoom, setMemberSpeaking, setPeerVolume } from "./media.js"
 import {
   AttemptLimiter,
   ChallengeStore,
@@ -533,6 +533,7 @@ function policyOf(row: Pick<RoomRow, "name" | "kind" | "options">): RoomPolicy {
   const legacyLobby = row.kind === "voice" && row.name.toLowerCase() === "lobby"
   return {
     allowMic: typeof options.allowMic === "boolean" ? options.allowMic : !legacyLobby,
+    allowCamera: typeof options.allowCamera === "boolean" ? options.allowCamera : true,
     allowStreams: typeof options.allowStreams === "boolean" ? options.allowStreams : true
   }
 }
@@ -552,7 +553,7 @@ function getRoomPolicy(serverId: string, roomId: string): RoomPolicy {
   const row = db.prepare("SELECT name, kind, options FROM rooms WHERE server_id = ? AND id = ? LIMIT 1").get(serverId, roomId) as
     | Pick<RoomRow, "name" | "kind" | "options">
     | undefined
-  return row ? policyOf(row) : { allowMic: true, allowStreams: true }
+  return row ? policyOf(row) : { allowMic: true, allowStreams: true, allowCamera: true }
 }
 
 /** What a LiveKit participant may publish in a room with these rules. */
@@ -560,6 +561,7 @@ function livekitSources(policy: RoomPolicy, screen: boolean): TrackSource[] {
   if (screen) return policy.allowStreams ? [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO] : []
   const sources: TrackSource[] = []
   if (policy.allowMic) sources.push(TrackSource.MICROPHONE)
+  if (policy.allowCamera) sources.push(TrackSource.CAMERA)
   if (policy.allowStreams) sources.push(TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO)
   return sources
 }
@@ -584,6 +586,7 @@ async function applyRoomPolicy(serverId: string, roomId: string, policy: RoomPol
     .prepare("SELECT client_id, muted FROM member_state WHERE server_id = ? AND room_id = ?")
     .all(serverId, roomId) as Array<{ client_id: string; muted: number }>
   for (const m of members) {
+    setMemberCameraAllowed(m.client_id, policy.allowCamera)
     let changed = false
     if (!policy.allowMic && !m.muted) {
       db.prepare("UPDATE member_state SET muted = 1 WHERE server_id = ? AND client_id = ?").run(serverId, m.client_id)
@@ -615,6 +618,9 @@ async function applyRoomPolicy(serverId: string, roomId: string, policy: RoomPol
       if (screen && !policy.allowStreams) {
         await service.removeParticipant(roomName, p.identity)
         continue
+      }
+      if (!policy.allowCamera) {
+        for (const track of p.tracks) if (track.source === TrackSource.CAMERA) await service.mutePublishedTrack(roomName, p.identity, track.sid, true)
       }
       const sources = livekitSources(policy, screen)
       await service.updateParticipant(roomName, p.identity, undefined, {
@@ -1921,7 +1927,7 @@ app.put("/v1/servers/:serverId/rooms/:roomId/banner", async (req, rep) => {
 /** Channel rules: microphones and/or streams allowed in a voice channel (admins). */
 app.patch("/v1/servers/:serverId/rooms/:roomId/policy", async (req, rep) => {
   const params = z.object({ serverId: z.string().min(1), roomId: z.string().min(1) }).parse(req.params)
-  const body = z.object({ allowMic: z.boolean().optional(), allowStreams: z.boolean().optional() }).parse(req.body ?? {})
+  const body = z.object({ allowMic: z.boolean().optional(), allowStreams: z.boolean().optional(), allowCamera: z.boolean().optional() }).parse(req.body ?? {})
   const auth = (req as any).auth as { serverId: string; clientId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   if (!requirePermission(rep, params.serverId, auth.clientId, "manage_channels")) return
@@ -1931,6 +1937,7 @@ app.patch("/v1/servers/:serverId/rooms/:roomId/policy", async (req, rep) => {
   if (!row || row.kind !== "voice") return rep.code(404).send({ message: "voice room not found" })
   const options = { ...parseRoomOptions(row.options) }
   if (body.allowMic !== undefined) options.allowMic = body.allowMic
+  if (body.allowCamera !== undefined) options.allowCamera = body.allowCamera
   if (body.allowStreams !== undefined) options.allowStreams = body.allowStreams
   const raw = JSON.stringify(options)
   db.prepare("UPDATE rooms SET options = ? WHERE server_id = ? AND id = ?").run(raw, params.serverId, params.roomId)
@@ -1945,6 +1952,15 @@ app.get("/v1/servers/:serverId/rooms", async (req, rep) => {
   const auth = (req as any).auth as { serverId: string }
   if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
   return rep.send({ rooms: getRooms(params.serverId) })
+})
+
+app.get("/v1/servers/:serverId/rooms/:roomId/camera", async (req, rep) => {
+  const params = z.object({ serverId: z.string().min(1), roomId: z.string().min(1) }).parse(req.params)
+  const auth = (req as any).auth as { serverId: string; clientId: string }
+  if (auth.serverId !== params.serverId) return rep.code(403).send({ message: "forbidden" })
+  const member = db.prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ?").get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+  if (member?.room_id !== params.roomId) return rep.code(403).send({ message: "join the voice room first" })
+  return { version: 1, allowCamera: getRoomPolicy(auth.serverId, params.roomId).allowCamera, transports: ["udp", "tcp", "ws"], livekit: Boolean(config.livekitUrl && config.livekitApiKey && config.livekitApiSecret) }
 })
 
 app.post("/v1/servers/:serverId/rooms/:roomId/sfu-token", async (req, rep) => {
@@ -1964,6 +1980,8 @@ app.post("/v1/servers/:serverId/rooms/:roomId/sfu-token", async (req, rep) => {
   const member = db
     .prepare("SELECT display_name FROM server_members WHERE server_id = ? AND client_id = ? LIMIT 1")
     .get(params.serverId, auth.clientId) as { display_name: string } | undefined
+  const current = db.prepare("SELECT room_id FROM member_state WHERE server_id = ? AND client_id = ?").get(auth.serverId, auth.clientId) as { room_id: string | null } | undefined
+  if (current?.room_id !== params.roomId) return rep.code(403).send({ message: "join the voice room first" })
   const roomName = `${params.serverId}:${params.roomId}`
   const screen = query.purpose === "screen"
   const policy = getRoomPolicy(params.serverId, params.roomId)
@@ -2296,6 +2314,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           "UPDATE member_state SET room_id = ?, speaking = 0, muted = ?, last_seen = datetime('now') WHERE server_id = ? AND client_id = ?"
         ).run(event.roomId, forceMuted ? 1 : 0, auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, event.roomId)
+        setMemberCameraAllowed(auth.clientId, getRoomPolicy(auth.serverId, event.roomId).allowCamera)
         setMemberSpeaking(auth.clientId, false)
         setMemberFlags(auth.clientId, forceMuted, false)
         const prevShare = screenShareStateByClient.get(auth.clientId)
@@ -2344,6 +2363,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           "UPDATE member_state SET room_id = NULL, speaking = 0, screen_sharing = 0, watching_screen = 0 WHERE server_id = ? AND client_id = ?"
         ).run(auth.serverId, auth.clientId)
         setMemberRoom(auth.clientId, null)
+        setMemberCameraAllowed(auth.clientId, false)
         setMemberSpeaking(auth.clientId, false)
         for (const forced of forceScreenRelayByRoom.values()) {
           forced.delete(auth.clientId)
@@ -2357,7 +2377,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
         const prevSnap = getMemberSnapshot(auth.serverId, auth.clientId)
         const prevRoomId = prevSnap?.room_id ?? null
         const roomId = event.roomId
-        const roomPolicy = roomId ? getRoomPolicy(auth.serverId, roomId) : { allowMic: true, allowStreams: true }
+        const roomPolicy = roomId ? getRoomPolicy(auth.serverId, roomId) : { allowMic: true, allowStreams: true, allowCamera: true }
         const forceMuted = !roomPolicy.allowMic
         const effectiveMuted = forceMuted ? true : event.muted
         const roomChanged = prevRoomId !== roomId
@@ -2379,6 +2399,7 @@ app.get("/v1/ws", { websocket: true }, (socket, req) => {
           auth.clientId
         )
         setMemberRoom(auth.clientId, roomId)
+        setMemberCameraAllowed(auth.clientId, Boolean(roomId && roomPolicy.allowCamera))
         setMemberFlags(auth.clientId, effectiveMuted, event.deafened)
         if (roomChanged) setMemberSpeaking(auth.clientId, false)
         const active = Boolean(event.screenSharing && roomId && roomPolicy.allowStreams)
