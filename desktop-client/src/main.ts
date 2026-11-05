@@ -297,6 +297,13 @@ app.whenReady().then(async () => {
       win.webContents.send("voice:screenChunk", chunkBase64)
     }
   })
+  voice.setOnIncomingCameraPacket(packet => {
+    for (const win of BrowserWindow.getAllWindows()) win.webContents.send("voice:cameraPacket", packet)
+  })
+  ipcMain.on("voice:sendCameraPacket", (_event, packet: string) => voice.sendCameraPacket(packet))
+  ipcMain.handle("voice:requestCameraAccess", async () => ({
+    granted: process.platform !== "darwin" || await systemPreferences.askForMediaAccess("camera")
+  }))
   const identities = new IdentityStore(join(app.getPath("userData"), "identities.json"))
   ipcMain.handle("identity:create", () => identities.create())
   ipcMain.handle("identity:setCertificate", (_event, ref: string, certificate: ServerCertificate) =>
@@ -348,7 +355,7 @@ app.whenReady().then(async () => {
     }
   })
 
-  ipcMain.handle("voice:connect", (_event, payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) => {
+  ipcMain.handle("voice:connect", (_event, payload: { host: string; port: number; mediaToken: string; apiBase?: string; transport?: "udp" | "tcp" | "ws" }) => {
     return voice.connect(payload)
   })
   ipcMain.handle("voice:setMediaToken", (_event, mediaToken: string) => {

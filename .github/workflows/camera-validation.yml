@@ -1,0 +1,58 @@
+name: Camera validation
+on:
+  push:
+    branches: [client, camera-client]
+    paths: ["primer_front/**", "voice-client/**", "desktop-client/**", ".github/workflows/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  camera:
+    runs-on: ubuntu-latest
+    services:
+      livekit:
+        image: livekit/livekit-server:v1.13.9
+        ports:
+          - 17880:17880
+          - 17881:17881
+          - 17882:17882/udp
+        env:
+          LIVEKIT_CONFIG: |
+            port: 17880
+            bind_addresses: [0.0.0.0]
+            rtc:
+              tcp_port: 17881
+              udp_port: 17882
+              node_ip: 127.0.0.1
+              use_external_ip: false
+            keys:
+              devkey: camera-test-secret-local-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: camera-server
+          path: .camera-server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and compile media engines
+        run: |
+          npm ci --prefix voice-client
+          npm run build --prefix voice-client
+          npm test --prefix voice-client
+          npm ci --prefix .camera-server/backend
+          npm run build --prefix .camera-server/backend
+      - name: Camera across UDP, TCP and WebSocket
+        env:
+          CAMERA_CLIENT_ROOT: ${{ github.workspace }}
+        run: node .camera-server/backend/test/camera-transports.mjs
+      - name: Frontend types and browser tests
+        env:
+          CAMERA_SERVER_ROOT: ${{ github.workspace }}/.camera-server
+        run: |
+          npm ci --prefix primer_front
+          cd primer_front
+          npx tsc --noEmit
+          npx playwright install --with-deps chromium
+          node scripts/camera-browser-check.mjs

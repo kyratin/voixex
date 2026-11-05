@@ -83,7 +83,7 @@ declare global {
       /** macOS 10.15+: triggers system mic permission dialog from the main process (required alongside Info.plist). */
       requestMicrophoneAccess?: () => Promise<{ granted: boolean }>
       /** apiBase: used by the Android app, whose voice goes over WebSocket to the API host. */
-      connect: (payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp"; apiBase?: string }) => Promise<unknown>
+      connect: (payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" | "ws"; apiBase?: string }) => Promise<unknown>
       /** Renewed media token (same key) for the next HELLO; older desktop builds lack it. */
       setMediaToken?: (mediaToken: string) => Promise<unknown>
       joinRoom: (roomId: string) => Promise<unknown>
@@ -102,6 +102,9 @@ declare global {
       clearKeybinds: () => Promise<unknown>
       sendPcm16Frame: (pcm16Base64: string) => void
       sendOpusFrame: (opusBase64: string) => void
+      requestCameraAccess?: () => Promise<{ granted: boolean }>
+      sendCameraPacket?: (packet: string) => void | Promise<void>
+      onCameraPacket?: (listener: (packet: string) => void) => () => void
       sendScreenChunk: (chunkBase64: string) => void
       listScreenSources: () => Promise<Array<{ id: string; name: string }>>
       setScreenSource: (sourceId: string | null) => Promise<unknown>

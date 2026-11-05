@@ -17,7 +17,7 @@ export type ConnectionDraft = {
   apiUseHttps: boolean
   udpPortOverride: string
   mediaEngine: "legacy" | "webrtc"
-  voiceTransport: "udp" | "tcp"
+  voiceTransport: "udp" | "tcp" | "ws"
 }
 
 type ConnectServerDialogProps = {
@@ -103,12 +103,13 @@ export function ConnectServerDialog({ draft, onOpenChange, onSave }: ConnectServ
                 </div>
                 <div className="space-y-1.5">
                   <Label>{t("connect.voiceTransport")}</Label>
-                  <Select value={value.voiceTransport} onValueChange={(v) => set("voiceTransport", v === "tcp" ? "tcp" : "udp")}>
+                  <Select value={value.voiceTransport} onValueChange={(v) => set("voiceTransport", v === "ws" ? "ws" : v === "tcp" ? "tcp" : "udp")}>
                     <SelectTrigger className="h-9 w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="udp">UDP</SelectItem>
+                      <SelectItem value="ws">WebSocket</SelectItem>
                       <SelectItem value="tcp">{t("connect.tcpFallback")}</SelectItem>
                     </SelectContent>
                   </Select>

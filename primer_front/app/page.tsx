@@ -2,6 +2,7 @@
 
 // Android app: installs the voice/identity bridges before anything reads them.
 import { onNativeScreenShareStopped, setScreenOrientation, startNativeScreenShare, stopNativeScreenShare } from "@/lib/mobile-bridge"
+import { useCamera } from "@/lib/camera/use-camera"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useExitSnapshot } from "@/lib/use-exit-snapshot"
@@ -125,7 +126,7 @@ function effectiveVoiceUdpPort(announcedPort: number, overrideStr: string): numb
   return n
 }
 
-function voiceTransportFailureHint(msg: string, triedTransport: "udp" | "tcp"): string {
+function voiceTransportFailureHint(msg: string, triedTransport: "udp" | "tcp" | "ws"): string {
   if (triedTransport !== "tcp") return msg
   if (/ECONNREFUSED|connect timeout|TCP connect|socket closed before HELLO/i.test(msg)) {
     return `${msg}. TCP is not reachable on the media port — expose "50000:50000/tcp" in docker-compose and run a backend image with TCP media support.`
@@ -156,7 +157,7 @@ function saveServerAppearance(serverId: string, appearance: ServerAppearance) {
 
 type ConnectionPrefs = {
   mediaEngine?: "legacy" | "webrtc"
-  voiceTransport?: "udp" | "tcp"
+  voiceTransport?: "udp" | "tcp" | "ws"
   apiUseHttps?: boolean
   udpPortOverride?: string
 }
@@ -191,8 +192,8 @@ function normalizeMediaEngine(value: unknown): "legacy" | "webrtc" {
   return value === "webrtc" ? "webrtc" : "legacy"
 }
 
-function normalizeVoiceTransport(value: unknown): "udp" | "tcp" {
-  return value === "tcp" ? "tcp" : "udp"
+function normalizeVoiceTransport(value: unknown): "udp" | "tcp" | "ws" {
+  return value === "ws" ? "ws" : value === "tcp" ? "tcp" : "udp"
 }
 
 function applyConnectionPrefsToState(
@@ -204,7 +205,7 @@ function applyConnectionPrefsToState(
   },
   setters: {
     setMediaEngine: (v: "legacy" | "webrtc") => void
-    setVoiceTransport: (v: "udp" | "tcp") => void
+    setVoiceTransport: (v: "udp" | "tcp" | "ws") => void
     setApiUseHttps: (v: boolean) => void
     setUdpPortOverride: (v: string) => void
     mediaEngineRef: { current: "legacy" | "webrtc" }
@@ -259,7 +260,7 @@ export default function VoIPApp() {
     /** If set, voice UDP connects here instead of the port returned by join. */
     udpPortOverride?: string
     /** Voice transport used by desktop media bridge. */
-    voiceTransport?: "udp" | "tcp"
+    voiceTransport?: "udp" | "tcp" | "ws"
     /** Voice/screen media path (legacy UDP chunks vs WebRTC/LiveKit). */
     mediaEngine?: "legacy" | "webrtc"
     /**
@@ -277,7 +278,7 @@ export default function VoIPApp() {
     connected?: boolean
     clientId?: string | null
     traceSessionId?: string
-    transport?: "udp" | "tcp"
+    transport?: "udp" | "tcp" | "ws"
     roomId?: string | null
     txPackets?: number
     rxPackets?: number
@@ -293,7 +294,7 @@ export default function VoIPApp() {
   type VoiceTraceStamp = {
     clientId: string | null
     traceSessionId: string | null
-    transport: "udp" | "tcp"
+    transport: "udp" | "tcp" | "ws"
   }
   type AudioDevice = { id: string; label: string; kind: "input" | "output"; isDefault?: boolean }
   type VoicePipelineRuntime = {
@@ -368,7 +369,7 @@ export default function VoIPApp() {
   const [apiUseHttps, setApiUseHttps] = useState(CONNECTION_DEFAULTS.useHttps)
   /** Empty = use UDP port from server join response. */
   const [udpPortOverride, setUdpPortOverride] = useState(CONNECTION_DEFAULTS.udpPort)
-  const [voiceTransport, setVoiceTransport] = useState<"udp" | "tcp">("udp")
+  const [voiceTransport, setVoiceTransport] = useState<"udp" | "tcp" | "ws">("udp")
   const [mediaEngine, setMediaEngine] = useState<"legacy" | "webrtc">("legacy")
   const mediaEngineRef = useRef(mediaEngine)
   /** Everyone else in our voice channel uses WebRTC voice too (otherwise only the server mix has them all). */
@@ -1481,6 +1482,17 @@ export default function VoIPApp() {
     })
   }
 
+  const camera = useCamera({
+    roomKey: isInVoice ? `${voiceServerId}:${currentVoiceChannel}` : "",
+    serverId: voiceServerId,
+    roomId: currentVoiceChannel,
+    allowed: voiceRoomPolicy?.allowCamera !== false,
+    client: () => getVoiceWsClientRef.current(),
+    session: () => webRtcSessionRef.current,
+    ensureSession: () => ensureLiveKitForVoiceRoom(voiceServerIdRef.current, currentVoiceChannelRef.current),
+    errorMessage: code => t(code === "NotAllowedError" ? "camera.denied" : code === "NotFoundError" ? "camera.missing" : code === "NotReadableError" ? "camera.busy" : "camera.failed")
+  })
+
   const startWebRtcSession = (serverId: string, roomId: string): Promise<void> => {
     const key = `${serverId}:${roomId}`
     // Already connected to this room: keep it. Re-creating the session drops voice/video for everyone.
@@ -1505,6 +1517,9 @@ export default function VoIPApp() {
       const session = new WebRtcMediaSession({
         audioSink: sink,
         playRemoteVoice: mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current,
+        onRemoteCamera: (identity, stream) => {
+          if (!superseded() && voiceServerIdRef.current === serverId && currentVoiceChannelRef.current === roomId) camera.onRemoteCamera(identity, stream)
+        },
         onStatus: setStatus,
         onScreenShareChange: () => {
           /* screen share state is driven by server set_screen_share + local capture */
@@ -3717,7 +3732,7 @@ export default function VoIPApp() {
     persistConnectionSettings({ mediaEngine: value })
   }
 
-  const handleVoiceTransportChange = (value: "udp" | "tcp") => {
+  const handleVoiceTransportChange = (value: "udp" | "tcp" | "ws") => {
     setVoiceTransport(value)
     persistConnectionSettings({ voiceTransport: value })
   }
@@ -3779,7 +3794,7 @@ export default function VoIPApp() {
       const resolvedMediaEngine = normalizeMediaEngine(
         preset?.mediaEngine ?? matchByHost?.mediaEngine ?? globalPrefs.mediaEngine ?? mediaEngine
       )
-      let effectiveVoiceTransport: "udp" | "tcp" = resolvedVoiceTransport
+      let effectiveVoiceTransport: "udp" | "tcp" | "ws" = resolvedVoiceTransport
       let effectiveMediaEngine: "legacy" | "webrtc" = resolvedMediaEngine
       mediaEngineRef.current = resolvedMediaEngine
       setMediaEngine(resolvedMediaEngine)
@@ -3895,7 +3910,7 @@ export default function VoIPApp() {
           } catch (voiceErr) {
             const firstMsg = voiceErr instanceof Error ? voiceErr.message : String(voiceErr)
             const firstHint = voiceTransportFailureHint(firstMsg, effectiveVoiceTransport)
-            const fallbackTransport: "udp" | "tcp" = effectiveVoiceTransport === "udp" ? "tcp" : "udp"
+            const fallbackTransport: "udp" | "tcp" | "ws" = effectiveVoiceTransport === "udp" ? "tcp" : "udp"
             let fallbackOk = false
             if (/hello|timeout|tcp|udp|connect|ECONNREFUSED|socket closed/i.test(firstMsg)) {
               try {
@@ -4795,6 +4810,7 @@ export default function VoIPApp() {
   /** The voice stage: inline above the chat on wide screens, a full call screen on phones. */
   const renderVoiceStage = (fullscreen: boolean) => (
     <VoiceStage
+                  camera={camera.controls}
                   roomId={currentVoiceChannel}
                   channelName={voiceChannelName}
                   participants={voiceUsers[currentVoiceChannel] ?? []}
@@ -5536,15 +5552,15 @@ export default function VoIPApp() {
                           <span className="ml-auto text-xs text-muted-foreground">{t("notices.serverTooOldForChannelRules")}</span>
                         ) : ch.type === "voice" ? (
                           <div className="ml-auto flex items-center gap-4">
-                            {(["allowMic", "allowStreams"] as const).map((rule) => {
+                            {(["allowMic", "allowStreams", "allowCamera"] as const).map((rule) => {
                               const policy = ch.policy!
                               return (
                                 <label key={rule} className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
                                   {rule === "allowMic" ? <Mic className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
-                                  {rule === "allowMic" ? t("channelRules.mics") : t("channelRules.streams")}
+                                  {rule === "allowMic" ? t("channelRules.mics") : rule === "allowCamera" ? t("camera.device") : t("channelRules.streams")}
                                   <Switch
-                                    checked={policy[rule]}
-                                    disabled={savingRuleFor === `${ch.id}:${rule}`}
+                                    checked={policy[rule] ?? true}
+                                    disabled={savingRuleFor === `${ch.id}:${rule}` || (rule === "allowCamera" && policy.allowCamera === undefined)}
                                     onCheckedChange={(on) => void updateChannelRule(ch.id, rule, on)}
                                   />
                                 </label>

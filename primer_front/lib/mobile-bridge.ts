@@ -136,7 +136,7 @@ function installVoiceBridge() {
     async connect(payload) {
       const apiBase = (payload as { apiBase?: string }).apiBase
       if (!apiBase) throw new Error("Voice needs the server address")
-      await engine.connect({ apiBase, mediaToken: payload.mediaToken })
+      await engine.connect({ apiBase, mediaToken: payload.mediaToken, host: payload.host, port: payload.port, transport: payload.transport })
       return engine.getStats()
     },
     async setMediaToken(mediaToken) {
@@ -202,6 +202,11 @@ function installVoiceBridge() {
     },
     sendOpusFrame() {},
     sendScreenChunk() {},
+    sendCameraPacket(packet) { return engine.sendCameraPacket(Uint8Array.from(atob(packet), c => c.charCodeAt(0))) },
+    onCameraPacket(listener) {
+      engine.setOnCameraPacket(packet => listener(toBase64(packet)))
+      return () => engine.setOnCameraPacket(null)
+    },
     async listScreenSources() {
       return []
     },

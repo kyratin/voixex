@@ -16,7 +16,7 @@ export interface Channel {
   name: string
   type: "text" | "voice"
   /** Voice channels: what the admins allow (missing on older servers = everything). */
-  policy?: { allowMic: boolean; allowStreams: boolean }
+  policy?: { allowMic: boolean; allowStreams: boolean; allowCamera?: boolean }
   /** Picture for the channel's header, set by admins on the server. */
   bannerUrl?: string | null
   isPrivate?: boolean

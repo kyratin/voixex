@@ -1,3 +1,4 @@
+import { CAMERA_KIND } from "./camera-protocol.js"
 import dgram from "node:dgram"
 import net from "node:net"
 import { createRequire } from "node:module"
@@ -36,11 +37,12 @@ const requireCjs = createRequire(import.meta.url)
 const OpusScript = requireCjs("opusscript") as OpusCtor
 
 type VoiceClientOptions = {
+  apiBase?: string
   host: string
   port: number
   mediaToken: string
   mediaSeed: string
-  transport?: "udp" | "tcp"
+  transport?: "udp" | "tcp" | "ws"
 }
 
 export type AudioDevice = {
@@ -76,6 +78,8 @@ const STALE_RUN_RESET = 25
  * original raw-PCM protocol.
  */
 export class VoiceEngine {
+  private ws: WebSocket | null = null
+  private readonly wsUrl: string
   private udp: dgram.Socket | null = null
   private tcpSocket: net.Socket | null = null
   private tcpReadBuf: Buffer = Buffer.alloc(0)
@@ -93,7 +97,7 @@ export class VoiceEngine {
   private readonly host: string
   private readonly port: number
   private mediaToken: string
-  private readonly transport: "udp" | "tcp"
+  private readonly transport: "udp" | "tcp" | "ws"
   private txTimer: NodeJS.Timeout | null = null
   private probeTimer: NodeJS.Timeout | null = null
   private playoutTimer: NodeJS.Timeout | null = null
@@ -138,10 +142,13 @@ export class VoiceEngine {
   ]
   private selectedDevices: AudioDeviceSelection = { inputId: null, outputId: null }
   private onPcm16Frame: ((frame: Buffer) => void) | null = null
+  private onCameraPacket: ((packet: Buffer) => void) | null = null
+  private cameraSupported = false
   private onScreenChunk: ((chunk: Buffer) => void) | null = null
 
   constructor(opts: VoiceClientOptions) {
     this.key = deriveMediaKey(opts.mediaSeed)
+    this.wsUrl = `${(opts.apiBase ?? `http://${opts.host}:18080`).replace(/^http/, "ws").replace(/\/+$/, "")}/v1/media/ws`
     this.host = opts.host
     this.port = opts.port
     this.mediaToken = opts.mediaToken
@@ -160,6 +167,8 @@ export class VoiceEngine {
       socket.on("error", (e) => {
         if (!this.connected) this.failHello(new Error(`Voice UDP socket error: ${e.message}`))
       })
+    } else if (this.transport === "ws") {
+      await this.connectWebSocket()
     } else {
       await this.connectTcpSocket()
     }
@@ -223,7 +232,7 @@ export class VoiceEngine {
       return
     }
     const frameNo = this.txFrameNo++
-    const payload = encodeOpus2(frameNo, flags, [encoded, ...this.recentEncoded.slice(0, this.transport === "tcp" ? 0 : this.redundancy)])
+    const payload = encodeOpus2(frameNo, flags, [encoded, ...this.recentEncoded.slice(0, this.transport !== "udp" ? 0 : this.redundancy)])
     this.recentEncoded = [encoded, ...this.recentEncoded].slice(0, 3)
     this.sendPacket(this.encrypt(this.roomId, payload, KIND_OPUS2))
   }
@@ -233,6 +242,13 @@ export class VoiceEngine {
     if (!this.connected || !this.roomId || this.muted) return
     this.keepHelloFresh()
     this.sendPacket(this.encrypt(this.roomId, packetPayload, KIND_OPUS))
+  }
+
+  setOnCameraPacket(listener: ((packet: Buffer) => void) | null) { this.onCameraPacket = listener }
+
+  sendCameraPacket(packet: Buffer) {
+    if (!this.connected || !this.roomId || !this.cameraSupported || packet.length > 924) return
+    this.sendPacket(this.encrypt(this.roomId, packet, CAMERA_KIND))
   }
 
   sendScreenChunk(chunk: Buffer) {
@@ -260,6 +276,8 @@ export class VoiceEngine {
       /* already closed */
     }
     this.udp = null
+    this.ws?.close()
+    this.ws = null
     this.tcpSocket?.destroy()
     this.tcpSocket = null
     this.tcpReadBuf = Buffer.alloc(0)
@@ -397,7 +415,7 @@ export class VoiceEngine {
     if (this.closing) return
     try {
       this.helloConfirmed = false
-      await this.connectTcpSocket()
+      await (this.transport === "ws" ? this.connectWebSocket() : this.connectTcpSocket())
       this.sendHello()
       await this.waitForHello(3500)
       if (this.closing) return
@@ -470,7 +488,7 @@ export class VoiceEngine {
   }
 
   private helloText() {
-    return this.offerOpus2 ? `HELLO2 ${this.mediaToken} opus2` : `HELLO ${this.mediaToken}`
+    return this.offerOpus2 ? `HELLO2 ${this.mediaToken} opus2 camera1` : `HELLO ${this.mediaToken}`
   }
 
   private sendHello() {
@@ -479,6 +497,8 @@ export class VoiceEngine {
       this.udp?.send(hello, this.port, this.host, (err) => {
         if (err && !this.connected) this.failHello(new Error(`Voice UDP send error: ${err.message}`))
       })
+    } else if (this.transport === "ws" && this.ws?.readyState === 1) {
+      this.ws.send(hello)
     } else if (this.tcpSocket && !this.tcpSocket.destroyed) {
       this.tcpSocket.write(frameTcp(hello))
     }
@@ -493,6 +513,7 @@ export class VoiceEngine {
     if (buf.length < 64 && buf[0] === 0x48 /* H */) {
       const text = buf.toString()
       if (text.startsWith("HELLO_ACK")) {
+        this.cameraSupported = text.split(" ").includes("camera1")
         this.opus2 = text.includes("opus2")
         this.markHelloConfirmed()
         return
@@ -520,6 +541,10 @@ export class VoiceEngine {
     this.lastSeqIn = Math.max(this.lastSeqIn, frame.seq)
 
     switch (frame.kind) {
+      case CAMERA_KIND:
+        if (frame.roomId !== this.roomId) return
+        this.onCameraPacket?.(frame.payload)
+        return
       case KIND_PROBE_ACK:
         return this.onProbeAck(frame)
       case KIND_OPUS2:
@@ -640,6 +665,9 @@ export class VoiceEngine {
   private sendPacket(packet: Buffer, control = false) {
     if (this.transport === "udp") {
       this.udp?.send(packet, this.port, this.host)
+    } else if (this.transport === "ws") {
+      if (this.ws?.readyState !== 1 || (!control && this.ws.bufferedAmount > TCP_MAX_BACKLOG_BYTES)) return
+      this.ws.send(packet)
     } else {
       const sock = this.tcpSocket
       if (!sock || sock.destroyed) return
@@ -648,6 +676,28 @@ export class VoiceEngine {
       sock.write(frameTcp(packet))
     }
     this.txPackets += 1
+  }
+
+  private async connectWebSocket() {
+    this.ws?.close()
+    const socket = new WebSocket(this.wsUrl)
+    socket.binaryType = "arraybuffer"
+    this.ws = socket
+    socket.addEventListener("message", event => {
+      if (this.ws === socket && event.data instanceof ArrayBuffer) this.processIncomingPacket(Buffer.from(event.data))
+    })
+    socket.addEventListener("close", () => {
+      if (this.ws !== socket || this.closing) return
+      this.helloConfirmed = false
+      if (!this.connected) { this.failHello(new Error("WebSocket closed before HELLO")); return }
+      this.connected = false
+      this.scheduleTcpReconnect()
+    })
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { socket.close(); reject(new Error("WebSocket connect timeout")) }, 6000)
+      socket.addEventListener("open", () => { clearTimeout(timer); resolve() }, { once: true })
+      socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("WebSocket connection failed")) }, { once: true })
+    })
   }
 
   private async connectTcpSocket() {

@@ -1,3 +1,12 @@
+# 0.7.0 — Cameras in voice channels
+
+- Camera controls, local preview, participant video and device selection on Android, macOS and Windows.
+- Camera media over UDP, TCP and WebSocket; native Android UDP/TCP sockets and explicit desktop WebSocket selection.
+- LiveKit camera tracks coexist with screen share. Compatibility JPEG video also runs so participants on different transports can see one another.
+- Independent channel camera permission, server capability detection, bounded packet/frame assembly and cleanup when leaving or backgrounding.
+- Legacy video is up to 480px wide / 8 fps; WebRTC requests 720p / 30 fps. The compatibility stream adds upload bandwidth when LiveKit is active.
+- Requires server 0.7.0+ for cameras. See docs/camera.md for tests and limitations.
+
 # Changelog — desktop client (0.2.15 → 0.2.21)
 
 Единый список изменений **по порядку** (от более ранних к более поздним). Версии в скобках — когда изменение вошло в релизный номер пакета.

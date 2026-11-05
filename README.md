@@ -50,6 +50,7 @@ The app version is `version` in [`desktop-client/package.json`](desktop-client/p
   1 — password · 2 — device certificate · 3 — password + certificate. Certificates (`.voixexkey`) can be exported to another device and are listed in the app's certificate storage. The admin can require a minimum level.
 - **Voice** — Opus over UDP, TCP or WebSocket with jitter buffer, redundancy and packet-loss concealment; or WebRTC through the server's built-in LiveKit.
 - **AI noise suppression** (RNNoise, on by default) plus manual DSP: Speex, gate, echo cancellation.
+- **Cameras** (client + server 0.7.0+): participant video, local preview and camera selection on Android, macOS and Windows; UDP/TCP/WebSocket compatibility video and LiveKit camera tracks. See [camera transport details and checks](docs/camera.md).
 - **Screen sharing** — WebRTC (H.264, simulcast) with stream sound; viewers choose quality like on Twitch; motion / detail modes. Phones share their screen natively.
 - **Tray and mini call window** — closing the window keeps Voixex in the tray (menu bar on macOS) with mute / deafen / leave; minimizing during a call shows a small always-on-top window with who is in the channel and who is talking, like Google Meet. On Android: call notification with mute / leave and picture-in-picture.
 - **Text channels** with attachments, member list (online and offline), roles (admins can promote others), speaking rings that follow voice volume.

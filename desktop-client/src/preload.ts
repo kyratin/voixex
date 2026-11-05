@@ -1,8 +1,15 @@
 import { contextBridge, ipcRenderer } from "electron"
 
 const electronVoice = {
+  requestCameraAccess: () => ipcRenderer.invoke("voice:requestCameraAccess"),
+  sendCameraPacket: (packet: string) => ipcRenderer.send("voice:sendCameraPacket", packet),
+  onCameraPacket: (listener: (packet: string) => void) => {
+    const handler = (_event: unknown, payload: string) => listener(payload)
+    ipcRenderer.on("voice:cameraPacket", handler)
+    return () => ipcRenderer.removeListener("voice:cameraPacket", handler)
+  },
   requestMicrophoneAccess: () => ipcRenderer.invoke("voice:requestMicrophoneAccess"),
-  connect: (payload: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) =>
+  connect: (payload: { host: string; port: number; mediaToken: string; apiBase?: string; transport?: "udp" | "tcp" | "ws" }) =>
     ipcRenderer.invoke("voice:connect", payload),
   joinRoom: (roomId: string) => ipcRenderer.invoke("voice:joinRoom", roomId),
   leaveRoom: () => ipcRenderer.invoke("voice:leaveRoom"),

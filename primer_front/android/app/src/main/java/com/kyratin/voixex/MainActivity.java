@@ -17,6 +17,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(VoixexCallPlugin.class);
+        registerPlugin(VoixexMediaPlugin.class);
         registerPlugin(VoixexScreenSharePlugin.class);
         super.onCreate(savedInstanceState);
     }
@@ -24,6 +25,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onPause() {
         super.onPause();
+        if (getBridge() != null) getBridge().getWebView().evaluateJavascript("window.dispatchEvent(new Event('voixex-camera-background'))", null);
         // In a voice channel the WebView must keep running (timers, WebSocket, audio) when the
         // app goes to the background; the foreground service keeps the process alive.
         if (VoixexCallPlugin.inCall && getBridge() != null) {

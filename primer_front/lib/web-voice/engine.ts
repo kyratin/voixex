@@ -1,3 +1,5 @@
+import { NativeMediaSocket, type MediaSocket } from "../native-media-socket"
+import { CAMERA_KIND } from "../camera/protocol"
 import {
   FRAME_MS,
   FRAME_SAMPLES,
@@ -32,7 +34,7 @@ const MAX_CONCEAL_RUN = 3
 
 export type WebVoiceStats = {
   connected: boolean
-  transport: "ws"
+  transport: "ws" | "udp" | "tcp"
   codec: "opus"
   muted: boolean
   deafened: boolean
@@ -62,8 +64,9 @@ export type WebVoiceStats = {
  * PCM in and out is 20 ms of 48 kHz mono Int16, like the desktop bridge.
  */
 export class WebVoiceEngine {
-  private ws: WebSocket | null = null
+  private ws: MediaSocket | null = null
   private key: CryptoKey | null = null
+  private endpoint: { host: string; port: number; transport: "udp" | "tcp" } | null = null
   private wsUrl = ""
   private mediaToken = ""
   private connected = false
@@ -74,6 +77,9 @@ export class WebVoiceEngine {
   private muted = false
   private deafened = false
   private seqOut = 1
+  private onCameraPacket: ((packet: Uint8Array) => void) | null = null
+  private cameraSupported = false
+  private cameraSending = false
   private onPcm: ((pcm: Int16Array) => void) | null = null
 
   // uplink
@@ -126,13 +132,26 @@ export class WebVoiceEngine {
     return typeof AudioEncoder !== "undefined" && typeof AudioDecoder !== "undefined" && typeof WebSocket !== "undefined"
   }
 
+  setOnCameraPacket(listener: ((packet: Uint8Array) => void) | null) { this.onCameraPacket = listener }
+
+  async sendCameraPacket(data: Uint8Array) {
+    const ws = this.ws, key = this.key, room = this.roomId
+    if (!ws || !key || !room || !this.cameraSupported || this.cameraSending || data.length > 924 || ws.readyState !== 1 || ws.bufferedAmount > 4096) return
+    this.cameraSending = true
+    try {
+      const packet = await encryptPacket(key, this.seqOut++, Date.now(), room, data, CAMERA_KIND)
+      if (this.ws === ws && this.roomId === room && ws.readyState === 1 && ws.bufferedAmount < 4096) ws.send(packet)
+    } finally { this.cameraSending = false }
+  }
+
   setOnPcm(listener: ((pcm: Int16Array) => void) | null) {
     this.onPcm = listener
   }
 
-  async connect(input: { apiBase: string; mediaToken: string }) {
+  async connect(input: { apiBase: string; mediaToken: string; host?: string; port?: number; transport?: "udp" | "tcp" | "ws" }) {
     this.close()
     this.closing = false
+    this.endpoint = NativeMediaSocket.supported() && input.host && input.port && input.transport !== "ws" ? { host: input.host, port: input.port, transport: input.transport ?? "udp" } : null
     this.mediaToken = input.mediaToken
     this.wsUrl = `${input.apiBase.replace(/^http/, "ws").replace(/\/+$/, "")}/v1/media/ws`
     this.key = await deriveMediaKey(mediaSeedOf(input.mediaToken))
@@ -145,19 +164,20 @@ export class WebVoiceEngine {
 
   private open() {
     return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.wsUrl)
+      const ws: MediaSocket = this.endpoint ? new NativeMediaSocket(this.endpoint) : new WebSocket(this.wsUrl) as unknown as MediaSocket
       ws.binaryType = "arraybuffer"
       this.ws = ws
       const timer = setTimeout(() => {
         reject(new Error("Voice connection timed out"))
         ws.close()
       }, 6000)
-      ws.onopen = () => ws.send(bytesOf(`HELLO2 ${this.mediaToken} opus2`))
+      ws.onopen = () => ws.send(bytesOf(`HELLO2 ${this.mediaToken} opus2 camera1`))
       ws.onmessage = (event) => {
         const data = new Uint8Array(event.data as ArrayBuffer)
         if (data.length < 32 && data[0] === 0x48 /* H */) {
           const text = textOf(data)
           if (text.startsWith("HELLO_ACK")) {
+            this.cameraSupported = text.split(" ").includes("camera1")
             clearTimeout(timer)
             resolve()
           } else if (text === "HELLO_FAIL") {
@@ -339,7 +359,7 @@ export class WebVoiceEngine {
     const exp = this.rxLoss.expected
     return {
       connected: this.connected && this.ws?.readyState === WebSocket.OPEN,
-      transport: "ws",
+      transport: this.endpoint?.transport ?? "ws",
       codec: "opus",
       muted: this.muted,
       deafened: this.deafened,
@@ -415,6 +435,8 @@ export class WebVoiceEngine {
     const packet = await decryptPacket(this.key, data)
     if (!packet) return
     this.rxPackets += 1
+    if (packet.roomId !== this.roomId && packet.kind === CAMERA_KIND) return
+    if (packet.kind === CAMERA_KIND) { this.onCameraPacket?.(packet.payload); return }
     if (packet.kind === KIND_PROBE_ACK) {
       const ack = decodeProbe(packet.payload)
       if (!ack) return

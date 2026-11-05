@@ -1,6 +1,13 @@
 const { contextBridge, ipcRenderer } = require("electron")
 
 const electronVoice = {
+  requestCameraAccess: () => ipcRenderer.invoke("voice:requestCameraAccess"),
+  sendCameraPacket: (packet) => ipcRenderer.send("voice:sendCameraPacket", packet),
+  onCameraPacket: (listener) => {
+    const handler = (_event, payload) => listener(payload)
+    ipcRenderer.on("voice:cameraPacket", handler)
+    return () => ipcRenderer.removeListener("voice:cameraPacket", handler)
+  },
   requestMicrophoneAccess: () => ipcRenderer.invoke("voice:requestMicrophoneAccess"),
   connect: (payload) => ipcRenderer.invoke("voice:connect", payload),
   setMediaToken: (mediaToken) => ipcRenderer.invoke("voice:setMediaToken", mediaToken),

@@ -1,4 +1,5 @@
 export const en = {
+  camera: {"enable": "Turn camera on", "disable": "Turn camera off", "device": "Camera", "denied": "Camera access was denied. Allow it in system settings.", "missing": "No camera found.", "busy": "The camera is busy or unavailable.", "failed": "Could not start the camera. Try again.", "unavailable": "Camera needs an updated server and permission in this channel."},
   common: {
     close: "Close",
     default: "Default",

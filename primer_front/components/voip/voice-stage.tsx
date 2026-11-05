@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref, type RefObject } from "react"
 import {
+  Video,
+  VideoOff,
   Eye,
   EyeOff,
   ExternalLink,
@@ -33,9 +35,25 @@ import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
 import { cn } from "@/lib/utils"
 import { useI18n } from "@/lib/i18n/provider"
 
+import type { CameraControls, CameraPicture } from "@/lib/camera/use-camera"
+
+function CameraVideo({ picture, mirror }: { picture: CameraPicture; mirror: boolean }) {
+  const ref = useRef<HTMLVideoElement>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el || !picture.stream) return
+    el.srcObject = picture.stream
+    void el.play().catch(() => {})
+    return () => { el.srcObject = null }
+  }, [picture.stream])
+  const className = cn("absolute inset-0 h-full w-full rounded-xl object-cover", mirror && "-scale-x-100")
+  return picture.stream ? <video ref={ref} muted autoPlay playsInline className={className} onDoubleClick={event => { event.stopPropagation(); void event.currentTarget.requestFullscreen?.().catch(() => {}) }} /> : <img src={picture.image} alt="" className={className} />
+}
+
 type ScreenSource = { id: string; name: string }
 
 type VoiceStageProps = {
+  camera?: CameraControls
   /** Voice channel the member is in; the stage sits above the open text channel. */
   roomId: string
   channelName: string
@@ -155,12 +173,16 @@ function ParticipantTile({
   user,
   large,
   fill = false,
+  picture,
+  mirror = false,
   volume
 }: {
   user: VoiceUser
   large: boolean
   /** Phone call screen: the tile takes its whole grid cell. */
   fill?: boolean
+  picture?: CameraPicture
+  mirror?: boolean
   volume?: { pct: number; onChange: (pct: number) => void }
 }) {
   const { t } = useI18n()
@@ -172,18 +194,19 @@ function ParticipantTile({
         volume && "cursor-pointer hover:bg-card"
       )}
     >
+      {picture ? <CameraVideo picture={picture} mirror={mirror} /> : null}
       {user.isScreenSharing ? (
         <span className="absolute left-2 top-2 rounded bg-destructive px-1.5 py-0.5 text-[9px] font-bold uppercase text-white">Live</span>
       ) : null}
-      <SpeakingAvatar
+      <div className={picture ? "invisible" : "contents"}><SpeakingAvatar
         id={user.id}
         label={user.name}
         isSpeaking={user.isSpeaking}
         className={fill ? "size-20 text-2xl" : large ? "size-14 text-lg" : "size-11 text-base"}
       >
         {user.avatar.slice(0, 1).toUpperCase()}
-      </SpeakingAvatar>
-      <div className="flex max-w-[90%] items-center gap-1 text-xs font-medium text-foreground">
+      </SpeakingAvatar></div>
+      <div className={cn("z-10 flex max-w-[90%] items-center gap-1 text-xs font-medium text-foreground", picture && "absolute bottom-2 rounded bg-black/65 px-2 py-1 text-white")}>
         <span className="truncate">{user.name}</span>
         {user.isSpeaking ? <span className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
         {user.isMuted ? <MicOff className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t("userPanel.mute")} /> : null}
@@ -249,6 +272,7 @@ function saveStageHeights(next: StageHeights) {
 }
 
 export function VoiceStage({
+  camera,
   roomId,
   channelName,
   participants,
@@ -396,6 +420,8 @@ export function VoiceStage({
                 <ParticipantTile
                   key={user.id}
                   user={user}
+                  picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]}
+                  mirror={user.id === selfClientId}
                   large={largeTiles}
                   fill={fullscreen}
                   volume={
@@ -724,6 +750,23 @@ export function VoiceStage({
             : "absolute bottom-3 left-1/2 -translate-x-1/2 gap-1 p-1.5"
         )}
       >
+        {camera ? <>
+          <DockButton large={fullscreen} label={camera.enabled ? t("camera.disable") : camera.supported ? t("camera.enable") : t("camera.unavailable")} active={camera.enabled} disabled={!camera.supported && !camera.enabled} onClick={camera.toggle}>
+            {camera.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : camera.enabled ? <Video className="h-4 w-4" /> : <VideoOff className="h-4 w-4" />}
+          </DockButton>
+          <Popover>
+            <PopoverTrigger asChild><button type="button" aria-label={t("camera.device")} className="p-1 text-muted-foreground"><ChevronDown className="h-4 w-4" /></button></PopoverTrigger>
+            <PopoverContent className="w-64 space-y-2">
+              <Label>{t("camera.device")}</Label>
+              <Select value={camera.deviceId || undefined} onValueChange={camera.select} disabled={camera.busy}>
+                <SelectTrigger><SelectValue placeholder={t("camera.device")} /></SelectTrigger>
+                <SelectContent>{camera.devices.filter(d => d.deviceId).map((device, i) => <SelectItem key={device.deviceId} value={device.deviceId}>{device.label || `${t("camera.device")} ${i + 1}`}</SelectItem>)}</SelectContent>
+              </Select>
+              {camera.error ? <p role="alert" className="text-xs text-destructive">{camera.error}</p> : null}
+              {!camera.supported ? <p className="text-xs text-muted-foreground">{t("camera.unavailable")}</p> : null}
+            </PopoverContent>
+          </Popover>
+        </> : null}
         <DockButton
           large={fullscreen}
           label={micLocked ? t("channelRules.micLocked") : isMuted ? t("userPanel.unmute") : t("userPanel.mute")}
@@ -780,6 +823,10 @@ export function VoiceStage({
           <PhoneOff className="h-4 w-4" />
         </DockButton>
       </div>
+
+      {showsVideo && camera && (camera.local || Object.keys(camera.pictures).length > 0) ? <div className="absolute right-3 top-14 z-10 max-h-36 max-w-[60%] overflow-auto rounded-xl bg-stage/80 p-1">{participantsGrid}</div> : null}
+
+      {camera?.error ? <p role="alert" className="absolute inset-x-3 top-12 z-20 rounded bg-popover/95 p-2 text-center text-xs text-destructive">{camera.error}</p> : null}
 
       {fullscreen ? null : (
         // Drag the bottom edge to give the call more or less room; double-click resets.

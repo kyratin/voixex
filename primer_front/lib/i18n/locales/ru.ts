@@ -1,6 +1,8 @@
-import type { TranslationDict } from "../types"
+import type {
+TranslationDict } from "../types"
 
 export const ru: TranslationDict = {
+  camera: {"enable": "Включить камеру", "disable": "Выключить камеру", "device": "Камера", "denied": "Нет доступа к камере. Разрешите его в системных настройках.", "missing": "Камера не найдена.", "busy": "Камера занята или недоступна.", "failed": "Не удалось включить камеру. Попробуйте ещё раз.", "unavailable": "Для камеры нужен обновлённый сервер и разрешение в канале."},
   common: {
     close: "Закрыть",
     default: "По умолчанию",

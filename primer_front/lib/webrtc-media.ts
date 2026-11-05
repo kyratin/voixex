@@ -36,6 +36,7 @@ type WebRtcMediaOptions = {
   audioSink: HTMLElement
   /** When true, play remote microphone tracks via LiveKit (WebRTC voice path). */
   playRemoteVoice?: boolean
+  onRemoteCamera?: (identity: string, stream: MediaStream | null) => void
   onStatus?: (message: string) => void
   onRemoteVideo?: (active: boolean, participantIdentity: string | null) => void
   onScreenShareChange?: (active: boolean) => void
@@ -48,6 +49,9 @@ export class WebRtcMediaSession {
   private readonly opts: WebRtcMediaOptions
   private room: Room | null = null
   private screenTracks: LocalTrack[] = []
+  private cameraTrack: LocalVideoTrack | null = null
+  private cameraGeneration = 0
+  private remoteCameras = new Map<string, RemoteTrack>()
   private micTrack: LocalAudioTrack | null = null
   private remoteElements = new Map<string, HTMLMediaElement>()
   private voiceAudioElements = new Set<HTMLMediaElement>()
@@ -96,6 +100,12 @@ export class WebRtcMediaSession {
       })
       .on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
         this.detachRemoteTrack(track, publication, participant.identity)
+      })
+      .on(RoomEvent.TrackMuted, (publication, participant) => {
+        if (publication.source === Track.Source.Camera) this.opts.onRemoteCamera?.(participant.identity, null)
+      })
+      .on(RoomEvent.TrackUnmuted, (publication, participant) => {
+        if (publication.source === Track.Source.Camera && publication.track) this.attachRemoteTrack(publication.track as RemoteTrack, publication as RemoteTrackPublication, participant.identity)
       })
       .on(RoomEvent.Disconnected, (reason) => {
         this.cleanupRemoteTracks()
@@ -226,6 +236,35 @@ export class WebRtcMediaSession {
     }
     window.addEventListener("pointerdown", retry, true)
     window.addEventListener("keydown", retry, true)
+  }
+
+  async publishCamera(track: MediaStreamTrack) {
+    const generation = ++this.cameraGeneration
+    await this.stopCamera(false)
+    const room = this.room
+    if (!room || !this.live || generation !== this.cameraGeneration) return
+    // The capture owner keeps the original for legacy transports and local preview.
+    const local = new LocalVideoTrack(track.clone())
+    try {
+      await room.localParticipant.publishTrack(local, {
+        source: Track.Source.Camera,
+        simulcast: true,
+        videoEncoding: { maxBitrate: 1_200_000, maxFramerate: 30 }
+      })
+      if (generation !== this.cameraGeneration || this.room !== room) {
+        try { await room.localParticipant.unpublishTrack(local) } finally { local.stop() }
+        return
+      }
+      this.cameraTrack = local
+    } catch (error) { local.stop(); throw error }
+  }
+
+  async stopCamera(invalidate = true) {
+    if (invalidate) this.cameraGeneration++
+    const track = this.cameraTrack
+    this.cameraTrack = null
+    if (!track) return
+    try { await this.room?.localParticipant.unpublishTrack(track) } finally { track.stop() }
   }
 
   async publishMicTrack(track: MediaStreamTrack) {
@@ -431,6 +470,7 @@ export class WebRtcMediaSession {
   }
 
   async disconnect() {
+    try { await this.stopCamera() } catch { /* capture must still be released */ }
     // Each step is independent: a failing unpublish must not leave the room connected.
     try {
       await this.stopScreenShare()
@@ -520,6 +560,11 @@ export class WebRtcMediaSession {
       void element.play?.().catch(() => this.retryScreenAudioOnGesture())
       return
     }
+    if (track.kind === Track.Kind.Video && publication.source === Track.Source.Camera) {
+      this.remoteCameras.set(participantIdentity, track)
+      this.opts.onRemoteCamera?.(participantIdentity, publication.isMuted ? null : new MediaStream([track.mediaStreamTrack]))
+      return
+    }
     if (track.kind !== Track.Kind.Video || publication.source !== Track.Source.ScreenShare) return
 
     if (this.remoteScreenTrack && this.remoteScreenVideoEl) {
@@ -540,6 +585,10 @@ export class WebRtcMediaSession {
   }
 
   private detachRemoteTrack(track: RemoteTrack, publication: RemoteTrackPublication, participantIdentity: string) {
+    if (publication.source === Track.Source.Camera && this.remoteCameras.get(participantIdentity) === track) {
+      this.remoteCameras.delete(participantIdentity)
+      this.opts.onRemoteCamera?.(participantIdentity, null)
+    }
     const key = this.remoteTrackKey(participantIdentity, track)
     const element = this.remoteElements.get(key)
     if (element) {
@@ -563,6 +612,8 @@ export class WebRtcMediaSession {
   }
 
   private cleanupRemoteTracks() {
+    for (const identity of this.remoteCameras.keys()) this.opts.onRemoteCamera?.(identity, null)
+    this.remoteCameras.clear()
     if (this.remoteScreenTrack && this.remoteScreenVideoEl) {
       this.remoteScreenTrack.detach(this.remoteScreenVideoEl)
     }

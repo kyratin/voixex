@@ -76,6 +76,8 @@
     "@types/node": "^22",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.64.1",
     "pnpm": "^11.7.0",
     "postcss": "^8.5",
     "tailwindcss": "^4.2.0",

@@ -6,10 +6,11 @@ type VoiceState = {
   muted: boolean
   deafened: boolean
   selfTestTone: boolean
-  transport: "udp" | "tcp"
+  transport: "udp" | "tcp" | "ws"
 }
 
 export class VoiceService {
+  private onIncomingCameraPacket: ((packet: string) => void) | null = null
   private engine: VoiceEngine | null = null
   private onIncomingPcm16: ((pcm16Base64: string) => void) | null = null
   private onIncomingScreenChunk: ((chunkBase64: string) => void) | null = null
@@ -24,7 +25,7 @@ export class VoiceService {
   /** Persisted selection even before engine is connected. */
   private selectedDevices: AudioDeviceSelection = { inputId: null, outputId: null }
 
-  async connect(input: { host: string; port: number; mediaToken: string; transport?: "udp" | "tcp" }) {
+  async connect(input: { host: string; port: number; mediaToken: string; apiBase?: string; transport?: "udp" | "tcp" | "ws" }) {
     const prevMuted = this.state.muted
     const prevDeafened = this.state.deafened
     const payload = decodeTokenPayload(input.mediaToken)
@@ -34,6 +35,7 @@ export class VoiceService {
     }
     this.engine?.close()
     this.engine = new VoiceEngine({
+      apiBase: input.apiBase,
       host: input.host,
       port: input.port,
       mediaToken: input.mediaToken,
@@ -47,6 +49,7 @@ export class VoiceService {
     this.engine.setOnScreenChunk((chunk) => {
       this.onIncomingScreenChunk?.(chunk.toString("base64"))
     })
+    this.engine.setOnCameraPacket(packet => this.onIncomingCameraPacket?.(packet.toString("base64")))
     await this.engine.connect()
     this.state.connected = true
     this.state.joinedRoomId = null
@@ -63,6 +66,11 @@ export class VoiceService {
   setMediaToken(mediaToken: string) {
     this.engine?.setMediaToken(mediaToken)
     return this.state
+  }
+
+  setOnIncomingCameraPacket(listener: (packet: string) => void) { this.onIncomingCameraPacket = listener }
+  sendCameraPacket(packet: string) {
+    if (typeof packet === "string" && packet.length <= 1232) this.engine?.sendCameraPacket(Buffer.from(packet, "base64"))
   }
 
   joinRoom(roomId: string) {

@@ -56,7 +56,7 @@ export type RegisteredMember = {
 }
 
 /** Voice channel rules set by admins (enforced by the server). */
-export type RoomPolicy = { allowMic: boolean; allowStreams: boolean }
+export type RoomPolicy = { allowMic: boolean; allowStreams: boolean; allowCamera?: boolean }
 export type RoomInfo = { id: string; name: string; kind: "voice" | "text"; policy?: RoomPolicy; bannerUrl?: string | null }
 
 export type RealtimeState = {
@@ -547,6 +547,15 @@ export class VoipClient {
     this.state.rooms = body.rooms
     this.emit()
     return body.rooms
+  }
+
+  async getCameraCapabilities(serverId: string, roomId: string): Promise<{ version: number; allowCamera: boolean; livekit: boolean }> {
+    if (!this.authToken) throw new Error("not authorized")
+    const response = await fetch(`${this.apiBase}/v1/servers/${serverId}/rooms/${roomId}/camera`, {
+      headers: { Authorization: `Bearer ${this.authToken}` }
+    })
+    if (!response.ok) throw new Error(`Camera unavailable (${response.status})`)
+    return response.json()
   }
 
   /** purpose "screen": a publish-only token for the phone's native screen-share participant. */
