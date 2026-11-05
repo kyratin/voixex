@@ -1,7 +1,7 @@
 import { CAMERA_KIND } from "./camera-protocol.js"
 import dgram from "node:dgram"
 import net from "node:net"
-import { createRequire } from "node:module"
+import { OpusCodec as OpusScript } from "./opus-codec.js"
 import { SpeakerStream, type OpusDecoderLike } from "./jitter.js"
 import {
   FRAME_MS,
@@ -32,9 +32,6 @@ type OpusCodec = {
   encoderCTL(ctl: number, value: number): void
   delete(): void
 }
-type OpusCtor = (new (rate: number, channels: number, application: number) => OpusCodec) & { Application: { VOIP: number } }
-const requireCjs = createRequire(import.meta.url)
-const OpusScript = requireCjs("opusscript") as OpusCtor
 
 type VoiceClientOptions = {
   apiBase?: string

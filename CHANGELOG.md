@@ -1,3 +1,11 @@
+# 0.7.3 — Fix progressive voice loss
+
+- Fix Opus WASM scratch-buffer allocation/addressing that could corrupt neighbouring codecs during participant churn and packet-loss concealment, eventually stopping voice or crashing the media worker.
+- Keep compatible audio until all expected WebRTC microphone tracks are playable; reconnecting/missing/paused tracks fall back instead of silencing the room.
+- Publish a clone of the processed microphone so mode switches cannot stop the source used by compatible voice. Make microphone publication race-safe and remote audio attachment idempotent.
+- Server reports codec failures and counts transmitted voice frames only when packets were actually sent, with PCM fallback if encoding fails.
+- Tests cover three simultaneous speakers, camera traffic, packet loss, mute, transport changes, codec churn, and real three-party WebRTC audio. Server and desktop clients must both be updated for the codec fix.
+
 # 0.7.2 — Call layout, speaking indicator and connection settings
 
 - Participant tiles fill the available call area. One participant fills the grid; up to 12 participants form a grid of at most 4 columns × 3 rows, with pages for larger channels.

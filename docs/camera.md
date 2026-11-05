@@ -38,3 +38,11 @@ node primer_front/scripts/voice-stage-layout-check.mjs
 ```
 
 The browser test uses fake camera input but real Chromium encoding, LiveKit transport and decoded video. It checks camera + screen, stop/disconnect, permission failure and capture resolving after a room change. Camera validation CI runs these checks; release CI builds Android, macOS and Windows. Compilation and synthetic media checks do not replace testing physical cameras, Android devices or OS permission dialogs.
+
+## Voice reliability (0.7.3)
+
+The safe Opus wrapper owns correctly addressed and sized PCM scratch buffers, refreshes typed views after WASM growth and keeps concealment at one 20 ms frame. This fixes cross-codec memory corruption observed with three users and participant/packet-loss churn. The same implementation is used by server and desktop voice engines; Android WebCodecs is unchanged. Update both server and clients.
+
+WebRTC voice is selected only after every expected unmuted speaker has a playable microphone track. Until then, or while reconnecting/paused, compatible voice remains enabled. SFU microphones own cloned capture tracks so switching modes cannot stop the original processed microphone. Remote voice elements are reused across mode switches.
+
+Additional checks: `CAMERA_CLIENT_ROOT=/absolute/client node backend/test/voice-transports.mjs` in the server checkout; `node primer_front/scripts/voice-browser-check.mjs` with the local test LiveKit configuration.

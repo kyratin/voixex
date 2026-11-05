@@ -52,8 +52,15 @@ export class WebRtcMediaSession {
   private cameraTrack: LocalVideoTrack | null = null
   private cameraGeneration = 0
   private remoteCameras = new Map<string, RemoteTrack>()
+  private micGeneration = 0
+  private muted = false
   private micTrack: LocalAudioTrack | null = null
   private remoteElements = new Map<string, HTMLMediaElement>()
+  private remoteVoice = new Map<string, { track: RemoteTrack; identity: string; element: HTMLMediaElement; playing: boolean }>()
+  private expectedVoicePeers: string[] | null = null
+  private voiceReady = false
+  private voiceRetryArmed = false
+  private voiceRetryHandler: (() => void) | null = null
   private voiceAudioElements = new Set<HTMLMediaElement>()
   private voiceAudioByIdentity = new Map<string, Set<HTMLMediaElement>>()
   private peerVoiceVolumeByIdentity = new Map<string, number>()
@@ -101,6 +108,10 @@ export class WebRtcMediaSession {
       .on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
         this.detachRemoteTrack(track, publication, participant.identity)
       })
+      .on(RoomEvent.ConnectionStateChanged, () => this.updateVoicePlayback())
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => this.updateVoicePlayback())
+      .on(RoomEvent.Reconnected, () => this.resumeRemoteVoice())
+      .on(RoomEvent.ParticipantDisconnected, () => this.updateVoicePlayback())
       .on(RoomEvent.TrackMuted, (publication, participant) => {
         if (publication.source === Track.Source.Camera) this.opts.onRemoteCamera?.(participant.identity, null)
       })
@@ -119,13 +130,51 @@ export class WebRtcMediaSession {
     this.opts.onStatus?.(`LiveKit connected: ${input.roomName}`)
   }
 
-  setPlayRemoteVoice(play: boolean) {
+  /** True only after every expected speaker has a playable microphone track. */
+  get playingRemoteVoice() {
+    this.updateVoicePlayback()
+    return this.voiceReady
+  }
+
+  setPlayRemoteVoice(play: boolean, expectedPeers?: string[]) {
     this.playRemoteVoice = play
-    if (!play) {
-      this.clearVoiceAudioElements()
-      return
+    if (expectedPeers) this.expectedVoicePeers = expectedPeers
+    this.updateVoicePlayback()
+  }
+
+  private updateVoicePlayback() {
+    const room = this.room
+    const expected = this.expectedVoicePeers ?? [...(room?.remoteParticipants.keys() ?? [])].filter(id => !id.endsWith(":screen"))
+    this.voiceReady = Boolean(this.playRemoteVoice && room?.state === ConnectionState.Connected && room.canPlaybackAudio && expected.every(identity =>
+      [...this.remoteVoice.values()].some(entry => entry.identity === identity && entry.playing && entry.track.mediaStreamTrack.readyState === "live")
+    ))
+    for (const element of this.voiceAudioElements) element.muted = this.deafened || !this.voiceReady
+  }
+
+  private resumeRemoteVoice() {
+    void this.room?.startAudio().catch(() => {}).finally(() => this.updateVoicePlayback())
+    for (const [key, entry] of this.remoteVoice) {
+      void entry.element.play().then(() => {
+        if (this.remoteVoice.get(key) !== entry) return
+        entry.playing = true
+        this.updateVoicePlayback()
+      }).catch(() => { if (this.remoteVoice.get(key) !== entry) return; entry.playing = false; this.updateVoicePlayback(); this.retryVoiceOnGesture() })
     }
-    if (this.room) this.syncExistingRemoteTracks(this.room)
+  }
+
+  private retryVoiceOnGesture() {
+    if (this.voiceRetryArmed) return
+    this.voiceRetryArmed = true
+    const retry = () => {
+      this.voiceRetryArmed = false
+      this.voiceRetryHandler = null
+      window.removeEventListener("pointerdown", retry, true)
+      window.removeEventListener("keydown", retry, true)
+      this.resumeRemoteVoice()
+    }
+    this.voiceRetryHandler = retry
+    window.addEventListener("pointerdown", retry, true)
+    window.addEventListener("keydown", retry, true)
   }
 
   bindRemoteScreenVideo(el: HTMLVideoElement | null) {
@@ -268,32 +317,35 @@ export class WebRtcMediaSession {
   }
 
   async publishMicTrack(track: MediaStreamTrack) {
+    const generation = ++this.micGeneration
+    await this.unpublishMic(false)
     const room = this.room
-    if (!room) return
-    await this.unpublishMic()
-    this.micTrack = new LocalAudioTrack(track)
-    await room.localParticipant.publishTrack(this.micTrack, {
-      source: Track.Source.Microphone,
-      dtx: false,
-      red: true
-    })
-    if (this.deafened) await this.micTrack.mute()
+    if (!room || generation !== this.micGeneration) return
+    // A mode switch must never stop the original processed microphone used by legacy voice.
+    const local = new LocalAudioTrack(track.clone())
+    try {
+      await room.localParticipant.publishTrack(local, { source: Track.Source.Microphone, dtx: false, red: true })
+      if (generation !== this.micGeneration || this.room !== room) {
+        try { await room.localParticipant.unpublishTrack(local, false) } finally { local.stop() }
+        return
+      }
+      this.micTrack = local
+      if (this.muted) await local.mute()
+    } catch (error) { local.stop(); throw error }
   }
 
-  async unpublishMic() {
-    const room = this.room
-    try {
-      if (this.micTrack && room) {
-        await room.localParticipant.unpublishTrack(this.micTrack)
-      }
-    } catch {
-      // room already gone
-    } finally {
-      this.micTrack = null
-    }
+  async unpublishMic(invalidate = true) {
+    if (invalidate) this.micGeneration++
+    const room = this.room, track = this.micTrack
+    this.micTrack = null
+    if (!track) return
+    try { if (room) await room.localParticipant.unpublishTrack(track, false) }
+    catch { /* room already gone */ }
+    finally { track.stop() }
   }
 
   async setMuted(muted: boolean) {
+    this.muted = muted
     if (!this.micTrack) return
     if (muted) await this.micTrack.mute()
     else await this.micTrack.unmute()
@@ -301,9 +353,7 @@ export class WebRtcMediaSession {
 
   async setDeafened(deafened: boolean) {
     this.deafened = deafened
-    for (const element of this.voiceAudioElements) {
-      element.muted = deafened
-    }
+    this.updateVoicePlayback()
     for (const element of this.screenAudioElements) {
       element.muted = deafened
     }
@@ -507,11 +557,21 @@ export class WebRtcMediaSession {
   }
 
   private clearVoiceAudioElements() {
-    for (const element of this.voiceAudioElements) {
-      element.remove()
+    for (const [key, entry] of this.remoteVoice) {
+      entry.track.detach(entry.element)
+      entry.element.remove()
+      this.remoteElements.delete(key)
     }
+    this.remoteVoice.clear()
     this.voiceAudioElements.clear()
     this.voiceAudioByIdentity.clear()
+    this.voiceReady = false
+    if (this.voiceRetryHandler) {
+      window.removeEventListener("pointerdown", this.voiceRetryHandler, true)
+      window.removeEventListener("keydown", this.voiceRetryHandler, true)
+    }
+    this.voiceRetryArmed = false
+    this.voiceRetryHandler = null
   }
 
   private syncExistingRemoteTracks(room: Room) {
@@ -536,20 +596,34 @@ export class WebRtcMediaSession {
 
     if (track.kind === Track.Kind.Audio) {
       if (publication.source === Track.Source.Microphone) {
-        if (!this.playRemoteVoice) return
-        const element = track.attach() as HTMLMediaElement
         const key = this.remoteTrackKey(participantIdentity, track)
+        if (this.remoteVoice.has(key)) { this.updateVoicePlayback(); return }
+        const element = track.attach() as HTMLMediaElement
+        element.dataset.voixexAudioSource = "microphone"
+        const entry = { track, identity: participantIdentity, element, playing: false }
+        this.remoteVoice.set(key, entry)
         this.remoteElements.set(key, element)
         this.voiceAudioElements.add(element)
         this.trackVoiceElement(participantIdentity, element)
-        element.muted = this.deafened
+        element.muted = true
+        element.addEventListener("pause", () => {
+          if (this.remoteVoice.get(key) !== entry) return
+          entry.playing = false
+          this.updateVoicePlayback()
+          this.retryVoiceOnGesture()
+        })
         this.opts.audioSink.appendChild(element)
         void this.applyOutputDeviceToElements()
-        void element.play?.().catch(() => {})
+        void element.play().then(() => {
+          if (this.remoteVoice.get(key) !== entry) return
+          entry.playing = true
+          this.updateVoicePlayback()
+        }).catch(() => { if (this.remoteVoice.get(key) !== entry) return; entry.playing = false; this.updateVoicePlayback(); this.retryVoiceOnGesture() })
         return
       }
       if (publication.source !== Track.Source.ScreenShareAudio) return
       const element = track.attach() as HTMLMediaElement
+      element.dataset.voixexAudioSource = "screen"
       const key = this.remoteTrackKey(participantIdentity, track)
       this.remoteElements.set(key, element)
       this.screenAudioElements.add(element)
@@ -591,6 +665,8 @@ export class WebRtcMediaSession {
     }
     const key = this.remoteTrackKey(participantIdentity, track)
     const element = this.remoteElements.get(key)
+    this.remoteVoice.delete(key)
+    this.updateVoicePlayback()
     if (element) {
       track.detach(element)
       element.remove()

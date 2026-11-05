@@ -16,6 +16,7 @@ export type StreamStats = {
   catchupDrops: number
   hardDrops: number
   underruns: number
+  decodeErrors: number
 }
 
 const MIN_TARGET = 2
@@ -65,7 +66,7 @@ export class SpeakerStream {
   private lastPcm: Int16Array | null = null
   /** RMS (0..1) of the last frame handed to the mixer, for speaking detection. */
   lastRms = 0
-  readonly stats: StreamStats = { played: 0, concealed: 0, lateDrops: 0, catchupDrops: 0, hardDrops: 0, underruns: 0 }
+  readonly stats: StreamStats = { played: 0, concealed: 0, lateDrops: 0, catchupDrops: 0, hardDrops: 0, underruns: 0, decodeErrors: 0 }
 
   constructor(private readonly decoder: () => OpusDecoderLike) {}
 
@@ -223,7 +224,7 @@ export class SpeakerStream {
     let base: Int16Array | null = null
     if (this.codec === "opus") {
       try {
-        // Opus: an empty packet asks the decoder for packet-loss concealment.
+        // The safe decoder supplies one bounded frame; fade it below.
         base = toFrame(this.decoder().decode(Buffer.alloc(0)))
       } catch {
         base = null
@@ -241,6 +242,7 @@ export class SpeakerStream {
     try {
       return toFrame(this.decoder().decode(data))
     } catch {
+      this.stats.decodeErrors += 1
       return this.conceal()
     }
   }

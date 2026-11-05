@@ -375,6 +375,7 @@ export default function VoIPApp() {
   const mediaEngineRef = useRef(mediaEngine)
   /** Everyone else in our voice channel uses WebRTC voice too (otherwise only the server mix has them all). */
   const roomAllWebRtcRef = useRef(false)
+  const webRtcVoicePeersRef = useRef<string[]>([])
   const [displayNameInput, setDisplayNameInput] = useState("User")
   const [profileDisplayName, setProfileDisplayName] = useState("User")
   const [servers, setServers] = useState<Array<{ id: string; name: string; icon: string }>>([])
@@ -751,10 +752,9 @@ export default function VoIPApp() {
         const room = currentVoiceChannelRef.current
         const others = (room ? rt.rosterByRoom[room] ?? [] : []).filter((m) => m.clientId !== meId)
         const allWebRtc = others.every((m) => m.mediaEngine === "webrtc")
-        if (allWebRtc !== roomAllWebRtcRef.current) {
-          roomAllWebRtcRef.current = allWebRtc
-          webRtcSessionRef.current?.setPlayRemoteVoice(playsLiveKitVoiceRef.current())
-        }
+        roomAllWebRtcRef.current = allWebRtc
+        webRtcVoicePeersRef.current = others.filter(member => !member.muted).map(member => member.clientId)
+        webRtcSessionRef.current?.setPlayRemoteVoice(mediaEngineRef.current === "webrtc" && allWebRtc, webRtcVoicePeersRef.current)
       }
       if (meId && !localPresenceToggleRef.current) {
         const rt = split && v ? v : u
@@ -1216,7 +1216,7 @@ export default function VoIPApp() {
 
   useEffect(() => {
     mediaEngineRef.current = mediaEngine
-    webRtcSessionRef.current?.setPlayRemoteVoice(playsLiveKitVoiceRef.current())
+    webRtcSessionRef.current?.setPlayRemoteVoice(mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current, webRtcVoicePeersRef.current)
     republishWebRtcMicFromPipeline()
     if (wsForVoiceJoin) {
       getVoiceWsClient().syncPresence(buildPresenceSync())
@@ -1381,7 +1381,9 @@ export default function VoIPApp() {
     }
     const mic = getWebRtcMicTrackFromPipeline()
     if (!mic) return
-    void webRtcSessionRef.current.publishMicTrack(mic)
+    void webRtcSessionRef.current.publishMicTrack(mic).catch(error => {
+      setStatus(`WebRTC microphone unavailable; using compatible voice: ${error instanceof Error ? error.message : String(error)}`)
+    })
     void webRtcSessionRef.current.setMuted(mutedRef.current)
   }
 
@@ -1576,6 +1578,7 @@ export default function VoIPApp() {
       })
       webRtcSessionRef.current = session
       webRtcSessionKeyRef.current = key
+      session.setPlayRemoteVoice(mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current, webRtcVoicePeersRef.current)
     })().finally(() => {
       if (webRtcStartRef.current === entry) webRtcStartRef.current = null
     })
@@ -1598,7 +1601,7 @@ export default function VoIPApp() {
    * otherwise the server mix (everyone always sends to it) — so mixed engines still hear each other.
    */
   const playsLiveKitVoice = () =>
-    mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current && Boolean(webRtcSessionRef.current?.live)
+    mediaEngineRef.current === "webrtc" && roomAllWebRtcRef.current && Boolean(webRtcSessionRef.current?.playingRemoteVoice)
   const playsLiveKitVoiceRef = useRef(playsLiveKitVoice)
   playsLiveKitVoiceRef.current = playsLiveKitVoice
 

@@ -46,7 +46,9 @@ jobs:
       - name: Camera across UDP, TCP and WebSocket
         env:
           CAMERA_CLIENT_ROOT: ${{ github.workspace }}
-        run: node .camera-server/backend/test/camera-transports.mjs
+        run: |
+          node .camera-server/backend/test/camera-transports.mjs
+          node .camera-server/backend/test/voice-transports.mjs
       - name: Frontend types and browser tests
         env:
           CAMERA_SERVER_ROOT: ${{ github.workspace }}/.camera-server
@@ -56,5 +58,6 @@ jobs:
           npx tsc --noEmit
           npm run build
           npx playwright install --with-deps chromium
+          node scripts/voice-browser-check.mjs
           node scripts/camera-browser-check.mjs
           node scripts/voice-stage-layout-check.mjs
