@@ -137,6 +137,8 @@ MIT — see [LICENSE](LICENSE).
 
 Update clients and server together. Camera v1 uses negotiated `camera1` / encrypted media kind 6 on UDP, TCP and WebSocket, relayed only within the same server and current voice room. LiveKit tokens additionally permit `CAMERA` when the independent channel policy `allowCamera` is enabled. Admins can update that policy through the existing room policy API. No database migration is required: the rule is stored in room options.
 
-Legacy video uses independent JPEG frames (client limit 480px / 8 fps) with bounded fragmentation; LiveKit camera uses a regular video track. Publishers send compatibility images alongside the SFU track for mixed-transport interoperability, at an additional bandwidth cost. Existing audio protocol layouts are unchanged.
+Legacy video uses independent JPEG frames (client limit 480px / 30 fps with client 0.7.1+) with bounded fragmentation; LiveKit camera uses a regular video track. Publishers send compatibility images alongside the SFU track for mixed-transport interoperability, at an additional bandwidth cost. Existing audio protocol layouts are unchanged.
 
 Run `npm run build` in backend, then `CAMERA_CLIENT_ROOT=/absolute/client node backend/test/camera-transports.mjs` from the server root to verify all six UDP/TCP/WebSocket directions and room/policy enforcement. The test requires a built matching client checkout.
+
+Server 0.7.1 raises the per-sender camera budget to 1 MiB/s for the 30 fps compatibility mode.

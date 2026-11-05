@@ -366,7 +366,7 @@ function handlePacket(session: Session, decoded: DecryptedPacket, packetLength: 
     if (!session.caps.camera1 || !cameraAllowed.get(session.clientId) || !parseCameraFragment(decoded.payload)) return
     if (session.cameraSecond !== sec) { session.cameraSecond = sec; session.cameraBytes = 0 }
     session.cameraBytes += packetLength
-    if (session.cameraBytes > 256 * 1024) return
+    if (session.cameraBytes > 1024 * 1024) return
     const identity = Buffer.from(session.clientId)
     if (identity.length > 255) return
     const payload = Buffer.concat([Buffer.from([identity.length]), identity, decoded.payload])
