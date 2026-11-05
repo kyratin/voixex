@@ -140,7 +140,7 @@ export class WebVoiceEngine {
     this.cameraSending = true
     try {
       const packet = await encryptPacket(key, this.seqOut++, Date.now(), room, data, CAMERA_KIND)
-      if (this.ws === ws && this.roomId === room && ws.readyState === 1 && ws.bufferedAmount < 4096) ws.send(packet)
+      if (this.ws === ws && this.roomId === room && ws.readyState === 1 && ws.bufferedAmount < 4096) await ws.send(packet)
     } finally { this.cameraSending = false }
   }
 

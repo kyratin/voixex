@@ -14,7 +14,7 @@ export type MediaSocket = {
   onopen: (() => void) | null
   onmessage: ((event: { data: ArrayBuffer }) => void) | null
   onclose: (() => void) | null
-  send(data: Uint8Array): void
+  send(data: Uint8Array): void | Promise<void>
   close(): void
 }
 
@@ -49,16 +49,17 @@ export class NativeMediaSocket implements MediaSocket {
       if (this.readyState === 3) { await NativeMedia.close({ id: this.id }); return }
       this.readyState = 1
       this.onopen?.()
-    } catch { this.close() }
+    } catch { this.removeListeners(); this.close() }
   }
 
-  send(data: Uint8Array) {
+  send(data: Uint8Array): void | Promise<void> {
     if (this.readyState !== 1 || this.bufferedAmount > 24 * 1024) return
     const encoded = btoa(String.fromCharCode(...data))
     this.bufferedAmount += data.length
     this.sending = this.sending.then(async () => {
       if (this.readyState === 1) await NativeMedia.send({ id: this.id, data: encoded })
     }).catch(() => this.close()).finally(() => { this.bufferedAmount -= data.length })
+    return this.sending
   }
 
   close() {
