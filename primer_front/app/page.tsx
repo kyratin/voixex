@@ -3109,7 +3109,8 @@ export default function VoIPApp() {
         placeholderEl.style.display = "none"
         syncStreamPopupAudio()
       } else if (legacyStreamBuffered && screenVideoUrl && remoteStreamVideoRef.current) {
-        imageEl.muted = deafenedRef.current
+        // The retained source element owns legacy audio; the popup presents video only.
+        imageEl.muted = true
         const srcVideo = remoteStreamVideoRef.current
         const mirrored = mirrorLegacyVideoToPopup(srcVideo, imageEl, screenVideoUrl)
         if (mirrored) {
