@@ -22,7 +22,7 @@
 | Branch | What it is | Runs on | How you get it |
 |--------|------------|---------|----------------|
 | **`client`** (this one, default) | The app: UI, desktop shell, Android app, voice engine | Windows · macOS · Linux · Android | [GitHub Releases](https://github.com/kyratin/voixex/releases) (`.exe`, `.dmg`, `.apk`) |
-| **[`server`](https://github.com/kyratin/voixex/tree/server)** | 🐳 Backend **Docker image**: API, voice mixer, built-in LiveKit SFU, SQLite | Any Docker host / Kubernetes (linux/amd64) | `docker pull kyratinkokko/voixex` |
+| **[`server`](https://github.com/kyratin/voixex/tree/server)** | 🐳 Backend **Docker image**: API, voice mixer, built-in LiveKit SFU, SQLite | Any Docker host / Kubernetes (linux/amd64, linux/arm64) | `docker pull kyratinkokko/voixex` |
 
 There are no per-OS branches: one codebase builds every platform. The former `windows`, `linux`, `macos`, `server-auth` and `server-livekit` branches are kept as tags `archive/<name>`.
 
