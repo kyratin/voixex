@@ -1,3 +1,9 @@
+# 0.7.1 — Smoother compatibility camera video
+
+- Raise the compatibility camera target from 8 to 30 fps, keeping the maximum width at 480 pixels.
+- Account for encoding and sending time in frame scheduling; yield between small packet batches instead of delaying every packet.
+- Server 0.7.1 raises the camera sender budget to 1 MiB/s. Actual frame rate still depends on camera, CPU and network conditions.
+
 # 0.7.0 — Cameras in voice channels
 
 - Camera controls, local preview, participant video and device selection on Android, macOS and Windows.

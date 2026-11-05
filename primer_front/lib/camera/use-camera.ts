@@ -19,6 +19,8 @@ export type CameraControls = {
   select: (deviceId: string) => void
 }
 
+const CAMERA_FRAME_INTERVAL_MS = 1000 / 30
+
 const base64 = (data: Uint8Array) => btoa(String.fromCharCode(...data))
 const bytes = (data: string) => Uint8Array.from(atob(data), c => c.charCodeAt(0))
 
@@ -209,6 +211,7 @@ export function useCamera(options: {
     const streamId = crypto.getRandomValues(new Uint32Array(1))[0]
     let frameId = 0
     const tick = async () => {
+      const startedAt = performance.now()
       try {
         if (!context || video.readyState < 2 || cancelled) return
         const ratio = video.videoWidth / video.videoHeight
@@ -218,11 +221,11 @@ export function useCamera(options: {
         const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/jpeg", 0.55))
         if (!blob || cancelled) return
         const packets = fragmentCamera(new Uint8Array(await blob.arrayBuffer()), streamId, frameId++, Date.now())
-        for (const packet of packets) {
+        for (const [index, packet] of packets.entries()) {
           if (cancelled) break
           await window.electronVoice?.sendCameraPacket?.(base64(packet))
-          // Yield between datagrams so voice/control do not wait behind a full image.
-          await new Promise(resolve => setTimeout(resolve, 2))
+          // Yield in small batches so audio/control can run without a delay per fragment.
+          if ((index + 1) % 4 === 0) await new Promise(resolve => setTimeout(resolve, 0))
         }
         const session = opts.current.session()
         if (livekit.current && session?.live && published.current !== session && !cancelled) {
@@ -230,7 +233,7 @@ export function useCamera(options: {
           await session.publishCamera(local.getVideoTracks()[0]).catch(() => { if (published.current === session) published.current = null })
         }
       } catch { /* next independent frame recovers from packet/encoder failure */ }
-      finally { if (!cancelled) timer = setTimeout(() => void tick(), 125) }
+      finally { if (!cancelled) timer = setTimeout(() => void tick(), Math.max(0, CAMERA_FRAME_INTERVAL_MS - (performance.now() - startedAt))) }
     }
     void video.play().then(() => tick()).catch(() => { if (!cancelled) { stop(); setError(opts.current.errorMessage("Error")) } })
     return () => { cancelled = true; clearTimeout(timer); video.pause(); video.srcObject = null }

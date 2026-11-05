@@ -2,10 +2,12 @@
 
 Android, macOS and Windows share camera capture, local preview, participant tiles and device selection. Camera starts only after an explicit click, is independent of microphone mute, and stops on leaving/changing the voice room, app backgrounding, device removal and component teardown. The last device is remembered; enabled state is not persisted.
 
+The 0.7.1 update raises the compatibility target from 8 to 30 fps. Scheduling accounts for encoding and send time rather than adding a fixed delay after each frame. The server sender budget is raised from 256 KiB/s to 1 MiB/s.
+
 ## Transports
 
-- UDP, TCP and WebSocket use encrypted media kind **6**, negotiated as `camera1` in HELLO2/HELLO_ACK. The server forwards packets between these transports and stamps the authenticated sender. Camera packets are restricted to the sender's current room and server, with an independent camera policy and a 256 KiB/s sender budget.
-- Legacy camera v1 uses independent JPEG frames, up to 480 pixels wide, JPEG quality 0.55, at most 8 fps (encoding and pacing lower the actual rate). Fragments have a 24-byte header plus at most 900 bytes. Frames over 96 KiB are skipped. There is no retransmission: the next complete image recovers after loss. Receiver assembly expires at 500 ms, retains at most two frames per sender and 128 incomplete frames total, and rejects stale completed frames.
+- UDP, TCP and WebSocket use encrypted media kind **6**, negotiated as `camera1` in HELLO2/HELLO_ACK. The server forwards packets between these transports and stamps the authenticated sender. Camera packets are restricted to the sender's current room and server, with an independent camera policy and a 1 MiB/s sender budget.
+- Legacy camera v1 uses independent JPEG frames, up to 480 pixels wide, JPEG quality 0.55, at most 30 fps (encoding and pacing lower the actual rate). Fragments have a 24-byte header plus at most 900 bytes. Frames over 96 KiB are skipped. There is no retransmission: the next complete image recovers after loss. Receiver assembly expires at 500 ms, retains at most two frames per sender and 128 incomplete frames total, and rejects stale completed frames.
 - LiveKit publishes a separate camera video track, requesting 720p/30 capture and simulcast. Camera does not replace screen share or acquire another microphone.
 - When LiveKit is available, the publisher also sends the compatibility JPEG stream. This lets clients on different transports see one another without server transcoding. Receivers prefer the LiveKit track and fall back to the JPEG image. **This costs additional upload bandwidth**; the compatibility path is lower quality than WebRTC. A codec bridge and selective subscriptions are future optimizations.
 

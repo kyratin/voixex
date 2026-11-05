@@ -113,7 +113,8 @@ try {
     window.fixture = mountCameraHarness()
     window.realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
     window.sentPackets = 0
-    window.electronVoice = { sendCameraPacket: () => { window.sentPackets++ }, onCameraPacket: () => () => {} }
+    window.cameraFrameTimes = []
+    window.electronVoice = { sendCameraPacket: packet => { window.sentPackets++; const data = Uint8Array.from(atob(packet), c => c.charCodeAt(0)); if (new DataView(data.buffer).getUint16(20) === 0) window.cameraFrameTimes.push(performance.now()) }, onCameraPacket: () => () => {} }
   })
   await controller.waitForFunction(() => window.cameraControls?.supported)
   await controller.evaluate(() => {
@@ -139,6 +140,13 @@ try {
   console.log('PASS permission denial clears busy state and exposes a recoverable error')
   await controller.evaluate(() => { navigator.mediaDevices.getUserMedia = window.realGetUserMedia; window.cameraControls.toggle() })
   await controller.waitForFunction(() => window.cameraControls.enabled && window.sentPackets > 0)
+  await controller.waitForFunction(() => window.cameraFrameTimes.length >= 40)
+  const fps = await controller.evaluate(() => {
+    const times = window.cameraFrameTimes.slice(-30)
+    return (times.length - 1) * 1000 / (times.at(-1) - times[0])
+  })
+  assert.ok(fps >= 20 && fps <= 36, `Compatibility camera should target 30 fps, observed ${fps.toFixed(1)}`)
+  console.log(`PASS compatibility camera scheduling: ${fps.toFixed(1)} fps with real browser capture/encoding`)
   await controller.evaluate(() => { window.activeCapture = window.cameraControls.local; window.fixture.unmount() })
   await controller.waitForFunction(() => window.activeCapture.getVideoTracks()[0].readyState === 'ended')
   console.log('PASS real camera sends compatibility packets; unmount releases capture')
