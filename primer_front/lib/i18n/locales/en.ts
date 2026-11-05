@@ -1,5 +1,5 @@
 export const en = {
-  camera: {"enable": "Turn camera on", "disable": "Turn camera off", "device": "Camera", "denied": "Camera access was denied. Allow it in system settings.", "missing": "No camera found.", "busy": "The camera is busy or unavailable.", "failed": "Could not start the camera. Try again.", "unavailable": "Camera needs an updated server and permission in this channel."},
+  camera: {"previousParticipants": "Previous participants", "nextParticipants": "Next participants", "enable": "Turn camera on", "disable": "Turn camera off", "device": "Camera", "denied": "Camera access was denied. Allow it in system settings.", "missing": "No camera found.", "busy": "The camera is busy or unavailable.", "failed": "Could not start the camera. Try again.", "unavailable": "Camera needs an updated server and permission in this channel."},
   common: {
     close: "Close",
     default: "Default",
@@ -29,6 +29,11 @@ export const en = {
     connectToServer: "Connect to server"
   },
   connect: {
+    websocketPortHint: "WebSocket uses the API address and port above.",
+    compatibilityFallbackHint: "Used for mixed voice channels and compatibility video, or when LiveKit is unavailable. These settings apply to Voixex, independently of WebRTC.",
+    compatibilityFallback: "Compatibility and fallback connection",
+    webrtcAutomaticHint: "LiveKit negotiates its network connection automatically. The Voixex transport selector does not control WebRTC.",
+    webrtcAutomatic: "WebRTC transport: automatic (ICE)",
     title: "Connect to server",
     description: "Add or switch servers. Saved profiles appear in the left rail.",
     descriptionEmpty: "Enter a server address to connect. Saved servers appear in the left rail.",
@@ -43,12 +48,12 @@ export const en = {
     apiWs: "API & WebSocket",
     httpWs: "HTTP — ws://",
     httpsWss: "HTTPS — wss://",
-    voiceUdpPort: "Voice UDP port (optional)",
+    voiceUdpPort: "Voixex UDP/TCP port (optional)",
     voiceUdpPlaceholder: "From server join response",
-    mediaEngine: "Media engine",
-    legacyUdp: "Legacy (UDP voice)",
+    mediaEngine: "Voice mode",
+    legacyUdp: "Voixex (Opus)",
     webrtcLivekit: "WebRTC (LiveKit)",
-    voiceTransport: "Voice transport",
+    voiceTransport: "Voixex transport",
     tcpFallback: "TCP fallback",
     password: "Password",
     nickname: "Nickname",

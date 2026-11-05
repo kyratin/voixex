@@ -54,5 +54,7 @@ jobs:
           npm ci --prefix primer_front
           cd primer_front
           npx tsc --noEmit
+          npm run build
           npx playwright install --with-deps chromium
           node scripts/camera-browser-check.mjs
+          node scripts/voice-stage-layout-check.mjs

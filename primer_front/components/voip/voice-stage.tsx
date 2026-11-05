@@ -18,6 +18,8 @@ import {
   MonitorOff,
   MoreHorizontal,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   MessageSquare,
   PhoneOff,
   Volume2
@@ -46,7 +48,7 @@ function CameraVideo({ picture, mirror }: { picture: CameraPicture; mirror: bool
     void el.play().catch(() => {})
     return () => { el.srcObject = null }
   }, [picture.stream])
-  const className = cn("absolute inset-0 h-full w-full rounded-xl object-cover", mirror && "-scale-x-100")
+  const className = cn("absolute inset-0 h-full w-full rounded-xl bg-black object-cover", mirror && "-scale-x-100")
   return picture.stream ? <video ref={ref} muted autoPlay playsInline className={className} onDoubleClick={event => { event.stopPropagation(); void event.currentTarget.requestFullscreen?.().catch(() => {}) }} /> : <img src={picture.image} alt="" className={className} />
 }
 
@@ -171,16 +173,11 @@ function DockButton({
 
 function ParticipantTile({
   user,
-  large,
-  fill = false,
   picture,
   mirror = false,
   volume
 }: {
   user: VoiceUser
-  large: boolean
-  /** Phone call screen: the tile takes its whole grid cell. */
-  fill?: boolean
   picture?: CameraPicture
   mirror?: boolean
   volume?: { pct: number; onChange: (pct: number) => void }
@@ -188,9 +185,9 @@ function ParticipantTile({
   const { t } = useI18n()
   const tile = (
     <div
+      data-participant-id={user.id}
       className={cn(
-        "relative flex shrink-0 flex-col items-center justify-center gap-2 rounded-xl bg-card/80 transition-colors animate-in fade-in zoom-in-90 duration-300",
-        fill ? "aspect-square w-full" : large ? "h-32 w-40" : "h-28 w-[7.5rem]",
+        "relative flex h-full min-h-0 w-full min-w-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-xl bg-card/80 transition-colors animate-in fade-in zoom-in-90 duration-300",
         volume && "cursor-pointer hover:bg-card"
       )}
     >
@@ -202,7 +199,7 @@ function ParticipantTile({
         id={user.id}
         label={user.name}
         isSpeaking={user.isSpeaking}
-        className={fill ? "size-20 text-2xl" : large ? "size-14 text-lg" : "size-11 text-base"}
+        className="size-[clamp(2rem,7vh,5rem)] shrink-0 text-xl"
       >
         {user.avatar.slice(0, 1).toUpperCase()}
       </SpeakingAvatar></div>
@@ -218,7 +215,7 @@ function ParticipantTile({
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <button type="button" className="rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <button type="button" className="h-full min-h-0 w-full min-w-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           {tile}
         </button>
       </PopoverTrigger>
@@ -338,7 +335,9 @@ export function VoiceStage({
   const expectingStream = Boolean(activeScreenSharerName && !isScreenSharing && !hasStream && !streamHiddenByUser)
   const canHideStream = Boolean(!isScreenSharing && activeScreenSharerName && !streamHiddenByUser)
   const canPopOut = Boolean(activeScreenSharerName || hasStream || isScreenSharing)
-  const showsVideo = isScreenSharing || hasStream || expectingStream
+  const hasScreenVideo = isScreenSharing || hasStream || expectingStream
+  const hasCameraVideo = Boolean(camera?.local || (camera && Object.keys(camera.pictures).length > 0))
+  const showsVideo = hasScreenVideo || hasCameraVideo
   const live = Boolean(activeScreenSharerName || isScreenSharing)
   const sectionRef = useRef<HTMLElement>(null)
   const [heights, setHeights] = useState<StageHeights>({ idle: null, video: null })
@@ -393,9 +392,15 @@ export function VoiceStage({
     const current = sectionRef.current?.getBoundingClientRect().height ?? 0
     commitHeight(clampHeight(current + (e.key === "ArrowDown" ? 32 : -32)))
   }
-  // A tall stage has room for big tiles in several rows.
-  const roomy = !fullscreen && (chosenHeight ?? 0) >= 420
-  const largeTiles = participants.length <= 2 || roomy
+  const [participantPage, setParticipantPage] = useState(0)
+  const participantPages = Math.max(1, Math.ceil(participants.length / 12))
+  const currentParticipantPage = Math.min(participantPage, participantPages - 1)
+  useEffect(() => setParticipantPage(0), [roomId])
+  useEffect(() => setParticipantPage(page => Math.min(page, participantPages - 1)), [participantPages])
+  const visibleParticipants = participants.slice(currentParticipantPage * 12, (currentParticipantPage + 1) * 12)
+  // Fill available call space: 1×1, 2×1, 2×2, 3×2, 4×2, then 4×3.
+  const participantColumns = visibleParticipants.length <= 1 ? 1 : visibleParticipants.length <= 4 ? 2 : visibleParticipants.length <= 6 ? 3 : 4
+  const participantRows = Math.max(1, Math.ceil(visibleParticipants.length / participantColumns))
   // "Stream hidden" shows for 1.5 s after hiding, then only the participants remain.
   const [hiddenNotice, setHiddenNotice] = useState(false)
   useEffect(() => {
@@ -407,35 +412,37 @@ export function VoiceStage({
     const timer = setTimeout(() => setHiddenNotice(false), 1500)
     return () => clearTimeout(timer)
   }, [streamHiddenByUser])
-  const participantsGrid = (          <div
-            className={cn(
-              fullscreen
-                ? cn("grid w-full gap-3 overflow-y-auto", participants.length > 1 ? "grid-cols-2" : "max-w-xs grid-cols-1")
-                : "flex max-h-full max-w-full flex-wrap content-center items-center justify-center gap-3 overflow-y-auto px-2 pb-1"
-            )}
-          >
-            {participants.map((user) => {
-              const canAdjust = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
-              return (
-                <ParticipantTile
-                  key={user.id}
-                  user={user}
-                  picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]}
-                  mirror={user.id === selfClientId}
-                  large={largeTiles}
-                  fill={fullscreen}
-                  volume={
-                    canAdjust
-                      ? {
-                          pct: peerVolumePct[`${roomId}:${user.id}`] ?? 100,
-                          onChange: (pct) => onPeerVolumeChange(roomId, user.id, user.name, pct)
-                        }
-                      : undefined
-                  }
-                />
-              )
-            })}
-          </div>
+  const participantsGrid = (
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col gap-2" data-participant-panel>
+      <div
+        data-participant-grid
+        className="grid min-h-0 flex-1 gap-2 sm:gap-3"
+        style={{ gridTemplateColumns: `repeat(${participantColumns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${participantRows}, minmax(0, 1fr))` }}
+      >
+        {visibleParticipants.map(user => {
+          const canAdjust = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
+          return (
+            <ParticipantTile
+              key={user.id}
+              user={user}
+              picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]}
+              mirror={user.id === selfClientId}
+              volume={canAdjust ? {
+                pct: peerVolumePct[`${roomId}:${user.id}`] ?? 100,
+                onChange: pct => onPeerVolumeChange(roomId, user.id, user.name, pct)
+              } : undefined}
+            />
+          )
+        })}
+      </div>
+      {participantPages > 1 ? (
+        <div className="flex shrink-0 items-center justify-center gap-3 text-xs text-foreground">
+          <button type="button" aria-label={t("camera.previousParticipants")} disabled={currentParticipantPage === 0} onClick={() => setParticipantPage(currentParticipantPage - 1)} className="rounded p-1 disabled:opacity-30"><ChevronLeft className="size-4" /></button>
+          <span aria-live="polite">{currentParticipantPage + 1} / {participantPages}</span>
+          <button type="button" aria-label={t("camera.nextParticipants")} disabled={currentParticipantPage === participantPages - 1} onClick={() => setParticipantPage(currentParticipantPage + 1)} className="rounded p-1 disabled:opacity-30"><ChevronRight className="size-4" /></button>
+        </div>
+      ) : null}
+    </div>
   )
   /** Phone call screen with the stream maximized: only the video (landscape), plus an exit button. */
   const immersive = fullscreen && streamVideoFullscreen && (hasStream || expectingStream)
@@ -824,7 +831,7 @@ export function VoiceStage({
         </DockButton>
       </div>
 
-      {showsVideo && camera && (camera.local || Object.keys(camera.pictures).length > 0) ? <div className="absolute right-3 top-14 z-10 max-h-36 max-w-[60%] overflow-auto rounded-xl bg-stage/80 p-1">{participantsGrid}</div> : null}
+      {hasScreenVideo && hasCameraVideo && !immersive ? <div className="absolute right-3 top-14 z-10 h-36 w-80 max-w-[60%] rounded-xl bg-stage/80 p-1">{participantsGrid}</div> : null}
 
       {camera?.error ? <p role="alert" className="absolute inset-x-3 top-12 z-20 rounded bg-popover/95 p-2 text-center text-xs text-destructive">{camera.error}</p> : null}
 

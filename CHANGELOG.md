@@ -1,3 +1,10 @@
+# 0.7.2 — Call layout, speaking indicator and connection settings
+
+- Participant tiles fill the available call area. One participant fills the grid; up to 12 participants form a grid of at most 4 columns × 3 rows, with pages for larger channels.
+- The bottom avatar ring follows post-DSP microphone loudness instead of sent-packet counts. Silence, mute, leaving and stalled capture clear the ring; the online status dot remains independent.
+- Voice settings distinguish Voixex UDP/TCP/WebSocket from WebRTC's automatic ICE negotiation. Compatibility/fallback transport settings have their own expandable section; WebSocket uses the API port.
+- Client-only update: server 0.7.1 remains compatible; no server deployment is required.
+
 # 0.7.1 — Smoother compatibility camera video
 
 - Raise the compatibility camera target from 8 to 30 fps, keeping the maximum width at 480 pixels.

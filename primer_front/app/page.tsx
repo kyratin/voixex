@@ -2,6 +2,7 @@
 
 // Android app: installs the voice/identity bridges before anything reads them.
 import { onNativeScreenShareStopped, setScreenOrientation, startNativeScreenShare, stopNativeScreenShare } from "@/lib/mobile-bridge"
+import { VoiceActivityDetector, setLocalVoiceActivity, resetLocalVoiceActivity } from "@/lib/voice-activity"
 import { useCamera } from "@/lib/camera/use-camera"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
@@ -439,7 +440,6 @@ export default function VoIPApp() {
     rxFrames: number
   }>({ lastLogMs: 0, txFrames: 0, rxFrames: 0 })
   const voicePlayoutBufferedRef = useRef(0)
-  const [isSpeakingNow, setIsSpeakingNow] = useState(false)
   const [hasDesktopBridge, setHasDesktopBridge] = useState(false)
   const [showAppSettings, setShowAppSettings] = useState(false)
   const [appSettingsTab, setAppSettingsTab] = useState<AppSettingsTab>("voice")
@@ -1282,6 +1282,7 @@ export default function VoIPApp() {
   }, [playbackGateEnabled, playbackGateThreshold, playbackHighpassEnabled, playbackHighpassHz, playbackLimiterEnabled])
 
   const stopVoicePipeline = () => {
+    resetLocalVoiceActivity()
     const runtime = voicePipelineRef.current
     if (!runtime) return
     runtime.unsubscribeIncoming?.()
@@ -2043,7 +2044,6 @@ export default function VoIPApp() {
 
   useEffect(() => {
     if (!hasDesktopBridge) return
-    let prevTx = 0
     const timer = setInterval(async () => {
       const stats = (await window.electronVoice?.getStats()) as VoiceRuntimeStats | undefined
       if (stats) {
@@ -2053,9 +2053,6 @@ export default function VoIPApp() {
           ping1PctMs: normalizeLatencyMs(stats.ping1PctMs),
           ping01PctMs: normalizeLatencyMs(stats.ping01PctMs)
         }
-        const tx = stats.txPackets ?? 0
-        setIsSpeakingNow(tx > prevTx && !isMuted)
-        prevTx = tx
         setVoiceStats(normalized)
       }
     }, 1000)
@@ -2284,6 +2281,8 @@ export default function VoIPApp() {
         // Frames go to the desktop engine as PCM; it encodes Opus itself when the server supports
         // it (the renderer-side encoder never worked: Buffer does not exist in the isolated renderer).
         let lastMeterEmitAt = 0
+        let lastActivityEmitAt = 0
+        const activityDetector = new VoiceActivityDetector()
         captureNode.onaudioprocess = (ev) => {
           if (!voicePipelineRef.current || voicePipelineRef.current !== runtime) return
           const input = ev.inputBuffer.getChannelData(0)
@@ -2308,6 +2307,11 @@ export default function VoIPApp() {
           const txPcm = muted ? new Int16Array(gatedPcm.length) : gatedPcm
 
           const now = Date.now()
+          if (now - lastActivityEmitAt >= 80) {
+            lastActivityEmitAt = now
+            const energy = calcFrameEnergy(txPcm)
+            setLocalVoiceActivity(activityDetector.sample(energy.rms, now, sendsToServer && isInVoiceRef.current && !muted && !micLockedRef.current))
+          }
           if (micMeterVisibleRef.current && now - lastMeterEmitAt >= 80) {
             lastMeterEmitAt = now
             const pre = calcFrameEnergy(pcm)
@@ -2700,6 +2704,7 @@ export default function VoIPApp() {
   }
 
   const applyMute = (next: boolean) => {
+    if (next) resetLocalVoiceActivity()
     if (!next && micLockedRef.current) {
       toast.error(t("channelRules.micLocked"))
       return
@@ -4959,7 +4964,6 @@ export default function VoIPApp() {
               voiceStats={voiceStats}
               audioPipelineDiag={audioPipelineDiag}
               qualityClass={qualityClass}
-              isSpeakingNow={isSpeakingNow}
               onOpenSettings={() => {
                 void openAppSettings()
               }}

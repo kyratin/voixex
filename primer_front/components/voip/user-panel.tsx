@@ -6,7 +6,8 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { VoiceStatsPanel, type AudioPipelineDiag, type VoiceStatsData } from "@/components/voip/voice-stats-panel"
 import { useI18n } from "@/lib/i18n/provider"
-import { avatarGradient } from "@/lib/avatar-colors"
+import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
+import { useLocalVoiceActivity } from "@/lib/voice-activity"
 
 interface UserPanelProps {
   user: {
@@ -24,7 +25,6 @@ interface UserPanelProps {
   voiceStats?: VoiceStatsData | null
   audioPipelineDiag?: AudioPipelineDiag | null
   qualityClass?: string
-  isSpeakingNow?: boolean
 }
 
 const statusColors: Record<string, string> = {
@@ -45,10 +45,12 @@ export function UserPanel({
   voiceStatsSummary,
   voiceStats = null,
   audioPipelineDiag = null,
-  qualityClass = "text-accent",
-  isSpeakingNow = false
+  qualityClass = "text-accent"
 }: UserPanelProps) {
   const { t } = useI18n()
+  const activity = useLocalVoiceActivity()
+  const active = Boolean(isInVoice && !isMuted)
+  const isSpeakingNow = active && activity.speaking
   // Explicit class names so Tailwind sees them at build time.
   const dotClass =
     qualityClass === "text-destructive"
@@ -59,7 +61,7 @@ export function UserPanel({
           ? "bg-muted-foreground"
           : "bg-accent"
   return (
-    <div className="shrink-0">
+    <div className="shrink-0" data-user-panel>
       {isInVoice ? (
         <Popover>
           <PopoverTrigger asChild>
@@ -89,16 +91,11 @@ export function UserPanel({
 
       <div className="flex items-center gap-2 bg-sidebar p-3">
         <div className="relative shrink-0">
-          <div
-            className={cn(
-              "flex size-9 items-center justify-center rounded-full text-sm font-bold text-white transition-shadow",
-              isInVoice && isSpeakingNow && "ring-2 ring-accent ring-offset-2 ring-offset-sidebar"
-            )}
-            style={{ background: avatarGradient(user.id || user.name) }}
-          >
+          <SpeakingAvatar id={user.id} label={user.name} isSpeaking={isSpeakingNow} level={activity.level} active={active} className="size-9 text-sm">
             {user.avatar}
-          </div>
+          </SpeakingAvatar>
           <span
+            data-presence-status={user.status}
             className={cn("absolute -bottom-0.5 -right-0.5 size-3 rounded-full ring-2 ring-sidebar", statusColors[user.status])}
           />
         </div>

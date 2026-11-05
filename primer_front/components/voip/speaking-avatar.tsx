@@ -19,6 +19,8 @@ export function SpeakingAvatar({
   isSpeaking = false,
   className,
   ringScale = 1,
+  level: localLevel,
+  active = true,
   children
 }: {
   id: string
@@ -27,12 +29,17 @@ export function SpeakingAvatar({
   isSpeaking?: boolean
   /** Size of the avatar, e.g. "size-14 text-lg". */
   className?: string
+  /** Optional local microphone level overrides the server level. */
+  level?: number
+  /** Suppress the ring while muted or outside a voice channel. */
+  active?: boolean
   /** Smaller rings for small avatars (sidebar stacks). */
   ringScale?: number
   children: ReactNode
 }) {
   const level = useVoiceLevel(id)
-  const effective = level > 0 ? level : isSpeaking ? 0.35 : 0
+  const measuredLevel = localLevel ?? level
+  const effective = active ? (measuredLevel > 0 ? measuredLevel : isSpeaking ? 0.35 : 0) : 0
   const on = effective > 0.02
   const inner: CSSProperties = {
     transform: `scale(${1 + (0.08 + effective * 0.12) * ringScale})`,
@@ -47,7 +54,7 @@ export function SpeakingAvatar({
   return (
     <div className="relative shrink-0">
       <span aria-hidden className="pointer-events-none absolute inset-0 rounded-full transition-[transform,opacity,box-shadow] duration-150 ease-out" style={outer} />
-      <span aria-hidden className="pointer-events-none absolute inset-0 rounded-full transition-[transform,opacity,box-shadow] duration-150 ease-out" style={inner} />
+      <span data-speaking-ring aria-hidden className="pointer-events-none absolute inset-0 rounded-full transition-[transform,opacity,box-shadow] duration-150 ease-out" style={inner} />
       <div
         className={cn("relative flex items-center justify-center rounded-full font-bold text-white", className)}
         style={{ background: avatarGradient(id || label) }}

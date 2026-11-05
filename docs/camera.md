@@ -4,6 +4,10 @@ Android, macOS and Windows share camera capture, local preview, participant tile
 
 The 0.7.1 update raises the compatibility target from 8 to 30 fps. Scheduling accounts for encoding and send time rather than adding a fixed delay after each frame. The server sender budget is raised from 256 KiB/s to 1 MiB/s.
 
+Client 0.7.2 sizes participant tiles to the available call area: a single participant fills it, 12 participants use 4 columns × 3 rows, and larger channels use pages of up to 12 participants. This applies to desktop and Android call views. The sidebar speaking ring uses post-DSP microphone RMS, with a short silence hold and a stale-capture timeout, independently of network packet counters.
+
+Connection settings separate WebRTC's automatic ICE connection from the Voixex UDP/TCP/WebSocket compatibility path. The latter is shown under an expandable fallback section when WebRTC is selected; its saved transport and port are preserved when switching modes.
+
 ## Transports
 
 - UDP, TCP and WebSocket use encrypted media kind **6**, negotiated as `camera1` in HELLO2/HELLO_ACK. The server forwards packets between these transports and stamps the authenticated sender. Camera packets are restricted to the sender's current room and server, with an independent camera policy and a 1 MiB/s sender budget.
@@ -29,6 +33,8 @@ npm test --prefix voice-client
 CAMERA_CLIENT_ROOT=/absolute/client node /absolute/server/backend/test/camera-transports.mjs
 # Local LiveKit test on ws://127.0.0.1:17880, devkey/camera-test-secret-local-only:
 CAMERA_SERVER_ROOT=/absolute/server node primer_front/scripts/camera-browser-check.mjs
+# Built frontend CSS is required (npm run build above):
+node primer_front/scripts/voice-stage-layout-check.mjs
 ```
 
 The browser test uses fake camera input but real Chromium encoding, LiveKit transport and decoded video. It checks camera + screen, stop/disconnect, permission failure and capture resolving after a room change. Camera validation CI runs these checks; release CI builds Android, macOS and Windows. Compilation and synthetic media checks do not replace testing physical cameras, Android devices or OS permission dialogs.

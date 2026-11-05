@@ -27,6 +27,60 @@ type ConnectServerDialogProps = {
   onSave: (draft: ConnectionDraft) => void
 }
 
+/** The custom media transport remains available as a separate compatibility/fallback path. */
+export function VoiceMediaSettings({ value, onChange }: {
+  value: Pick<ConnectionDraft, "mediaEngine" | "voiceTransport" | "udpPortOverride">
+  onChange: (patch: Partial<ConnectionDraft>) => void
+}) {
+  const { t } = useI18n()
+  const compatibility = (
+    <div className="space-y-3" data-compatibility-settings>
+      <div className="space-y-1.5">
+        <Label htmlFor="connect-voice-transport">{t("connect.voiceTransport")}</Label>
+        <Select value={value.voiceTransport} onValueChange={transport => onChange({ voiceTransport: transport === "ws" ? "ws" : transport === "tcp" ? "tcp" : "udp" })}>
+          <SelectTrigger id="connect-voice-transport" className="h-9 w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="udp">UDP</SelectItem>
+            <SelectItem value="tcp">TCP</SelectItem>
+            <SelectItem value="ws">WebSocket</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      {value.voiceTransport !== "ws" ? (
+        <div className="space-y-1.5">
+          <Label htmlFor="connect-udp">{t("connect.voiceUdpPort")}</Label>
+          <Input id="connect-udp" className="h-9" value={value.udpPortOverride} onChange={event => onChange({ udpPortOverride: event.target.value })} placeholder={t("connect.voiceUdpPlaceholder")} inputMode="numeric" />
+        </div>
+      ) : <p className="text-xs text-muted-foreground">{t("connect.websocketPortHint")}</p>}
+    </div>
+  )
+  return (
+    <div className="space-y-3" data-voice-media-settings>
+      <div className="space-y-1.5">
+        <Label htmlFor="connect-media-engine">{t("connect.mediaEngine")}</Label>
+        <Select value={value.mediaEngine} onValueChange={engine => onChange({ mediaEngine: engine === "webrtc" ? "webrtc" : "legacy" })}>
+          <SelectTrigger id="connect-media-engine" className="h-9 w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="legacy">{t("connect.legacyUdp")}</SelectItem>
+            <SelectItem value="webrtc">{t("connect.webrtcLivekit")}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      {value.mediaEngine === "webrtc" ? <>
+        <div className="rounded-lg bg-secondary p-3 text-xs" data-webrtc-transport>
+          <p className="font-medium">{t("connect.webrtcAutomatic")}</p>
+          <p className="mt-1 text-muted-foreground">{t("connect.webrtcAutomaticHint")}</p>
+        </div>
+        <details className="rounded-lg border border-border p-3" data-fallback-settings>
+          <summary className="cursor-pointer text-xs font-medium">{t("connect.compatibilityFallback")}</summary>
+          <p className="mb-3 mt-2 text-xs text-muted-foreground">{t("connect.compatibilityFallbackHint")}</p>
+          {compatibility}
+        </details>
+      </> : compatibility}
+    </div>
+  )
+}
+
 export function ConnectServerDialog({ draft, onOpenChange, onSave }: ConnectServerDialogProps) {
   const { t } = useI18n()
   const [value, setValue] = useState<ConnectionDraft | null>(draft)
@@ -76,45 +130,7 @@ export function ConnectServerDialog({ draft, onOpenChange, onSave }: ConnectServ
                 </Select>
               </div>
 
-              <div className="space-y-1.5">
-                <Label htmlFor="connect-udp">{t("connect.voiceUdpPort")}</Label>
-                <Input
-                  id="connect-udp"
-                  className="h-9"
-                  value={value.udpPortOverride}
-                  onChange={(e) => set("udpPortOverride", e.target.value)}
-                  placeholder={t("connect.voiceUdpPlaceholder")}
-                  inputMode="numeric"
-                />
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label>{t("connect.mediaEngine")}</Label>
-                  <Select value={value.mediaEngine} onValueChange={(v) => set("mediaEngine", v === "webrtc" ? "webrtc" : "legacy")}>
-                    <SelectTrigger className="h-9 w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="legacy">{t("connect.legacyUdp")}</SelectItem>
-                      <SelectItem value="webrtc">{t("connect.webrtcLivekit")}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>{t("connect.voiceTransport")}</Label>
-                  <Select value={value.voiceTransport} onValueChange={(v) => set("voiceTransport", v === "ws" ? "ws" : v === "tcp" ? "tcp" : "udp")}>
-                    <SelectTrigger className="h-9 w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="udp">UDP</SelectItem>
-                      <SelectItem value="ws">WebSocket</SelectItem>
-                      <SelectItem value="tcp">{t("connect.tcpFallback")}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
+              <VoiceMediaSettings value={value} onChange={patch => setValue(previous => previous ? { ...previous, ...patch } : previous)} />
             </div>
           </div>
         ) : null}

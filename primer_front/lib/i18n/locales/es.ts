@@ -2,7 +2,7 @@ import type {
 TranslationDict } from "../types"
 
 export const es: TranslationDict = {
-  camera: {"enable": "Activar cámara", "disable": "Desactivar cámara", "device": "Cámara", "denied": "Acceso a la cámara denegado. Permítelo en los ajustes del sistema.", "missing": "No se encontró ninguna cámara.", "busy": "La cámara está ocupada o no disponible.", "failed": "No se pudo iniciar la cámara. Inténtalo de nuevo.", "unavailable": "La cámara requiere un servidor actualizado y permiso en este canal."},
+  camera: {"previousParticipants": "Participantes anteriores", "nextParticipants": "Siguientes participantes", "enable": "Activar cámara", "disable": "Desactivar cámara", "device": "Cámara", "denied": "Acceso a la cámara denegado. Permítelo en los ajustes del sistema.", "missing": "No se encontró ninguna cámara.", "busy": "La cámara está ocupada o no disponible.", "failed": "No se pudo iniciar la cámara. Inténtalo de nuevo.", "unavailable": "La cámara requiere un servidor actualizado y permiso en este canal."},
   common: {
     close: "Cerrar",
     default: "Predeterminado",
@@ -32,6 +32,11 @@ export const es: TranslationDict = {
     connectToServer: "Conectar al servidor"
   },
   connect: {
+    websocketPortHint: "WebSocket usa la dirección y el puerto de la API indicados arriba.",
+    compatibilityFallbackHint: "Se usa en canales mixtos, para vídeo compatible o cuando LiveKit no está disponible. Estos ajustes se aplican a Voixex, independientemente de WebRTC.",
+    compatibilityFallback: "Conexión de compatibilidad y respaldo",
+    webrtcAutomaticHint: "LiveKit negocia la conexión automáticamente. El selector de transporte Voixex no controla WebRTC.",
+    webrtcAutomatic: "Transporte WebRTC: automático (ICE)",
     title: "Conectar al servidor",
     description: "Añade o cambia servidores. Los perfiles guardados aparecen en el panel izquierdo.",
     descriptionEmpty: "Introduce la dirección del servidor para conectarte. Los servidores guardados aparecerán en el panel izquierdo.",
@@ -46,12 +51,12 @@ export const es: TranslationDict = {
     apiWs: "API y WebSocket",
     httpWs: "HTTP — ws://",
     httpsWss: "HTTPS — wss://",
-    voiceUdpPort: "Puerto UDP de voz (opcional)",
+    voiceUdpPort: "Puerto UDP/TCP de Voixex (opcional)",
     voiceUdpPlaceholder: "Del join del servidor",
-    mediaEngine: "Motor de medios",
-    legacyUdp: "Legacy (voz UDP)",
+    mediaEngine: "Modo de voz",
+    legacyUdp: "Voixex (Opus)",
     webrtcLivekit: "WebRTC (LiveKit)",
-    voiceTransport: "Transporte de voz",
+    voiceTransport: "Transporte Voixex",
     tcpFallback: "TCP (reserva)",
     password: "Contraseña",
     nickname: "Apodo",

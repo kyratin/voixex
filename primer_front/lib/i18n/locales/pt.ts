@@ -2,7 +2,7 @@ import type {
 TranslationDict } from "../types"
 
 export const pt: TranslationDict = {
-  camera: {"enable": "Ativar câmera", "disable": "Desativar câmera", "device": "Câmera", "denied": "Acesso à câmera negado. Permita nas configurações do sistema.", "missing": "Nenhuma câmera encontrada.", "busy": "A câmera está ocupada ou indisponível.", "failed": "Não foi possível iniciar a câmera. Tente novamente.", "unavailable": "A câmera requer um servidor atualizado e permissão neste canal."},
+  camera: {"previousParticipants": "Participantes anteriores", "nextParticipants": "Próximos participantes", "enable": "Ativar câmera", "disable": "Desativar câmera", "device": "Câmera", "denied": "Acesso à câmera negado. Permita nas configurações do sistema.", "missing": "Nenhuma câmera encontrada.", "busy": "A câmera está ocupada ou indisponível.", "failed": "Não foi possível iniciar a câmera. Tente novamente.", "unavailable": "A câmera requer um servidor atualizado e permissão neste canal."},
   common: {
     close: "Fechar",
     default: "Padrão",
@@ -32,6 +32,11 @@ export const pt: TranslationDict = {
     connectToServer: "Ligar ao servidor"
   },
   connect: {
+    websocketPortHint: "O WebSocket usa o endereço e a porta da API acima.",
+    compatibilityFallbackHint: "Usada em canais mistos, para vídeo compatível ou quando o LiveKit está indisponível. Estes ajustes se aplicam ao Voixex, independentemente do WebRTC.",
+    compatibilityFallback: "Conexão de compatibilidade e reserva",
+    webrtcAutomaticHint: "O LiveKit negocia a conexão automaticamente. O seletor de transporte Voixex não controla WebRTC.",
+    webrtcAutomatic: "Transporte WebRTC: automático (ICE)",
     title: "Ligar ao servidor",
     description: "Adicione ou mude servidores. Perfis guardados aparecem na barra esquerda.",
     descriptionEmpty: "Informe o endereço do servidor para conectar. Os servidores salvos aparecerão no painel esquerdo.",
@@ -46,12 +51,12 @@ export const pt: TranslationDict = {
     apiWs: "API e WebSocket",
     httpWs: "HTTP — ws://",
     httpsWss: "HTTPS — wss://",
-    voiceUdpPort: "Porta UDP de voz (opcional)",
+    voiceUdpPort: "Porta UDP/TCP do Voixex (opcional)",
     voiceUdpPlaceholder: "Da resposta join do servidor",
-    mediaEngine: "Motor de média",
-    legacyUdp: "Legacy (voz UDP)",
+    mediaEngine: "Modo de voz",
+    legacyUdp: "Voixex (Opus)",
     webrtcLivekit: "WebRTC (LiveKit)",
-    voiceTransport: "Transporte de voz",
+    voiceTransport: "Transporte Voixex",
     tcpFallback: "TCP (reserva)",
     password: "Palavra-passe",
     nickname: "Alcunha",
