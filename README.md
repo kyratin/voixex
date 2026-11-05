@@ -30,7 +30,7 @@ Older lines (`server-auth`, `server-livekit`) are kept as tags `archive/<name>`.
 | `latest` | Newest stable build |
 | `0.6.5`, `0.6.4`, … | Fixed versions = `version` in [`backend/package.json`](backend/package.json). Pin one in production. |
 
-Published images are **linux/amd64**.
+Images `0.7.1` and `latest` support **linux/amd64** and **linux/arm64**. Docker selects the matching architecture automatically.
 
 ---
 
@@ -121,10 +121,10 @@ Requires **Node.js 22+**. The LiveKit SFU is not started in dev; point `LIVEKIT_
 ### Building and publishing the image
 
 ```bash
-docker buildx build --platform linux/amd64 -t kyratinkokko/voixex:<version> -t kyratinkokko/voixex:latest --push backend
+docker buildx build --platform linux/amd64,linux/arm64 -t kyratinkokko/voixex:<version> -t kyratinkokko/voixex:latest --push backend
 ```
 
-Always build for the server's architecture (`linux/amd64`): an image built on Apple Silicon without `--platform` is arm64 and won't start on amd64 nodes. [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) does the same (multi-arch by default).
+Publish both architectures explicitly: a plain build on Apple Silicon produces only arm64, while `--platform linux/amd64` produces only amd64. [`scripts/build-push-backend.sh`](scripts/build-push-backend.sh) builds both architectures by default and updates the version tag and `latest` together.
 
 ---
 
