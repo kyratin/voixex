@@ -2,7 +2,7 @@ import { CAMERA_KIND, parseCameraFragment } from "./camera-protocol.js"
 import dgram, { type RemoteInfo } from "node:dgram"
 import net, { type Socket } from "node:net"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
-import OpusScript from "opusscript"
+import { OpusCodec as OpusScript } from "./opus-codec.js"
 import { config } from "../config.js"
 import { verifyToken } from "../token.js"
 import { SpeakerStream, rms } from "./jitter.js"
@@ -60,6 +60,7 @@ type Session = {
   caps: Caps
   replay: ReplayWindow
   seqOut: number
+  lastCodecErrorAtMs: number
   packetCountSecond: number
   currentSecond: number
   muted: boolean
@@ -98,6 +99,7 @@ type SessionStats = {
   rxRoomMismatchDropped: number
   rxAudioFrames: number
   txAudioFrames: number
+  txEncodeErrors: number
   redundancyRecovered: number
   tcpBacklogDropped: number
 }
@@ -113,6 +115,7 @@ const freshStats = (): SessionStats => ({
   rxRoomMismatchDropped: 0,
   rxAudioFrames: 0,
   txAudioFrames: 0,
+  txEncodeErrors: 0,
   redundancyRecovered: 0,
   tcpBacklogDropped: 0
 })
@@ -265,6 +268,7 @@ function acceptHello(
     caps: hello.caps,
     replay: new ReplayWindow(),
     seqOut: 1,
+    lastCodecErrorAtMs: 0,
     packetCountSecond: 0,
     currentSecond: Math.floor(now / 1000),
     muted: flags?.muted ?? false,
@@ -531,9 +535,10 @@ function mixTick() {
       }
       if (used === 0) continue
       const pcm = softClipToPcm(mix)
+      const before = listener.stats.txPackets
       if (listener.caps.opus2) sendOpus2(listener, pcm, tick)
       else send(listener, KIND_PCM, Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength))
-      listener.stats.txAudioFrames += 1
+      if (listener.stats.txPackets > before) listener.stats.txAudioFrames += 1
     }
   }
 }
@@ -542,7 +547,17 @@ function sendOpus2(listener: Session, pcm: Int16Array, tick: number) {
   let encoded: Buffer
   try {
     encoded = encoderFor(listener).encode(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength), FRAME_SAMPLES)
-  } catch {
+  } catch (error) {
+    listener.stats.txEncodeErrors += 1
+    if (Date.now() - listener.lastCodecErrorAtMs > 5000) {
+      listener.lastCodecErrorAtMs = Date.now()
+      logger.warn({ clientId: listener.clientId, err: String(error) }, "media Opus encode failed; using PCM fallback")
+    }
+    try { listener.encoder?.delete() } catch { /* release a failed codec independently */ }
+    listener.encoder = null
+    listener.recentEncoded = []
+    listener.lastTxFrameNo = -1
+    send(listener, KIND_PCM, Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength))
     return
   }
   const continuous = listener.lastTxFrameNo === tick - 1
@@ -811,6 +826,7 @@ function startHousekeeping() {
           uplinkJitterMs: Number(s.stream.jitter.toFixed(1)),
           jitterTargetMs: s.stream.targetFrames * FRAME_MS,
           jitterDepthMs: s.stream.depthFrames * FRAME_MS,
+          decodeErrors: st.decodeErrors,
           played: st.played,
           concealed: st.concealed,
           lateDrops: st.lateDrops,
@@ -828,7 +844,7 @@ function startHousekeeping() {
       )
       s.stats = freshStats()
       s.uplinkLoss = { expected: 0, received: 0, highest: loss.highest }
-      Object.assign(st, { played: 0, concealed: 0, lateDrops: 0, catchupDrops: 0, hardDrops: 0, underruns: 0 })
+      Object.assign(st, { played: 0, concealed: 0, lateDrops: 0, catchupDrops: 0, hardDrops: 0, underruns: 0, decodeErrors: 0 })
     }
   }, 5000).unref()
 }

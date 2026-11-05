@@ -142,3 +142,9 @@ Legacy video uses independent JPEG frames (client limit 480px / 30 fps with clie
 Run `npm run build` in backend, then `CAMERA_CLIENT_ROOT=/absolute/client node backend/test/camera-transports.mjs` from the server root to verify all six UDP/TCP/WebSocket directions and room/policy enforcement. The test requires a built matching client checkout.
 
 Server 0.7.1 raises the per-sender camera budget to 1 MiB/s for the 30 fps compatibility mode.
+
+## Voice reliability fix (0.7.3)
+
+Update server and desktop clients to 0.7.3 to fix progressive voice loss caused by Opus WASM scratch memory corruption. The server uses the safe Opus wrapper, reports codec errors, and sends compatible PCM as a fallback if encoding fails. Audio counters now count packets actually transmitted.
+
+`CAMERA_CLIENT_ROOT=/absolute/client node backend/test/voice-transports.mjs` verifies three simultaneous speakers on UDP/TCP/WebSocket with camera traffic, packet loss, mute and rejoining/changing transports. The client/server codec source must match. Docker releases include both linux/amd64 and linux/arm64.
