@@ -1,3 +1,13 @@
+# 0.7.5 — Restore voice-stage resizing and protect participant tile sizes
+
+- Fix a 0.7.4 regression: resizing measured a `display: contents` wrapper with zero height and permanently clamped the voice stage at its minimum. Measure the actual chat container and observe layout/viewport changes instead.
+- Clamp saved and dragged heights to the available space and the minimum required for participant avatars, labels and visible grid rows.
+- Keep participant tiles at least as tall/wide as their avatar plus label/padding. Small stage overlays and mini windows scroll instead of compressing tiles into overlapping strips.
+- Size the participant overlay during screen sharing from its row/column count instead of a fixed 144px height.
+- Browser regression check drags the stage up and down through its minimum inside the production `display: contents` wrapper and checks readable tile bounds, keyboard resizing and reset.
+
+Client-only update; server 0.7.3 remains compatible.
+
 # 0.7.4 — Stream windows, camera mini view and mobile voice
 
 - Pop-out stream hides its main-window presentation while retaining the legacy decoder. Closing the pop-out restores the main view and cleans up popup tracks and audio routing.

@@ -66,6 +66,36 @@ try {
   assert.equal(layout.columns, 4); assert.equal(layout.rows, 3)
   await page.screenshot({ path: join(output, 'twelve-participants.png') })
   console.log('PASS 2–12 participants resize equally; 12 participants form 4 columns × 3 rows')
+  await page.evaluate(() => window.fixture.update({ count: 3, cameras: false }))
+  const resize = page.getByRole('separator')
+  const dragStage = async delta => {
+    const box = await resize.boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + delta, { steps: 12 })
+    await page.mouse.up()
+  }
+  await dragStage(-500)
+  const minimum = await page.locator('section').evaluate(el => el.getBoundingClientRect().height)
+  const unclipped = await page.locator('[data-participant-id]').evaluateAll(tiles => tiles.every(tile => {
+    const rect = tile.getBoundingClientRect()
+    return [...tile.querySelectorAll('[data-speaking-ring], span.truncate')].every(child => {
+      const box = child.getBoundingClientRect()
+      return box.top >= rect.top - 4 && box.bottom <= rect.bottom + 4
+    }) && rect.height >= 90
+  }))
+  assert.ok(unclipped, 'avatars and labels fit in participant tiles at minimum panel height')
+  await dragStage(160)
+  const expanded = await page.locator('section').evaluate(el => el.getBoundingClientRect().height)
+  assert.ok(expanded > minimum + 100, `panel expands after shrinking inside display:contents: ${minimum} -> ${expanded}`)
+  await dragStage(-160)
+  await resize.focus()
+  await page.keyboard.press('ArrowDown')
+  const keyboardHeight = await page.locator('section').evaluate(el => el.getBoundingClientRect().height)
+  assert.ok(keyboardHeight > minimum + 20)
+  await resize.dblclick()
+  await page.evaluate(() => window.fixture.update({ cameras: true }))
+  console.log('PASS mouse resize can shrink then expand inside display:contents; avatar tiles remain readable; keyboard and reset work')
   await page.evaluate(() => window.fixture.update({ count: 13 }))
   await page.getByRole('button', { name: 'Next participants' }).click()
   await page.waitForFunction(() => document.querySelector('[data-participant-id]')?.getAttribute('data-participant-id') === 'person-12')

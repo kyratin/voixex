@@ -186,6 +186,7 @@ export function ParticipantTile({
   const tile = (
     <div
       data-participant-id={user.id}
+      style={{ minHeight: "calc(clamp(2rem, 7vh, 5rem) + 2rem)", minWidth: "calc(clamp(2rem, 7vh, 5rem) + 1rem)" }}
       className={cn(
         "relative flex h-full min-h-0 w-full min-w-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-xl bg-card/80 transition-colors animate-in fade-in zoom-in-90 duration-300",
         volume && "cursor-pointer hover:bg-card"
@@ -344,14 +345,45 @@ export function VoiceStage({
   useEffect(() => setHeights(readStageHeights()), [])
   /** Height while the edge is being dragged (no transition then). */
   const [dragHeight, setDragHeight] = useState<number | null>(null)
+  const [participantPage, setParticipantPage] = useState(0)
+  const participantPages = Math.max(1, Math.ceil(participants.length / 12))
+  const currentParticipantPage = Math.min(participantPage, participantPages - 1)
+  useEffect(() => setParticipantPage(0), [roomId])
+  useEffect(() => setParticipantPage(page => Math.min(page, participantPages - 1)), [participantPages])
+  const visibleParticipants = participants.slice(currentParticipantPage * 12, (currentParticipantPage + 1) * 12)
+  // Fill available call space: 1×1, 2×1, 2×2, 3×2, 4×2, then 4×3.
+  const participantColumns = visibleParticipants.length <= 1 ? 1 : visibleParticipants.length <= 4 ? 2 : visibleParticipants.length <= 6 ? 3 : 4
+  const participantRows = Math.max(1, Math.ceil(visibleParticipants.length / participantColumns))
   const heightMode = showsVideo ? "video" : "idle"
   const chosenHeight = dragHeight ?? heights[heightMode]
 
-  const maxStageHeight = () => {
-    const parent = sectionRef.current?.parentElement
-    return Math.max(STAGE_MIN_PX[heightMode], (parent?.clientHeight ?? window.innerHeight) - CHAT_RESERVE_PX)
-  }
-  const clampHeight = (h: number) => Math.round(Math.min(maxStageHeight(), Math.max(STAGE_MIN_PX[heightMode], h)))
+  const [bounds, setBounds] = useState({ available: 640, viewport: 900 })
+  useEffect(() => {
+    const section = sectionRef.current
+    if (!section || fullscreen) return
+    // A display:contents wrapper has no box. Measure the actual chat container.
+    let container = section.parentElement
+    while (container && getComputedStyle(container).display === "contents") container = container.parentElement
+    if (!container) return
+    const measure = () => {
+      if (!section.getClientRects().length) return
+      const rect = container.getBoundingClientRect()
+      const available = Math.max(0, rect.bottom - section.getBoundingClientRect().top - CHAT_RESERVE_PX)
+      setBounds(previous => previous.available === available && previous.viewport === window.innerHeight ? previous : { available, viewport: window.innerHeight })
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(container)
+    observer.observe(section)
+    window.addEventListener("resize", measure)
+    measure()
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure) }
+  }, [fullscreen])
+  const tileMinHeight = Math.min(80, Math.max(32, bounds.viewport * 0.07)) + 32
+  const rows = participantRows
+  const baseMinHeight = Math.max(STAGE_MIN_PX[heightMode], tileMinHeight + 104)
+  const maxHeight = Math.max(baseMinHeight, bounds.available)
+  const minHeight = Math.min(maxHeight, Math.max(baseMinHeight, hasScreenVideo ? STAGE_MIN_PX.video : rows * tileMinHeight + (rows - 1) * 12 + 104 + (participants.length > 12 ? 28 : 0)))
+  const clampHeight = (h: number) => Math.round(Math.min(maxHeight, Math.max(minHeight, h)))
   const commitHeight = (h: number | null) => {
     setHeights((prev) => {
       const next = { ...prev, [heightMode]: h }
@@ -392,15 +424,6 @@ export function VoiceStage({
     const current = sectionRef.current?.getBoundingClientRect().height ?? 0
     commitHeight(clampHeight(current + (e.key === "ArrowDown" ? 32 : -32)))
   }
-  const [participantPage, setParticipantPage] = useState(0)
-  const participantPages = Math.max(1, Math.ceil(participants.length / 12))
-  const currentParticipantPage = Math.min(participantPage, participantPages - 1)
-  useEffect(() => setParticipantPage(0), [roomId])
-  useEffect(() => setParticipantPage(page => Math.min(page, participantPages - 1)), [participantPages])
-  const visibleParticipants = participants.slice(currentParticipantPage * 12, (currentParticipantPage + 1) * 12)
-  // Fill available call space: 1×1, 2×1, 2×2, 3×2, 4×2, then 4×3.
-  const participantColumns = visibleParticipants.length <= 1 ? 1 : visibleParticipants.length <= 4 ? 2 : visibleParticipants.length <= 6 ? 3 : 4
-  const participantRows = Math.max(1, Math.ceil(visibleParticipants.length / participantColumns))
   // "Stream hidden" shows for 1.5 s after hiding, then only the participants remain.
   const [hiddenNotice, setHiddenNotice] = useState(false)
   useEffect(() => {
@@ -413,11 +436,11 @@ export function VoiceStage({
     return () => clearTimeout(timer)
   }, [streamHiddenByUser])
   const participantsGrid = (
-    <div className="flex h-full min-h-0 w-full min-w-0 flex-col gap-2" data-participant-panel>
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col gap-2 overflow-auto" data-participant-panel>
       <div
         data-participant-grid
         className="grid min-h-0 flex-1 gap-2 sm:gap-3"
-        style={{ gridTemplateColumns: `repeat(${participantColumns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${participantRows}, minmax(0, 1fr))` }}
+        style={{ gridTemplateColumns: `repeat(${participantColumns}, minmax(calc(clamp(2rem, 7vh, 5rem) + 1rem), 1fr))`, gridTemplateRows: `repeat(${participantRows}, minmax(calc(clamp(2rem, 7vh, 5rem) + 2rem), 1fr))` }}
       >
         {visibleParticipants.map(user => {
           const canAdjust = enablePeerVolume && onPeerVolumeChange && selfClientId && user.id !== selfClientId
@@ -461,7 +484,7 @@ export function VoiceStage({
               chosenHeight === null && (showsVideo ? "h-[min(58vh,620px)]" : "h-64")
             )
       )}
-      style={fullscreen || chosenHeight === null ? undefined : { height: chosenHeight, maxHeight: `calc(100% - ${CHAT_RESERVE_PX}px)` }}
+      style={fullscreen ? undefined : { height: chosenHeight === null ? undefined : clampHeight(chosenHeight), minHeight, maxHeight }}
       aria-label={channelName}
     >
       {bannerUrl && !immersive ? (
@@ -834,7 +857,7 @@ export function VoiceStage({
         </DockButton>
       </div>
 
-      {hasScreenVideo && hasCameraVideo && !immersive ? <div className="absolute right-3 top-14 z-10 h-36 w-80 max-w-[60%] rounded-xl bg-stage/80 p-1">{participantsGrid}</div> : null}
+      {hasScreenVideo && hasCameraVideo && !immersive ? <div className="absolute right-3 top-14 z-10 max-h-[calc(100%-8rem)] max-w-[60%] rounded-xl bg-stage/80 p-1" style={{ height: participantRows * tileMinHeight + (participantRows - 1) * 12 + 8 + (participantPages > 1 ? 28 : 0), width: Math.max(320, participantColumns * (tileMinHeight - 16) + (participantColumns - 1) * 12 + 8) }}>{participantsGrid}</div> : null}
 
       {camera?.error ? <p role="alert" className="absolute inset-x-3 top-12 z-20 rounded bg-popover/95 p-2 text-center text-xs text-destructive">{camera.error}</p> : null}
 
@@ -849,7 +872,7 @@ export function VoiceStage({
           onPointerDown={startResize}
           onDoubleClick={() => commitHeight(null)}
           onKeyDown={resizeWithKeys}
-          className="group absolute inset-x-0 bottom-0 z-20 flex h-3 cursor-row-resize items-end justify-center pb-0.5 focus-visible:outline-none"
+          className="group absolute inset-x-0 bottom-0 z-20 flex h-3 touch-none cursor-row-resize items-end justify-center pb-0.5 focus-visible:outline-none"
         >
           <span
             className={cn(
