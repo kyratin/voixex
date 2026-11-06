@@ -34,11 +34,12 @@ export function parseCameraFragment(packet: Uint8Array): CameraFragment | null {
 type Pending = { sender: string; fragment: CameraFragment; created: number; chunks: Map<number, Uint8Array> }
 /** Bounded assembly: at most two incomplete frames per sender, 64 senders, 500 ms. */
 export class CameraAssembler {
+  constructor(private readonly ttlMs = 500) {}
   private pending = new Map<string, Pending>()
   private latest = new Map<string, { stream: number; frame: number; timestamp: number }>()
   clear() { this.pending.clear(); this.latest.clear() }
   push(sender: string, packet: Uint8Array, now: number): Uint8Array | null {
-    for (const [key, value] of this.pending) if (now - value.created > 500) this.pending.delete(key)
+    for (const [key, value] of this.pending) if (now - value.created > this.ttlMs) this.pending.delete(key)
     const f = parseCameraFragment(packet)
     if (!f || !sender || sender.length > 255) return null
     const last = this.latest.get(sender)

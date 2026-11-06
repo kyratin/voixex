@@ -1,4 +1,9 @@
-import { CAMERA_KIND, parseCameraFragment } from "./camera-protocol.js"
+import { randomBytes } from "node:crypto"
+import { MediaSendQueue } from "./media-send-queue.js"
+import { SharedMixes } from "./shared-mix.js"
+import { SilenceGate } from "./silence-gate.js"
+import { RoomMix } from "./room-mix.js"
+import { CAMERA_KIND, CameraAssembler, fragmentCamera, parseCameraFragment } from "./camera-protocol.js"
 import dgram, { type RemoteInfo } from "node:dgram"
 import net, { type Socket } from "node:net"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
@@ -11,6 +16,9 @@ import {
   FRAME_SAMPLES,
   KIND_OPUS,
   KIND_OPUS2,
+  KIND_MIX3,
+  KIND_MEDIA_STATE,
+  encodeMix3,
   KIND_PCM,
   KIND_PROBE,
   KIND_PROBE_ACK,
@@ -43,10 +51,17 @@ export type MediaHooks = {
 }
 
 /** Capabilities a client announces in HELLO2 (space separated after the token). */
-type Caps = { opus2: boolean; camera1: boolean }
+type Caps = { opus2: boolean; camera1: boolean; mix3: boolean; demand2: boolean }
 
 type Session = {
   serverId: string
+  demand: {flags:number;until:number} | null
+  voiceNeeded: boolean
+  cameraNeeded: boolean
+  lastDemandAt: number
+  queue: MediaSendQueue
+  cameraAssembler: CameraAssembler
+  silence: SilenceGate
   cameraBytes: number
   cameraSecond: number
   clientId: string
@@ -54,7 +69,7 @@ type Session = {
   /** tcp and ws (WebSocket, browsers/phones) are reliable streams; both use `tcp` for sending. */
   transport: "udp" | "tcp" | "ws"
   remote?: { address: string; port: number }
-  tcp?: { send: (packet: Buffer) => void; backlog: () => number } | null
+  tcp?: { send: (packet: Buffer, meta?: {kind:number;at:number}) => void; backlog: (kind?:number) => number } | null
   tcpLabel?: string
   key: Buffer
   caps: Caps
@@ -76,6 +91,9 @@ type Session = {
   encoder: OpusScript | null
   /** Recent encoded downlink frames, newest first, for redundancy. */
   recentEncoded: Buffer[]
+  sharedEpoch: number
+  sharedBootstrap: number
+  lastTxAtMs: number
   lastTxFrameNo: number
   /** What the client last reported about its downlink, and what we see on its uplink. */
   downlink: LinkReport
@@ -125,7 +143,7 @@ const BITRATE_GOOD = 40_000
 const BITRATE_LOSSY = 28_000
 const BITRATE_BAD = 20_000
 /** Above this much queued TCP data (≈ 0.5 s of audio) audio is skipped instead of piling up latency. */
-const TCP_MAX_BACKLOG_BYTES = 24 * 1024
+const TCP_MAX_BACKLOG_BYTES = 4 * 1024
 const SPEAKING_RMS = 0.02
 const SPEAKING_HOLD_MS = 250
 
@@ -142,6 +160,7 @@ const peerGainByListener = new Map<string, Map<string, number>>()
 const screenChunksByRoom = new Map<string, Array<{ clientId: string; chunk: Buffer }>>()
 /** Room timeline: downlink frame numbers follow mixer ticks so a pause shows up as a gap. */
 const roomTick = new Map<string, number>()
+const sharedMixes = new SharedMixes()
 const loopDelay = monitorEventLoopDelay({ resolution: 5 })
 loopDelay.enable()
 
@@ -154,7 +173,10 @@ export function setMemberRoom(clientId: string, roomId: string | null) {
   const s = sessions.get(clientId)
   if (s && s.roomId !== roomId) {
     s.roomId = roomId
+    s.queue.close();s.queue=new MediaSendQueue();s.cameraAssembler.clear()
+    s.demand=null;s.voiceNeeded=true;s.cameraNeeded=true;s.lastDemandAt=0;s.sharedEpoch=0
     s.stream = newStream(s)
+    s.silence.reset()
     s.recentEncoded = []
   }
 }
@@ -203,6 +225,7 @@ function dropSession(clientId: string) {
     const k = remoteKey(s.remote)
     if (sessionsByRemote.get(k) === s) sessionsByRemote.delete(k)
   }
+  s.queue.close();s.cameraAssembler.clear()
   s.decoder?.delete()
   s.encoder?.delete()
   sessions.delete(clientId)
@@ -220,9 +243,9 @@ function newStream(s: { decoder: OpusScript | null }) {
 function parseHello(text: string): { token: string; caps: Caps } | null {
   if (text.startsWith("HELLO2 ")) {
     const [token, ...rest] = text.slice(7).trim().split(/\s+/)
-    return { token, caps: { opus2: rest.includes("opus2"), camera1: rest.includes("camera1") } }
+    return { token, caps: { opus2: rest.includes("opus2"), camera1: rest.includes("camera1"), mix3: rest.includes("mix3"), demand2: rest.includes("demand2") } }
   }
-  if (text.startsWith("HELLO ")) return { token: text.slice(6).trim(), caps: { opus2: false, camera1: false } }
+  if (text.startsWith("HELLO ")) return { token: text.slice(6).trim(), caps: { opus2: false, camera1: false, mix3: false, demand2:false } }
   return null
 }
 
@@ -257,6 +280,10 @@ function acceptHello(
   const session: Session = {
     clientId,
     serverId: payload.serverId,
+    silence: new SilenceGate(),
+    demand:null,voiceNeeded:true,cameraNeeded:true,lastDemandAt:0,
+    queue: new MediaSendQueue(),
+    cameraAssembler: new CameraAssembler(100),
     cameraBytes: 0,
     cameraSecond: 0,
     roomId: desiredRoomByClient.get(clientId) ?? null,
@@ -282,6 +309,9 @@ function acceptHello(
     encoder: null,
     recentEncoded: [],
     lastTxFrameNo: -1,
+    lastTxAtMs: 0,
+    sharedEpoch: 0,
+    sharedBootstrap: 0,
     downlink: { lossPermille: 0, jitterMs: 0, bufferMs: 0 },
     uplinkLoss: { expected: 0, received: 0, highest: -1 },
     legacyNonAudio: 0,
@@ -300,24 +330,55 @@ function acceptHello(
   return { ok: true, session, ack: helloAck(hello.caps) }
 }
 
-const helloAck = (caps: Caps) => Buffer.from(`HELLO_ACK${caps.opus2 ? " opus2" : ""}${caps.camera1 ? " camera1" : ""}`)
+const mediaBoot=randomBytes(4).toString("hex")
+const helloAck = (caps: Caps) => Buffer.from(`HELLO_ACK${caps.opus2 ? " opus2" : ""}${caps.camera1 ? " camera1" : ""}${caps.mix3 ? " mix3" : ""}${caps.demand2 ? " demand2" : ""}${caps.mix3||caps.demand2?` boot:${mediaBoot}`:""}`)
 
-function send(session: Session, kind: number, payload: Buffer, ts = Date.now()) {
-  if (!session.roomId && kind !== KIND_PROBE_ACK) return
-  const packet = encryptPacket(session.key, session.seqOut++, ts, session.roomId ?? "", payload, kind)
-  if (session.transport !== "udp") {
-    if (!session.tcp) return
-    if (kind !== KIND_PROBE_ACK && session.tcp.backlog() > TCP_MAX_BACKLOG_BYTES) {
-      session.stats.tcpBacklogDropped += 1
-      return
-    }
-    session.tcp.send(packet)
-  } else {
-    if (!session.remote || !udpSocket) return
-    udpSocket.send(packet, session.remote.port, session.remote.address)
+function transmit(session: Session, kind: number, payload: Buffer, ts: number, createdAt=Date.now()) {
+  if (!session.roomId && kind !== KIND_PROBE_ACK) return true
+  if (session.transport !== "udp" && (!session.tcp || (kind!==KIND_PROBE_ACK && kind!==KIND_MEDIA_STATE && session.tcp.backlog(kind)>(kind===CAMERA_KIND?2048:TCP_MAX_BACKLOG_BYTES)))) return false
+  if(session.transport!=="udp"&&session.tcp&&session.tcp.backlog()>64*1024)return false
+  const packet=encryptPacket(session.key,session.seqOut++,ts,session.roomId??"",payload,kind)
+  if(session.transport!=="udp")session.tcp!.send(packet,{kind,at:createdAt})
+  else if(session.remote&&udpSocket)udpSocket.send(packet,session.remote.port,session.remote.address)
+  else return false
+  session.stats.txPackets++;session.stats.txBytes+=packet.length
+  if((kind===KIND_OPUS2||kind===KIND_MIX3||kind===KIND_PCM)&&payload.length)session.stats.txAudioFrames++
+  return true
+}
+function send(session: Session, kind: number, payload: Buffer, ts = Date.now(), createdAt=Date.now()) {
+  session.queue.push({bytes:payload.length+80,createdAt,send:()=>transmit(session,kind,payload,ts,createdAt),onDrop:()=>{session.stats.tcpBacklogDropped++}},kind===KIND_PROBE_ACK||kind===KIND_MEDIA_STATE)
+}
+
+function wants(session: Session, flag: number, now: number) {
+  return !session.caps.demand2 || !session.demand || session.demand.until<now || (session.demand.flags&flag)!==0
+}
+function needsJpeg(receiver: Session, publisher: Session, now: number) {
+  if(!wants(receiver,2,now))return false
+  const publisherSfu=publisher.caps.demand2&&publisher.demand&&publisher.demand.until>=now&&(publisher.demand.flags&16)!==0
+  const receiverSfu=receiver.caps.demand2&&receiver.demand&&receiver.demand.until>=now&&(receiver.demand.flags&4)!==0
+  return !(publisherSfu&&receiverSfu)
+}
+function refreshDemand(members: Session[], now: number) {
+  let mixCount=0,cameraCount=0,jpegOnlyCount=0
+  const flags=new Map<Session,{mix:boolean;camera:boolean;sfuRx:boolean;sfuTx:boolean}>()
+  for(const session of members){
+    const fresh=session.caps.demand2&&session.demand&&session.demand.until>=now
+    const state={mix:!session.deafened&&wants(session,1,now),camera:wants(session,2,now),sfuRx:Boolean(fresh&&(session.demand!.flags&4)),sfuTx:Boolean(fresh&&(session.demand!.flags&16))}
+    flags.set(session,state)
+    if(state.mix)mixCount++
+    if(state.camera){cameraCount++;if(!state.sfuRx)jpegOnlyCount++}
   }
-  session.stats.txPackets += 1
-  session.stats.txBytes += packet.length
+  for(const session of members){
+    if(!session.caps.demand2)continue
+    const state=flags.get(session)!
+    const voice=mixCount-(state.mix?1:0)>0
+    const camera=state.sfuTx?jpegOnlyCount-(state.camera&&!state.sfuRx?1:0)>0:cameraCount-(state.camera?1:0)>0
+    if(voice!==session.voiceNeeded||camera!==session.cameraNeeded||now-session.lastDemandAt>=1000){
+      if(!voice&&session.voiceNeeded)session.stream=newStream(session)
+      session.voiceNeeded=voice;session.cameraNeeded=camera;session.lastDemandAt=now
+      send(session,KIND_MEDIA_STATE,Buffer.from([1,(voice?1:0)|(camera?2:0)]))
+    }
+  }
 }
 
 function handlePacket(session: Session, decoded: DecryptedPacket, packetLength: number) {
@@ -365,17 +426,31 @@ function handlePacket(session: Session, decoded: DecryptedPacket, packetLength: 
     return
   }
 
+  if(decoded.kind===KIND_MEDIA_STATE){
+    session.legacyNonAudio++
+    if(session.caps.demand2&&decoded.payload.length===2&&decoded.payload[0]===1){
+      session.demand={flags:decoded.payload[1]&31,until:now+3500}
+      session.lastDemandAt=0
+    }
+    return
+  }
   if (decoded.kind === CAMERA_KIND) {
     session.legacyNonAudio += 1
     if (!session.caps.camera1 || !cameraAllowed.get(session.clientId) || !parseCameraFragment(decoded.payload)) return
     if (session.cameraSecond !== sec) { session.cameraSecond = sec; session.cameraBytes = 0 }
     session.cameraBytes += packetLength
     if (session.cameraBytes > 1024 * 1024) return
-    const identity = Buffer.from(session.clientId)
-    if (identity.length > 255) return
-    const payload = Buffer.concat([Buffer.from([identity.length]), identity, decoded.payload])
-    for (const receiver of sessions.values()) {
-      if (receiver !== session && receiver.roomId === session.roomId && receiver.serverId === session.serverId && receiver.caps.camera1) send(receiver, CAMERA_KIND, payload)
+    const fragment=parseCameraFragment(decoded.payload)!
+    const complete=session.cameraAssembler.push(session.clientId,decoded.payload,performance.now())
+    if(!complete)return
+    const identity=Buffer.from(session.clientId)
+    if(identity.length>255)return
+    const prefix=Buffer.concat([Buffer.from([identity.length]),identity])
+    const payloads=fragmentCamera(complete,fragment.stream,fragment.frame,fragment.timestamp).map(packet=>Buffer.concat([prefix,Buffer.from(packet)]))
+    for(const receiver of sessions.values()){
+      if(receiver===session||receiver.roomId!==session.roomId||receiver.serverId!==session.serverId||!receiver.caps.camera1||!needsJpeg(receiver,session,now))continue
+      const at=Date.now()
+      receiver.queue.pushVideo(session.clientId,payloads.map(payload=>({bytes:payload.length+80,send:()=>transmit(receiver,CAMERA_KIND,payload,at,at)})))
     }
     return
   }
@@ -386,7 +461,7 @@ function handlePacket(session: Session, decoded: DecryptedPacket, packetLength: 
     screenChunksByRoom.set(session.roomId, list)
     return
   }
-  if (session.muted) return
+  if (session.muted || (session.caps.demand2&&!session.voiceNeeded)) return
 
   if (decoded.kind === KIND_OPUS2) {
     const packet = decodeOpus2(decoded.payload)
@@ -507,43 +582,51 @@ function mixTick() {
     byRoom.set(s.roomId, list)
   }
   for (const [roomId, members] of byRoom) {
+    refreshDemand(members,now)
     const tick = (roomTick.get(roomId) ?? 0) + 1
     roomTick.set(roomId, tick)
     const sources: Array<{ clientId: string; frame: Int16Array }> = []
     const peaks = roomLevelPeaks.get(roomId) ?? new Map<string, number>()
     for (const s of members) {
-      const frame = s.muted ? null : s.stream.pull(now)
-      if (frame) sources.push({ clientId: s.clientId, frame })
+      const frame = s.muted || (s.caps.demand2&&!s.voiceNeeded) ? null : s.stream.pull(now)
       const rmsLevel = frame ? s.stream.lastRms : 0
+      if (frame && s.silence.admitRms(rmsLevel, now)) sources.push({ clientId: s.clientId, frame })
       updateSpeaking(s, rmsLevel, now)
       if (rmsLevel > 0) peaks.set(s.clientId, Math.max(peaks.get(s.clientId) ?? 0, rmsLevel))
     }
     roomLevelPeaks.set(roomId, peaks)
     if (tick % LEVEL_EVERY_TICKS === 0) emitLevels(roomId, peaks)
     if (sources.length === 0) continue
+    const roomMix = new RoomMix(sources)
     for (const listener of members) {
-      if (listener.deafened) continue
-      const gains = peerGainByListener.get(listener.clientId)
-      const mix = new Float32Array(FRAME_SAMPLES)
-      let used = 0
-      for (const src of sources) {
-        if (src.clientId === listener.clientId) continue
-        const g = gains?.get(src.clientId) ?? 1
-        if (g <= 0) continue
-        mixInto(mix, src.frame, g)
-        used += 1
-      }
-      if (used === 0) continue
+      if (listener.deafened || !wants(listener,1,now)) continue
+      const mix = roomMix.forListener(listener.clientId, peerGainByListener.get(listener.clientId))
+      if (!mix) continue
       const pcm = softClipToPcm(mix)
-      const before = listener.stats.txPackets
-      if (listener.caps.opus2) sendOpus2(listener, pcm, tick)
+      if (listener.caps.mix3) {
+        const gains=peerGainByListener.get(listener.clientId)
+        const corrections=gains?[...gains].filter(([id,g])=>id!==listener.clientId && g!==1 && roomMix.sources.has(id)).sort((a,b)=>a[0].localeCompare(b[0])):[]
+        const loss=Math.min(30,Math.round(listener.downlink.lossPermille/10))
+        const key=JSON.stringify([roomId,roomMix.sources.has(listener.clientId)?listener.clientId:null,corrections,listener.downlinkBitrate,loss])
+        try {
+          const group=sharedMixes.encode(key,pcm,tick,now,listener.downlinkBitrate,loss)
+          if(group){
+            if(listener.sharedEpoch!==group.epoch){listener.sharedEpoch=group.epoch;listener.sharedBootstrap=3}
+            const frames=group.frames.slice(0,listener.sharedBootstrap>0?5:listener.transport==='udp'?1+listener.redundancy:1)
+            send(listener,KIND_MIX3,encodeMix3(group.epoch,tick,group.flags,frames),now,now)
+            listener.sharedBootstrap=Math.max(0,listener.sharedBootstrap-1)
+          }else sendOpus2(listener,pcm,tick,now)
+        } catch {
+          listener.stats.txEncodeErrors++
+          sendOpus2(listener,pcm,tick,now)
+        }
+      } else if (listener.caps.opus2) sendOpus2(listener, pcm, tick,now)
       else send(listener, KIND_PCM, Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength))
-      if (listener.stats.txPackets > before) listener.stats.txAudioFrames += 1
     }
   }
 }
 
-function sendOpus2(listener: Session, pcm: Int16Array, tick: number) {
+function sendOpus2(listener: Session, pcm: Int16Array, tick: number, createdAt=Date.now()) {
   let encoded: Buffer
   try {
     encoded = encoderFor(listener).encode(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength), FRAME_SAMPLES)
@@ -560,12 +643,13 @@ function sendOpus2(listener: Session, pcm: Int16Array, tick: number) {
     send(listener, KIND_PCM, Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength))
     return
   }
-  const continuous = listener.lastTxFrameNo === tick - 1
+  const continuous = listener.lastTxFrameNo === tick - 1 && Date.now() - listener.lastTxAtMs < 80
   if (!continuous) listener.recentEncoded = []
   const frames = [encoded, ...listener.recentEncoded.slice(0, listener.redundancy)]
-  send(listener, KIND_OPUS2, encodeOpus2(tick, continuous ? 0 : OPUS2_FLAG_TALKSPURT, frames))
+  send(listener, KIND_OPUS2, encodeOpus2(tick, continuous ? 0 : OPUS2_FLAG_TALKSPURT, frames),createdAt,createdAt)
   listener.recentEncoded = [encoded, ...listener.recentEncoded].slice(0, 2)
   listener.lastTxFrameNo = tick
+  listener.lastTxAtMs = Date.now()
 }
 
 /** Loudest frame per speaker since the last levels event. */
@@ -698,7 +782,8 @@ const MAX_TCP_FRAME = 64 * 1024
 function reliableConnection(kind: "tcp" | "ws", label: string, tcp: NonNullable<Session["tcp"]>, destroy: () => void) {
   let session: Session | null = null
   return {
-    onPayload(payload: Buffer) {
+    onPayload(payload: Buffer, receivedAt=Date.now()) {
+      if(Date.now()-receivedAt>80&&payload[0]!==0x48)return
       if (payload[0] === 0x48 && payload.subarray(0, 5).toString() === "HELLO") {
         const res = acceptHello(payload.toString(), { kind, tcp, label })
         if (!res.ok) {
@@ -780,13 +865,13 @@ function startTcp() {
  */
 const wsConnections = new Map<string, ReturnType<typeof reliableConnection>>()
 
-export function wsOpen(connId: string, label: string, send: (packet: Buffer) => void, close: () => void) {
+export function wsOpen(connId: string, label: string, send: (packet: Buffer, meta?: {kind:number;at:number}) => void, close: () => void, backlog: (kind?:number)=>number=()=>0) {
   // Backpressure is applied on the main thread, which can see the socket's buffered amount.
-  wsConnections.set(connId, reliableConnection("ws", label, { send, backlog: () => 0 }, close))
+  wsConnections.set(connId, reliableConnection("ws", label, { send, backlog }, close))
 }
 
-export function wsData(connId: string, payload: Buffer) {
-  wsConnections.get(connId)?.onPayload(payload)
+export function wsData(connId: string, payload: Buffer, receivedAt=Date.now()) {
+  wsConnections.get(connId)?.onPayload(payload,receivedAt)
 }
 
 export function wsClose(connId: string) {
@@ -798,6 +883,7 @@ function startHousekeeping() {
   // Idle sessions inside a room are evicted (the client vanished without leaving).
   setInterval(() => {
     const now = Date.now()
+    sharedMixes.sweep(now)
     const idleMs = config.mediaSessionIdleSec * 1000
     for (const [clientId, s] of [...sessions]) {
       if (!s.roomId || now - s.lastPacketAtMs < idleMs) continue
@@ -822,6 +908,7 @@ function startHousekeeping() {
           remote: s.transport === "udp" ? (s.remote ? remoteKey(s.remote) : null) : (s.tcpLabel ?? "tcp"),
           caps: s.caps,
           ...s.stats,
+          txExpiredAudio:s.queue.stats.expiredAudio,txDroppedAudio:s.queue.stats.droppedAudio,txDroppedCameraFrames:s.queue.stats.droppedVideo,
           uplinkLossPct: Number(uplinkLossPct(s).toFixed(2)),
           uplinkJitterMs: Number(s.stream.jitter.toFixed(1)),
           jitterTargetMs: s.stream.targetFrames * FRAME_MS,
@@ -843,6 +930,7 @@ function startHousekeeping() {
         "media network stats snapshot"
       )
       s.stats = freshStats()
+      Object.assign(s.queue.stats,{expiredAudio:0,droppedAudio:0,droppedVideo:0})
       s.uplinkLoss = { expected: 0, received: 0, highest: loss.highest }
       Object.assign(st, { played: 0, concealed: 0, lateDrops: 0, catchupDrops: 0, hardDrops: 0, underruns: 0, decodeErrors: 0 })
     }
@@ -859,4 +947,4 @@ export function startMedia(log: MediaLogger, mediaHooks: MediaHooks) {
 }
 
 /** For tests: process one tick synchronously. */
-export const __test = { mixTick, sessions }
+export const __test = { mixTick, sessions, drainQueues: () => { for(const session of sessions.values())for(let i=0;i<256;i++)session.queue.drain() } }

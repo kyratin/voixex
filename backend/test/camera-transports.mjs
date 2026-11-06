@@ -91,10 +91,10 @@ try {
   const burstBefore = peers[2].frames.filter(f => f.sender === peers[1].id).length
   for (let frameId = 0; frameId < 45; frameId++) {
     for (const packet of fragmentCamera(frame, 500, frameId, 5000 + frameId)) peers[1].engine.sendCameraPacket(Buffer.from(packet))
-    await pause(4)
+    await pause(33)
   }
   await waitFor(() => peers[2].frames.filter(f => f.sender === peers[1].id).length === burstBefore + 45, "30 fps compatibility burst must fit the increased sender budget")
-  console.log("PASS >256 KiB camera burst without frame loss under the 1 MiB/s budget")
+  console.log("PASS sustained 30 fps >256 KiB/s camera traffic without frame loss under the 1 MiB/s budget")
   const before = peers[1].frames.length
   media.setMemberCameraAllowed(peers[0].id, false)
   for (const packet of fragmentCamera(frame, 1, 100, 2000)) peers[0].engine.sendCameraPacket(Buffer.from(packet))

@@ -1,13 +1,14 @@
 {
   "name": "voip-backend",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "bot:channel": "tsx src/channel-bot.ts"
+    "bot:channel": "tsx src/channel-bot.ts",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",

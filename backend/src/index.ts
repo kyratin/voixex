@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify"
 import cors from "@fastify/cors"
 import websocket from "@fastify/websocket"
-import bcrypt from "bcryptjs"
+import { passwords as bcrypt } from "./passwords.js"
 import { randomUUID, randomBytes } from "node:crypto"
 import { createReadStream, createWriteStream, mkdirSync, readFileSync, statSync } from "node:fs"
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path"

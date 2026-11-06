@@ -17,6 +17,9 @@ export const KIND_OPUS2 = 3
 /** Client clock + client's receive stats; answered immediately with KIND_PROBE_ACK. */
 export const KIND_PROBE = 4
 export const KIND_PROBE_ACK = 5
+/** Negotiated shared Opus stream with explicit epoch and decoder pre-roll. */
+export const KIND_MIX3 = 7
+export const KIND_MEDIA_STATE = 8
 
 export const FRAME_MS = 20
 export const SAMPLE_RATE = 48_000
@@ -108,12 +111,12 @@ export function encodeOpus2(frameNo: number, flags: number, frames: Buffer[]): B
   return out
 }
 
-export function decodeOpus2(payload: Buffer): Opus2Packet | null {
+export function decodeOpus2(payload: Buffer, maxFrames = 4): Opus2Packet | null {
   if (payload.length < 6) return null
   const frameNo = payload.readUInt32BE(0)
   const flags = payload.readUInt8(4)
   const count = payload.readUInt8(5)
-  if (count === 0 || count > 4) return null
+  if (count === 0 || count > maxFrames) return null
   const frames: Opus2Frame[] = []
   let off = 6
   for (let i = 0; i < count; i += 1) {
@@ -181,4 +184,15 @@ export class ReplayWindow {
     if (seq > this.highest) this.highest = seq
     return true
   }
+}
+
+/** mix3 is sent only to peers that advertised it in HELLO2. */
+export function encodeMix3(epoch: number, frameNo: number, flags: number, frames: Buffer[]): Buffer {
+  const header=Buffer.alloc(4);header.writeUInt32BE(epoch>>>0)
+  return Buffer.concat([header,encodeOpus2(frameNo,flags,frames)])
+}
+export function decodeMix3(payload: Buffer) {
+  if(payload.length<4)return null
+  const packet=decodeOpus2(payload.subarray(4),5)
+  return packet?{epoch:payload.readUInt32BE(0),...packet}:null
 }
