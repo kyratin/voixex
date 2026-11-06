@@ -60,6 +60,8 @@ export type WebVoiceStats = {
   uplinkCodec: "opus" | "pcm" | "pending"
   captureFrames: number
   uplinkError: string | null
+  uplinkLateFrames: number
+  uplinkFallbacks: number
 }
 
 /**
@@ -110,6 +112,9 @@ export class WebVoiceEngine {
   private txFrameNo = 0
   private lastSendMs = 0
   private pendingFlags = new Map<number, { flags: number; createdAt: number }>()
+  private consecutiveLateEncoded = 0
+  private uplinkLateFrames = 0
+  private uplinkFallbacks = 0
   private uplinkLossPct = 0
 
   // downlink (reorder buffer → decoder → output in order)
@@ -333,11 +338,17 @@ export class WebVoiceEngine {
     if (this.uplinkCodec !== "opus") return
     const f32 = new Float32Array(FRAME_SAMPLES)
     for (let i = 0; i < FRAME_SAMPLES; i += 1) f32[i] = (frame[i] ?? 0) / 32768
+    const createdAt = Date.now()
+    const oldest = this.pendingFlags.values().next().value
+    if (oldest && createdAt - oldest.createdAt > 160) {
+      this.failOpus(new Error("Opus encoder stalled; using compatible PCM voice"))
+      void this.send(KIND_PCM, new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength).slice())
+      return
+    }
     const encoder = this.getEncoder()
     if (!encoder || encoder.encodeQueueSize >= 3) return
-    const createdAt = Date.now()
-    for (const [number, pending] of this.pendingFlags) if (createdAt - pending.createdAt > 80) this.pendingFlags.delete(number)
-    // Only a short encoder queue is useful for interactive speech.
+    // Keep metadata until its ordered output arrives, even when expired. Removing a middle
+    // entry would associate the next Opus packet with the wrong captured speech frame.
     if (this.pendingFlags.size >= 4) return
     this.pendingFlags.set(frameNo, { flags, createdAt })
     const data = new AudioData({
@@ -392,6 +403,8 @@ export class WebVoiceEngine {
   private failOpus(e: unknown) {
     this.uplinkError = e instanceof Error ? e.message : String(e)
     this.uplinkCodec = "pcm"
+    this.uplinkFallbacks++
+    this.consecutiveLateEncoded = 0
     try {
       if (this.encoder && this.encoder.state !== "closed") this.encoder.close()
     } catch {
@@ -423,7 +436,9 @@ export class WebVoiceEngine {
       concealedFrames: this.concealed,
       uplinkCodec: this.uplinkCodec,
       captureFrames: this.captureFrames,
-      uplinkError: this.uplinkError
+      uplinkError: this.uplinkError,
+      uplinkLateFrames: this.uplinkLateFrames,
+      uplinkFallbacks: this.uplinkFallbacks
     }
   }
 
@@ -450,10 +465,19 @@ export class WebVoiceEngine {
   }
 
   private onEncoded(chunk: EncodedAudioChunk) {
-    const frameNo = Math.round(chunk.timestamp / (FRAME_MS * 1000))
-    const pending = this.pendingFlags.get(frameNo)
+    // Opus WebCodecs timestamps can follow the codec's continuous sample clock instead
+    // of AudioData timestamp gaps. Output order, unlike those timestamps, remains stable.
+    const first = this.pendingFlags.entries().next().value
+    if (!first) return
+    const [frameNo, pending] = first
     this.pendingFlags.delete(frameNo)
-    if (!pending || Date.now() - pending.createdAt > 80 || !this.roomId || this.muted || !this.getMediaDemand().voice) return
+    if (!this.roomId || this.muted || !this.getMediaDemand().voice) return
+    if (Date.now() - pending.createdAt > 80) {
+      this.uplinkLateFrames++
+      if (++this.consecutiveLateEncoded >= 3) this.failOpus(new Error("Opus encoder repeatedly exceeded the live audio deadline; using compatible PCM voice"))
+      return
+    }
+    this.consecutiveLateEncoded = 0
     const data = new Uint8Array(chunk.byteLength)
     chunk.copyTo(data)
     // Reliable transports need no redundant copies; UDP can recover through server PLC.
@@ -465,7 +489,11 @@ export class WebVoiceEngine {
     this.outgoing.close()
     this.outgoing = new MediaSendQueue()
     this.outgoingCamera.clear()
+    // A new room/connection must never consume a delayed output from its predecessor.
+    try { if (this.encoder && this.encoder.state !== "closed") this.encoder.close() } catch { /* already closed */ }
+    this.encoder = null
     this.pendingFlags.clear()
+    this.consecutiveLateEncoded = 0
   }
 
   private async send(kind: number, payload: Uint8Array, control = false, createdAt = Date.now()) {
