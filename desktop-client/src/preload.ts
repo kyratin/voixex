@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron"
 
 const electronVoice = {
+  setMediaState: (state: { voice?: boolean; camera?: boolean; sfuCamera?: boolean; publishingCamera?: boolean; sfuPublishingCamera?: boolean }) => ipcRenderer.send("voice:setMediaState", state),
+  getMediaDemand: () => ipcRenderer.invoke("voice:getMediaDemand"),
+  onMediaDemand: (listener: (state: { voice: boolean; camera: boolean }) => void) => {
+    const handler = (_event: unknown, state: { voice: boolean; camera: boolean }) => listener(state)
+    ipcRenderer.on("voice:mediaDemand", handler)
+    return () => ipcRenderer.removeListener("voice:mediaDemand", handler)
+  },
   requestCameraAccess: () => ipcRenderer.invoke("voice:requestCameraAccess"),
   sendCameraPacket: (packet: string) => ipcRenderer.send("voice:sendCameraPacket", packet),
   onCameraPacket: (listener: (packet: string) => void) => {

@@ -52,6 +52,8 @@ export function useCamera(options: {
   const remote = useRef(new Map<string, { stream?: MediaStream; image?: string; last: number }>())
   const assembler = useRef(new CameraAssembler())
   const published = useRef<WebRtcMediaSession | null>(null)
+  const publishing = useRef<WebRtcMediaSession | null>(null)
+  const jpegNeeded = useRef(true)
 
   const stop = useCallback(() => {
     generation.current++
@@ -62,6 +64,7 @@ export function useCamera(options: {
     setBusy(false)
     const session = published.current
     published.current = null
+    publishing.current = null
     void session?.stopCamera().catch(() => {})
   }, [])
 
@@ -99,9 +102,11 @@ export function useCamera(options: {
         await opts.current.ensureSession()
         const session = opts.current.session()
         if (session?.live && !stale()) {
-          published.current = session
+          publishing.current = session
           // A denied/unavailable SFU never interrupts legacy video.
-          await session.publishCamera(stream.getVideoTracks()[0]).catch(() => {})
+          await session.publishCamera(stream.getVideoTracks()[0]).then(() => {
+            if (!stale() && session.cameraPublished) published.current = session
+          }).catch(() => {}).finally(() => { if (publishing.current === session) publishing.current = null })
         }
       }
     } catch (cause) {
@@ -201,6 +206,20 @@ export function useCamera(options: {
   }, [options.roomKey])
 
   useEffect(() => {
+    jpegNeeded.current = true
+    if (!options.roomKey) return
+    let cancelled = false
+    const unsubscribe = window.electronVoice?.onMediaDemand?.(state => { jpegNeeded.current = state.camera })
+    // Polling also covers the initial lease and older desktop builds without events.
+    const refresh = () => { void window.electronVoice?.getMediaDemand?.().then(state => {
+      if (!cancelled) jpegNeeded.current = state.camera
+    }, () => { if (!cancelled) jpegNeeded.current = true }) }
+    refresh()
+    const timer = setInterval(refresh, 500)
+    return () => { cancelled = true; unsubscribe?.(); clearInterval(timer); jpegNeeded.current = true }
+  }, [options.roomKey])
+
+  useEffect(() => {
     if (!local) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -210,10 +229,22 @@ export function useCamera(options: {
     const context = canvas.getContext("2d")
     const streamId = crypto.getRandomValues(new Uint32Array(1))[0]
     let frameId = 0
+    let lastPublishAttempt = 0
     const tick = async () => {
       const startedAt = performance.now()
       try {
-        if (!context || video.readyState < 2 || cancelled) return
+        if (cancelled) return
+        const session = opts.current.session()
+        if (livekit.current && session?.live && !session.cameraPublished && publishing.current !== session && startedAt - lastPublishAttempt > 1000) {
+          lastPublishAttempt = startedAt
+          publishing.current = session
+          void session.publishCamera(local.getVideoTracks()[0]).then(() => {
+            if (!cancelled && session.cameraPublished) published.current = session
+          }).catch(() => { if (published.current === session) published.current = null })
+            .finally(() => { if (publishing.current === session) publishing.current = null })
+        }
+        // Negotiate before encoding: avoiding JPEG work matters most on mobile devices.
+        if (!jpegNeeded.current || !context || video.readyState < 2) return
         const ratio = video.videoWidth / video.videoHeight
         canvas.width = Math.min(480, video.videoWidth)
         canvas.height = Math.max(1, Math.round(canvas.width / ratio))
@@ -226,11 +257,6 @@ export function useCamera(options: {
           await window.electronVoice?.sendCameraPacket?.(base64(packet))
           // Yield in small batches so audio/control can run without a delay per fragment.
           if ((index + 1) % 4 === 0) await new Promise(resolve => setTimeout(resolve, 0))
-        }
-        const session = opts.current.session()
-        if (livekit.current && session?.live && published.current !== session && !cancelled) {
-          published.current = session
-          await session.publishCamera(local.getVideoTracks()[0]).catch(() => { if (published.current === session) published.current = null })
         }
       } catch { /* next independent frame recovers from packet/encoder failure */ }
       finally { if (!cancelled) timer = setTimeout(() => void tick(), Math.max(0, CAMERA_FRAME_INTERVAL_MS - (performance.now() - startedAt))) }
@@ -253,6 +279,7 @@ export function useCamera(options: {
       select: (id: string) => { setDeviceId(id); try { localStorage.setItem("voixex-camera-device", id) } catch {} if (capture.current) void start(id) }
     } satisfies CameraControls,
     onRemoteCamera,
+    isSfuPublished: () => Boolean(capture.current && published.current === opts.current.session() && published.current?.cameraPublished),
     stop
   }
 }

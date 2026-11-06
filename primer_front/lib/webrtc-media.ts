@@ -51,6 +51,7 @@ export class WebRtcMediaSession {
   private screenTracks: LocalTrack[] = []
   private cameraTrack: LocalVideoTrack | null = null
   private cameraGeneration = 0
+  private cameraViewing = true
   private remoteCameras = new Map<string, RemoteTrack>()
   private micGeneration = 0
   private muted = false
@@ -102,6 +103,9 @@ export class WebRtcMediaSession {
       dynacast: true
     })
     room
+      .on(RoomEvent.TrackPublished, publication => {
+        if (publication.source === Track.Source.Camera && !this.cameraViewing) publication.setSubscribed(false)
+      })
       .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
         this.attachRemoteTrack(track, publication, participant.identity)
       })
@@ -134,6 +138,13 @@ export class WebRtcMediaSession {
   get playingRemoteVoice() {
     this.updateVoicePlayback()
     return this.voiceReady
+  }
+
+  get remoteVoiceLevels(): Record<string, number> {
+    if (!this.playingRemoteVoice) return {}
+    return Object.fromEntries([...(this.room?.remoteParticipants.values() ?? [])]
+      .filter(participant => !participant.identity.endsWith(":screen"))
+      .map(participant => [participant.identity, participant.audioLevel]))
   }
 
   setPlayRemoteVoice(play: boolean, expectedPeers?: string[]) {
@@ -285,6 +296,29 @@ export class WebRtcMediaSession {
     }
     window.addEventListener("pointerdown", retry, true)
     window.addEventListener("keydown", retry, true)
+  }
+
+  get cameraPublished() {
+    return this.room?.state === ConnectionState.Connected && this.cameraTrack?.mediaStreamTrack.readyState === "live"
+  }
+
+  setCameraViewing(enabled: boolean) {
+    if (this.cameraViewing === enabled) return
+    this.cameraViewing = enabled
+    for (const participant of this.room?.remoteParticipants.values() ?? []) {
+      for (const publication of participant.videoTrackPublications.values()) {
+        if (publication.source === Track.Source.Camera) publication.setSubscribed(enabled)
+      }
+    }
+  }
+
+  /** A failed/missing subscription keeps the JPEG fallback enabled. */
+  get receivingCameras() {
+    const room = this.room
+    return Boolean(this.cameraViewing && room?.state === ConnectionState.Connected && [...room.remoteParticipants.values()].every(participant =>
+      [...participant.videoTrackPublications.values()].filter(publication => publication.source === Track.Source.Camera && !publication.isMuted)
+        .every(publication => publication.isSubscribed && publication.track?.mediaStreamTrack.readyState === "live")
+    ))
   }
 
   async publishCamera(track: MediaStreamTrack) {

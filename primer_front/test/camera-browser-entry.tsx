@@ -1,6 +1,8 @@
 import { createElement, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { useCamera } from "../lib/camera/use-camera"
+import { useVoiceLevel } from "../lib/voice-levels"
+export { setRoomVoiceLevels, setSfuVoiceLevels } from "../lib/voice-levels"
 export { WebVoiceEngine } from "../lib/web-voice/engine"
 export { CameraAssembler, fragmentCamera } from "../lib/camera/protocol"
 export { WebRtcMediaSession } from "../lib/webrtc-media"
@@ -24,4 +26,17 @@ export function mountCameraHarness() {
   const root = createRoot(container)
   root.render(createElement(Harness))
   return { room: (room: string) => update(room), unmount: () => { root.unmount(); container.remove() } }
+}
+
+export function mountVoiceLevelHarness() {
+  function Harness() {
+    const level = useVoiceLevel("test-speaker")
+    Object.assign(window, { observedVoiceLevel: level })
+    return null
+  }
+  const container = document.createElement("div")
+  document.body.appendChild(container)
+  const root = createRoot(container)
+  root.render(createElement(Harness))
+  return () => { root.unmount(); container.remove() }
 }

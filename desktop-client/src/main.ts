@@ -300,6 +300,11 @@ app.whenReady().then(async () => {
   voice.setOnIncomingCameraPacket(packet => {
     for (const win of BrowserWindow.getAllWindows()) win.webContents.send("voice:cameraPacket", packet)
   })
+  voice.setOnMediaDemand(state => {
+    for (const win of BrowserWindow.getAllWindows()) win.webContents.send("voice:mediaDemand", state)
+  })
+  ipcMain.handle("voice:getMediaDemand", () => voice.getMediaDemand())
+  ipcMain.on("voice:setMediaState", (_event, state) => voice.setMediaState(state))
   ipcMain.on("voice:sendCameraPacket", (_event, packet: string) => voice.sendCameraPacket(packet))
   ipcMain.handle("voice:requestCameraAccess", async () => ({
     granted: process.platform !== "darwin" || await systemPreferences.askForMediaAccess("camera")

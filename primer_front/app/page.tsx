@@ -4,6 +4,7 @@
 import { onNativeScreenShareStopped, setScreenOrientation, startNativeScreenShare, stopNativeScreenShare } from "@/lib/mobile-bridge"
 import { VoiceActivityDetector, setLocalVoiceActivity, resetLocalVoiceActivity } from "@/lib/voice-activity"
 import { useCamera } from "@/lib/camera/use-camera"
+import { setSfuVoiceLevels } from "@/lib/voice-levels"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useExitSnapshot } from "@/lib/use-exit-snapshot"
@@ -2064,15 +2065,23 @@ export default function VoIPApp() {
     return () => clearInterval(timer)
   }, [hasDesktopBridge, isMuted])
 
+  const playoutPolicy = useRef<{ runtime: VoicePipelineRuntime | null; target: number; underruns: number }>({ runtime: null, target: 80, underruns: 0 })
   useEffect(() => {
     const rt = voicePipelineRef.current
     if (!rt || !voiceStats) return
-    const jitter = Math.max(0, voiceStats.jitter1PctMs ?? 0)
-    // Quality-first adaptive policy: larger startup buffer on unstable links.
-    const startMs = clamp(Math.round(140 + jitter * 2.5), 140, 320)
-    const maxQueuedSec = clamp(startMs / 1000 + 0.75, 0.9, 1.6)
-    rt.playoutPrefetch.reconfigure(startMs, maxQueuedSec)
-  }, [voiceStats])
+    const baseMs = isMobileApp ? 100 : 80
+    const jitter = Math.max(0, voiceStats.jitterNowMs ?? voiceStats.jitter1PctMs ?? 0)
+    const underruns = audioPipelineDiag?.playoutUnderruns ?? 0
+    const policy = playoutPolicy.current
+    const fresh = policy.runtime !== rt
+    const previous = fresh ? baseMs : policy.target
+    const needed = clamp(Math.round(baseMs + jitter * 2.5), baseMs, 260)
+    // React quickly to starvation; release extra latency gradually after recovery.
+    const recovering = !fresh && underruns > policy.underruns
+    const startMs = Math.max(needed, recovering ? Math.min(260, previous + 30) : Math.max(baseMs, previous - 10))
+    playoutPolicy.current = { runtime: rt, target: startMs, underruns }
+    rt.playoutPrefetch.reconfigure(startMs, clamp(startMs / 1000 + 0.25, 0.35, 0.6))
+  }, [voiceStats, isMobileApp])
 
   // Outside a voice channel the pipeline also runs while the Voice settings tab is open, so the mic
   // can be tested (level meter, monitor, volume sliders) without sending anything to the server.
@@ -2211,7 +2220,7 @@ export default function VoIPApp() {
         const captureSinkNode = captureCtx.createMediaStreamDestination()
         const playbackWorklet = await loadVoicePlaybackWorklet(playbackCtx)
         const playoutPrefetch = new VoicePlayoutPrefetch(playbackCtx.sampleRate, playbackWorklet.port, {
-          startMs: isMobileApp ? 120 : 60,
+          startMs: isMobileApp ? 100 : 80,
           maxQueuedSec: isMobileApp ? 0.6 : 0.4
         })
         playbackWorklet.port.onmessage = (ev: MessageEvent) => {
@@ -3707,6 +3716,32 @@ export default function VoIPApp() {
   }, [hasShell, inVoiceCall, voiceChannelName, isMuted, isDeafened, t])
   useEffect(() => setVoiceActivitiesHidden(false), [currentVoiceChannel])
   const miniCallVisible = hasShell && miniCallEnabled && appMinimized && inVoiceCall
+  useEffect(() => {
+    const bridge = window.electronVoice
+    if (!bridge?.setMediaState) return
+    let previous = ""
+    const update = () => {
+      const session = webRtcSessionRef.current
+      const cameraVisible = isInVoiceRef.current && (appMinimized
+        ? miniCallEnabled && !miniCallDismissed && miniCallDisplay === "cameras"
+        : !voiceActivitiesHidden && (!document.hidden || hasShell))
+      session?.setCameraViewing(cameraVisible)
+      setSfuVoiceLevels(currentVoiceChannel, playsLiveKitVoiceRef.current() ? session?.remoteVoiceLevels ?? {} : {})
+      const preferences = {
+        voice: !deafenedRef.current && !playsLiveKitVoiceRef.current(),
+        camera: cameraVisible,
+        sfuCamera: cameraVisible && Boolean(session?.receivingCameras),
+        publishingCamera: Boolean(camera.controls.local),
+        sfuPublishingCamera: camera.isSfuPublished()
+      }
+      const key = JSON.stringify(preferences)
+      if (key !== previous) { previous = key; bridge.setMediaState?.(preferences) }
+    }
+    update()
+    // LiveKit readiness can change without a React render, including reconnects.
+    const timer = setInterval(update, 100)
+    return () => { clearInterval(timer); setSfuVoiceLevels(currentVoiceChannel, {}) }
+  }, [hasDesktopBridge, appMinimized, miniCallEnabled, miniCallDismissed, miniCallDisplay, voiceActivitiesHidden, hasShell, camera.controls.local, isInVoice, currentVoiceChannel])
   const miniCallView = (pip: boolean) => (
     <MiniCallView
       channelName={voiceChannelName}

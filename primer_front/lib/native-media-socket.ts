@@ -29,6 +29,7 @@ export class NativeMediaSocket implements MediaSocket {
   private id = crypto.randomUUID()
   private listeners: Array<{ remove(): Promise<void> }> = []
   private sending = Promise.resolve()
+  private pendingSends = 0
 
   static supported() { return Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android" }
 
@@ -53,12 +54,16 @@ export class NativeMediaSocket implements MediaSocket {
   }
 
   send(data: Uint8Array): void | Promise<void> {
-    if (this.readyState !== 1 || this.bufferedAmount > 24 * 1024) return
+    // WebVoiceEngine admits one media write at a time; also bound direct HELLO writes.
+    if (this.readyState !== 1 || this.pendingSends >= 4 || this.bufferedAmount > 8 * 1024) return
+    const createdAt = Date.now()
+    const ttl = data[0] === 0x48 ? 250 : 100
     const encoded = btoa(String.fromCharCode(...data))
     this.bufferedAmount += data.length
+    this.pendingSends++
     this.sending = this.sending.then(async () => {
-      if (this.readyState === 1) await NativeMedia.send({ id: this.id, data: encoded })
-    }).catch(() => this.close()).finally(() => { this.bufferedAmount -= data.length })
+      if (this.readyState === 1 && Date.now() - createdAt <= ttl) await NativeMedia.send({ id: this.id, data: encoded })
+    }).catch(() => this.close()).finally(() => { this.bufferedAmount -= data.length; this.pendingSends-- })
     return this.sending
   }
 

@@ -202,6 +202,12 @@ function installVoiceBridge() {
     },
     sendOpusFrame() {},
     sendScreenChunk() {},
+    setMediaState(state) { engine.setMediaState(state) },
+    async getMediaDemand() { return engine.getMediaDemand() },
+    onMediaDemand(listener) {
+      engine.setOnMediaDemand(listener)
+      return () => engine.setOnMediaDemand(null)
+    },
     sendCameraPacket(packet) { return engine.sendCameraPacket(Uint8Array.from(atob(packet), c => c.charCodeAt(0))) },
     onCameraPacket(listener) {
       engine.setOnCameraPacket(packet => listener(toBase64(packet)))

@@ -1,4 +1,4 @@
-import { VoiceEngine, type AudioDeviceSelection } from "voip-voice-client"
+import { VoiceEngine, type AudioDeviceSelection, type MediaPreferences, type MediaDemand } from "voip-voice-client"
 
 type VoiceState = {
   connected: boolean
@@ -12,6 +12,8 @@ type VoiceState = {
 export class VoiceService {
   private onIncomingCameraPacket: ((packet: string) => void) | null = null
   private engine: VoiceEngine | null = null
+  private mediaPreferences: Partial<MediaPreferences> = {}
+  private onMediaDemand: ((state: MediaDemand) => void) | null = null
   private onIncomingPcm16: ((pcm16Base64: string) => void) | null = null
   private onIncomingScreenChunk: ((chunkBase64: string) => void) | null = null
   private state: VoiceState = {
@@ -42,6 +44,8 @@ export class VoiceService {
       mediaSeed,
       transport: input.transport ?? "udp"
     })
+    this.engine.setMediaState(this.mediaPreferences)
+    this.engine.setOnMediaDemand(state => this.onMediaDemand?.(state))
     this.engine.setAudioDevices(this.selectedDevices)
     this.engine.setOnPcm16Frame((frame) => {
       this.onIncomingPcm16?.(frame.toString("base64"))
@@ -67,6 +71,16 @@ export class VoiceService {
     this.engine?.setMediaToken(mediaToken)
     return this.state
   }
+
+  setMediaState(state: Partial<MediaPreferences>) {
+    for (const key of ["voice", "camera", "sfuCamera", "publishingCamera", "sfuPublishingCamera"] as const) {
+      if (typeof state?.[key] === "boolean") this.mediaPreferences[key] = state[key]
+    }
+    this.engine?.setMediaState(this.mediaPreferences)
+  }
+
+  getMediaDemand(): MediaDemand { return this.engine?.getMediaDemand() ?? { voice: true, camera: true } }
+  setOnMediaDemand(listener: (state: MediaDemand) => void) { this.onMediaDemand = listener }
 
   setOnIncomingCameraPacket(listener: (packet: string) => void) { this.onIncomingCameraPacket = listener }
   sendCameraPacket(packet: string) {

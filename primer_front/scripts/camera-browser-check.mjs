@@ -70,6 +70,39 @@ try {
   await pages[1].waitForFunction(() => document.getElementById('screen').videoWidth > 0, {timeout:20000})
   assert.ok(await pages[1].evaluate(() => document.getElementById('camera').videoWidth > 0))
   console.log('PASS camera and screen share coexist without replacing each other')
+  await pages[0].evaluate(async () => {
+    window.microphone = await navigator.mediaDevices.getUserMedia({audio:true})
+    await window.media.publishMicTrack(window.microphone.getAudioTracks()[0])
+  })
+  await pages[1].waitForFunction(() => [...window.media.room.remoteParticipants.values()].some(participant =>
+    [...participant.audioTrackPublications.values()].some(publication => publication.source === 'microphone' && publication.isSubscribed && publication.track)
+  ))
+  assert.equal(await pages[0].evaluate(() => window.media.cameraPublished), true)
+  assert.equal(await pages[1].evaluate(() => window.media.receivingCameras), true)
+  await pages[1].evaluate(() => window.media.setCameraViewing(false))
+  await pages[1].waitForFunction(() => [...window.media.room.remoteParticipants.values()].every(participant =>
+    [...participant.videoTrackPublications.values()].filter(publication => publication.source === 'camera').every(publication => !publication.isSubscribed)
+  ))
+  assert.equal(await pages[1].evaluate(() => window.media.receivingCameras), false)
+  assert.ok(await pages[1].evaluate(() => [...window.media.room.remoteParticipants.values()].some(participant =>
+    [...participant.videoTrackPublications.values()].some(publication => publication.source === 'screen_share' && publication.isSubscribed && publication.track)
+  )))
+  assert.ok(await pages[1].evaluate(() => [...window.media.room.remoteParticipants.values()].some(participant =>
+    [...participant.audioTrackPublications.values()].some(publication => publication.source === 'microphone' && publication.isSubscribed && publication.track)
+  )))
+  await pages[1].evaluate(() => window.media.setCameraViewing(true))
+  await pages[1].waitForFunction(() => window.media.receivingCameras && document.getElementById('camera').srcObject && document.getElementById('camera').videoWidth > 0)
+  console.log('PASS hidden cameras unsubscribe and resume without interrupting microphone or screen subscriptions')
+  // Keep viewing enabled but remove its track: readiness must fail closed to JPEG fallback.
+  await pages[1].evaluate(() => {
+    for (const participant of window.media.room.remoteParticipants.values())
+      for (const publication of participant.videoTrackPublications.values())
+        if (publication.source === 'camera') publication.setSubscribed(false)
+  })
+  await pages[1].waitForFunction(() => !window.media.receivingCameras)
+  await pages[1].evaluate(() => { window.media.setCameraViewing(false); window.media.setCameraViewing(true) })
+  await pages[1].waitForFunction(() => window.media.receivingCameras)
+  console.log('PASS missing camera subscription preserves fallback until a live track returns')
   await pages[0].evaluate(() => window.media.stopCamera())
   await pages[1].waitForFunction(() => window.events.some(e=>e.type==='camera'&&!e.active))
   assert.ok(await pages[1].evaluate(() => document.getElementById('screen').videoWidth > 0))
@@ -77,7 +110,9 @@ try {
   console.log('PASS stopping SFU camera preserves screen and original capture for legacy transport')
   await pages[0].evaluate(async () => { await window.media.publishCamera(window.capture.getVideoTracks()[0]); await window.media.disconnect() })
   await pages[1].waitForFunction(() => document.getElementById('camera').srcObject === null)
-  console.log('PASS disconnect clears remote camera')
+  assert.equal(await pages[0].evaluate(() => window.media.cameraPublished), false)
+  assert.equal(await pages[0].evaluate(() => window.media.receivingCameras), false)
+  console.log('PASS disconnect clears remote camera and invalidates SFU readiness')
   await pages[1].evaluate(()=>window.media.disconnect())
   const webVoice = await context.newPage()
   await webVoice.goto(url)
@@ -109,12 +144,39 @@ try {
   const controller = await context.newPage()
   await controller.goto(url)
   await controller.evaluate(async () => {
+    window.levelApi = await import('/bundle.js')
+    window.unmountLevels = window.levelApi.mountVoiceLevelHarness()
+    window.levelApi.setRoomVoiceLevels('overlay-room', {'test-speaker':0.2})
+  })
+  await controller.waitForFunction(() => window.observedVoiceLevel === 0.2)
+  await controller.evaluate(() => {
+    window.levelApi.setSfuVoiceLevels('overlay-room', {'test-speaker':0.7})
+    window.levelApi.setRoomVoiceLevels('overlay-room', {'test-speaker':0})
+  })
+  await controller.waitForFunction(() => window.observedVoiceLevel === 0.7)
+  await controller.evaluate(() => window.levelApi.setSfuVoiceLevels('overlay-room', {}))
+  await controller.waitForFunction(() => window.observedVoiceLevel === 0)
+  await controller.evaluate(() => window.levelApi.setSfuVoiceLevels('overlay-room', {'test-speaker':0.5}))
+  await controller.waitForFunction(() => window.observedVoiceLevel === 0.5)
+  await controller.waitForFunction(() => window.observedVoiceLevel === 0)
+  await controller.evaluate(() => window.unmountLevels())
+  console.log('PASS SFU speaking levels override legacy zeros, clear on fallback, and expire without updates')
+  await controller.evaluate(async () => {
     const { mountCameraHarness } = await import('/bundle.js')
     window.fixture = mountCameraHarness()
     window.realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
     window.sentPackets = 0
     window.cameraFrameTimes = []
-    window.electronVoice = { sendCameraPacket: packet => { window.sentPackets++; const data = Uint8Array.from(atob(packet), c => c.charCodeAt(0)); if (new DataView(data.buffer).getUint16(20) === 0) window.cameraFrameTimes.push(performance.now()) }, onCameraPacket: () => () => {} }
+    window.cameraDemand = true
+    window.encodeCalls = 0
+    const toBlob = HTMLCanvasElement.prototype.toBlob
+    HTMLCanvasElement.prototype.toBlob = function(...args) { window.encodeCalls++; return toBlob.apply(this, args) }
+    window.electronVoice = {
+      sendCameraPacket: packet => { window.sentPackets++; const data = Uint8Array.from(atob(packet), c => c.charCodeAt(0)); if (new DataView(data.buffer).getUint16(20) === 0) window.cameraFrameTimes.push(performance.now()) },
+      onCameraPacket: () => () => {},
+      getMediaDemand: async () => ({voice:false,camera:window.cameraDemand}),
+      onMediaDemand: listener => { window.demandListener = listener; return () => { window.demandListener = null } }
+    }
   })
   await controller.waitForFunction(() => window.cameraControls?.supported)
   await controller.evaluate(() => {
@@ -147,6 +209,16 @@ try {
   })
   assert.ok(fps >= 20 && fps <= 36, `Compatibility camera should target 30 fps, observed ${fps.toFixed(1)}`)
   console.log(`PASS compatibility camera scheduling: ${fps.toFixed(1)} fps with real browser capture/encoding`)
+  await controller.evaluate(() => { window.cameraDemand = false; window.demandListener({voice:true,camera:false}) })
+  await controller.waitForTimeout(150) // Let the current independent JPEG finish.
+  const paused = await controller.evaluate(() => ({packets:window.sentPackets,encodes:window.encodeCalls}))
+  await controller.waitForTimeout(650) // Includes one poll: demand remains false.
+  assert.deepEqual(await controller.evaluate(() => ({packets:window.sentPackets,encodes:window.encodeCalls})), paused)
+  assert.equal(await controller.evaluate(() => window.cameraControls.local.getVideoTracks()[0].readyState), 'live')
+  // An engine lease expiration restores demand through polling even without an event.
+  await controller.evaluate(() => { window.cameraDemand = true })
+  await controller.waitForFunction(count => window.sentPackets > count, paused.packets)
+  console.log('PASS negotiated camera demand pauses JPEG encoding, preserves capture, and resumes on fallback lease expiry')
   await controller.evaluate(() => { window.activeCapture = window.cameraControls.local; window.fixture.unmount() })
   await controller.waitForFunction(() => window.activeCapture.getVideoTracks()[0].readyState === 'ended')
   console.log('PASS real camera sends compatibility packets; unmount releases capture')

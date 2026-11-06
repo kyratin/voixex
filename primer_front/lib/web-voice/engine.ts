@@ -1,9 +1,15 @@
+import { defaultMediaPreferences, mediaPreferenceFlags, type MediaPreferences, type MediaDemand } from "../../../voice-client/src/media-state"
+import { SilenceGate } from "../../../voice-client/src/silence-gate"
 import { NativeMediaSocket, type MediaSocket } from "../native-media-socket"
-import { CAMERA_KIND } from "../camera/protocol"
+import { CAMERA_KIND, CameraAssembler, fragmentCamera, parseCameraFragment } from "../camera/protocol"
+import { MediaSendQueue, type SendWork } from "../../../voice-client/src/media-send-queue"
 import {
   FRAME_MS,
   FRAME_SAMPLES,
   KIND_OPUS2,
+  KIND_MIX3,
+  KIND_MEDIA_STATE,
+  decodeMix3,
   KIND_PCM,
   KIND_PROBE,
   KIND_PROBE_ACK,
@@ -25,7 +31,7 @@ const BITRATE_LOSSY = 24_000
 const BITRATE_BAD = 16_000
 /** No captured frame for this long starts a new talkspurt (mute, gate). */
 const SEND_GAP_MS = 80
-const WS_MAX_BACKLOG = 24 * 1024
+const WS_MAX_BACKLOG = 4 * 1024
 const MIN_TARGET = 2
 const MAX_TARGET = 10
 const DELAY_WINDOW = 100
@@ -79,10 +85,21 @@ export class WebVoiceEngine {
   private seqOut = 1
   private onCameraPacket: ((packet: Uint8Array) => void) | null = null
   private cameraSupported = false
-  private cameraSending = false
+  private demandSupported=false
+  private mediaPreferences=defaultMediaPreferences()
+  private mediaDemand:MediaDemand={voice:true,camera:true}
+  private demandUntil=0
+  private onDemand:((state:MediaDemand)=>void)|null=null
+  private serverBoot=""
+  private lastHelloAt=0
+  private outgoing = new MediaSendQueue()
+  private readonly outgoingCamera = new CameraAssembler(100)
+  private outgoingGeneration = 0
+  private sending: object | null = null
   private onPcm: ((pcm: Int16Array) => void) | null = null
 
   // uplink
+  private readonly silence = new SilenceGate()
   private encoder: AudioEncoder | null = null
   /** Decided once per connection by probing WebCodecs (see prepareUplink). */
   private uplinkCodec: "opus" | "pcm" | "pending" = "pending"
@@ -92,11 +109,13 @@ export class WebVoiceEngine {
   private bitrate = BITRATE_GOOD
   private txFrameNo = 0
   private lastSendMs = 0
-  private pendingFlags = new Map<number, number>()
+  private pendingFlags = new Map<number, { flags: number; createdAt: number }>()
   private uplinkLossPct = 0
 
   // downlink (reorder buffer → decoder → output in order)
   private decoder: AudioDecoder | null = null
+  private mixEpoch=0
+  private mixSwitchFrame=-1
   private pending = new Map<number, Uint8Array>()
   private playing = false
   private nextFrameNo = 0
@@ -105,7 +124,7 @@ export class WebVoiceEngine {
   private firstPendingAtMs = 0
   private concealRun = 0
   /** Output order: "d" waits for the decoder, "g" is a concealed gap. */
-  private slots: Array<"d" | "g"> = []
+  private slots: Array<"d" | "g" | "p"> = []
   private lastPcm: Int16Array | null = null
   private offsets = new Float64Array(DELAY_WINDOW)
   private offsetCount = 0
@@ -128,6 +147,18 @@ export class WebVoiceEngine {
   private rttSamples: number[] = []
   private jitterSamples: number[] = []
 
+  setMediaState(state:Partial<MediaPreferences>){this.mediaPreferences={...this.mediaPreferences,...state};void this.sendMediaPreferences()}
+  setOnMediaDemand(listener:((state:MediaDemand)=>void)|null){this.onDemand=listener;listener?.(this.getMediaDemand())}
+  getMediaDemand():MediaDemand{return performance.now()<this.demandUntil?this.mediaDemand:{voice:true,camera:true}}
+  private notifyMediaDemand(state:MediaDemand){
+    const changed=state.voice!==this.mediaDemand.voice||state.camera!==this.mediaDemand.camera
+    this.mediaDemand=state;if(changed)this.onDemand?.(state)
+  }
+  private async sendMediaPreferences(){
+    if(this.demandUntil&&performance.now()>=this.demandUntil){this.demandUntil=0;this.notifyMediaDemand({voice:true,camera:true})}
+    if(this.demandSupported&&this.connected&&this.roomId)await this.send(KIND_MEDIA_STATE,new Uint8Array([1,mediaPreferenceFlags(this.mediaPreferences)]),true)
+  }
+
   static supported() {
     return typeof AudioEncoder !== "undefined" && typeof AudioDecoder !== "undefined" && typeof WebSocket !== "undefined"
   }
@@ -135,13 +166,12 @@ export class WebVoiceEngine {
   setOnCameraPacket(listener: ((packet: Uint8Array) => void) | null) { this.onCameraPacket = listener }
 
   async sendCameraPacket(data: Uint8Array) {
-    const ws = this.ws, key = this.key, room = this.roomId
-    if (!ws || !key || !room || !this.cameraSupported || this.cameraSending || data.length > 924 || ws.readyState !== 1 || ws.bufferedAmount > 4096) return
-    this.cameraSending = true
-    try {
-      const packet = await encryptPacket(key, this.seqOut++, Date.now(), room, data, CAMERA_KIND)
-      if (this.ws === ws && this.roomId === room && ws.readyState === 1 && ws.bufferedAmount < 4096) await ws.send(packet)
-    } finally { this.cameraSending = false }
+    if (!this.getMediaDemand().camera || !this.ws || !this.key || !this.roomId || !this.cameraSupported || data.length > 924) return
+    const metadata = parseCameraFragment(data)
+    const frame = this.outgoingCamera.push("self", data, Date.now())
+    if (!metadata || !frame) return
+    this.outgoing.pushVideo("self", fragmentCamera(frame, metadata.stream, metadata.frame, metadata.timestamp)
+      .map(fragment => this.mediaWork(CAMERA_KIND, fragment)))
   }
 
   setOnPcm(listener: ((pcm: Int16Array) => void) | null) {
@@ -163,6 +193,7 @@ export class WebVoiceEngine {
   }
 
   private open() {
+    this.resetOutgoing()
     return new Promise<void>((resolve, reject) => {
       const ws: MediaSocket = this.endpoint ? new NativeMediaSocket(this.endpoint) : new WebSocket(this.wsUrl) as unknown as MediaSocket
       ws.binaryType = "arraybuffer"
@@ -171,13 +202,17 @@ export class WebVoiceEngine {
         reject(new Error("Voice connection timed out"))
         ws.close()
       }, 6000)
-      ws.onopen = () => ws.send(bytesOf(`HELLO2 ${this.mediaToken} opus2 camera1`))
+      ws.onopen = () => {this.lastHelloAt=performance.now();ws.send(bytesOf(`HELLO2 ${this.mediaToken} opus2 camera1 mix3 demand2`))}
       ws.onmessage = (event) => {
         const data = new Uint8Array(event.data as ArrayBuffer)
-        if (data.length < 32 && data[0] === 0x48 /* H */) {
+        if (data.length < 128 && data[0] === 0x48 /* H */) {
           const text = textOf(data)
           if (text.startsWith("HELLO_ACK")) {
             this.cameraSupported = text.split(" ").includes("camera1")
+            this.demandSupported=text.split(" ").includes("demand2")
+            const boot=text.split(" ").find(part=>part.startsWith("boot:"))??""
+            if(boot&&boot!==this.serverBoot){this.resetDecoder();this.resetDownlink();this.mixEpoch=0;this.mixSwitchFrame=-1;this.serverBoot=boot}
+            void this.sendMediaPreferences()
             clearTimeout(timer)
             resolve()
           } else if (text === "HELLO_FAIL") {
@@ -230,12 +265,14 @@ export class WebVoiceEngine {
   }
 
   joinRoom(roomId: string) {
+    if(this.roomId!==roomId){this.resetOutgoing();this.resetDecoder();this.mixEpoch=0;this.mixSwitchFrame=-1;this.silence.reset();this.demandUntil=0;this.notifyMediaDemand({voice:true,camera:true})}
     if (this.roomId !== roomId) this.resetDownlink()
     this.roomId = roomId
     this.lastSendMs = 0
   }
 
   leaveRoom() {
+    this.resetOutgoing()
     this.roomId = null
     this.resetDownlink()
   }
@@ -250,6 +287,8 @@ export class WebVoiceEngine {
 
   close() {
     this.closing = true
+    this.resetOutgoing()
+    this.outgoing.close()
     this.connected = false
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     if (this.clockTimer) clearTimeout(this.clockTimer)
@@ -275,7 +314,9 @@ export class WebVoiceEngine {
   /** One 20 ms frame from the microphone. */
   sendPcm16(frame: Int16Array) {
     if (!this.connected || !this.roomId || this.muted || !this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    if(!this.getMediaDemand().voice)return
     const now = performance.now()
+    if (!this.silence.admit(frame, now)) return
     let flags = 0
     if (this.lastSendMs === 0 || now - this.lastSendMs > SEND_GAP_MS) {
       if (this.lastSendMs > 0) this.txFrameNo += Math.max(1, Math.round((now - this.lastSendMs) / FRAME_MS)) - 1
@@ -290,11 +331,15 @@ export class WebVoiceEngine {
       return
     }
     if (this.uplinkCodec !== "opus") return
-    this.pendingFlags.set(frameNo, flags)
     const f32 = new Float32Array(FRAME_SAMPLES)
     for (let i = 0; i < FRAME_SAMPLES; i += 1) f32[i] = (frame[i] ?? 0) / 32768
     const encoder = this.getEncoder()
-    if (!encoder) return
+    if (!encoder || encoder.encodeQueueSize >= 3) return
+    const createdAt = Date.now()
+    for (const [number, pending] of this.pendingFlags) if (createdAt - pending.createdAt > 80) this.pendingFlags.delete(number)
+    // Only a short encoder queue is useful for interactive speech.
+    if (this.pendingFlags.size >= 4) return
+    this.pendingFlags.set(frameNo, { flags, createdAt })
     const data = new AudioData({
       format: "f32",
       sampleRate: SAMPLE_RATE,
@@ -353,6 +398,7 @@ export class WebVoiceEngine {
       /* already closed */
     }
     this.encoder = null
+    this.pendingFlags.clear()
   }
 
   getStats(): WebVoiceStats {
@@ -385,9 +431,9 @@ export class WebVoiceEngine {
     if (this.encoder && this.encoder.state !== "closed") return this.encoder
     try {
       const enc = new AudioEncoder({
-        output: (chunk) => this.onEncoded(chunk),
+        output: (chunk) => { if (this.encoder === enc) this.onEncoded(chunk) },
         // An encoder that errors out once (e.g. a config the platform rejects late) is not retried.
-        error: (e) => this.failOpus(e)
+        error: (e) => { if (this.encoder === enc) this.failOpus(e) }
       })
       enc.configure(this.encoderConfig())
       this.encoder = enc
@@ -405,25 +451,60 @@ export class WebVoiceEngine {
 
   private onEncoded(chunk: EncodedAudioChunk) {
     const frameNo = Math.round(chunk.timestamp / (FRAME_MS * 1000))
-    const flags = this.pendingFlags.get(frameNo) ?? 0
+    const pending = this.pendingFlags.get(frameNo)
     this.pendingFlags.delete(frameNo)
+    if (!pending || Date.now() - pending.createdAt > 80 || !this.roomId || this.muted || !this.getMediaDemand().voice) return
     const data = new Uint8Array(chunk.byteLength)
     chunk.copyTo(data)
-    // WebSocket is reliable: no redundant copies.
-    void this.send(KIND_OPUS2, encodeOpus2(frameNo, flags, [data]))
+    // Reliable transports need no redundant copies; UDP can recover through server PLC.
+    void this.send(KIND_OPUS2, encodeOpus2(frameNo, pending.flags, [data]), false, pending.createdAt)
   }
 
-  private async send(kind: number, payload: Uint8Array, control = false) {
-    const ws = this.ws
-    if (!ws || ws.readyState !== WebSocket.OPEN || !this.key) return
-    if (!control && ws.bufferedAmount > WS_MAX_BACKLOG) return
-    const packet = await encryptPacket(this.key, this.seqOut++, Date.now(), this.roomId ?? "", payload, kind)
-    if (ws.readyState !== WebSocket.OPEN) return
-    ws.send(packet)
-    this.txPackets += 1
+  private resetOutgoing() {
+    this.outgoingGeneration++
+    this.outgoing.close()
+    this.outgoing = new MediaSendQueue()
+    this.outgoingCamera.clear()
+    this.pendingFlags.clear()
+  }
+
+  private async send(kind: number, payload: Uint8Array, control = false, createdAt = Date.now()) {
+    if (!this.ws || !this.key || this.closing) return
+    this.outgoing.push(this.mediaWork(kind, payload.slice(), control, createdAt), control)
+  }
+
+  private mediaWork(kind: number, payload: Uint8Array, control = false, createdAt = Date.now()): SendWork {
+    const generation = this.outgoingGeneration, room = this.roomId ?? ""
+    return { bytes: payload.length + 80, createdAt, send: () => {
+      if (generation !== this.outgoingGeneration || this.closing) return true
+      if ((kind === KIND_PCM || kind === KIND_OPUS2) && (this.muted || !this.getMediaDemand().voice)) return true
+      if (kind === CAMERA_KIND && !this.getMediaDemand().camera) return true
+      const ws = this.ws, key = this.key
+      const limit = control ? 64 * 1024 : kind === CAMERA_KIND ? 2 * 1024 : WS_MAX_BACKLOG
+      if (this.sending || !ws || !key || ws.readyState !== 1 || ws.bufferedAmount > limit) return false
+      const flight = {}
+      this.sending = flight
+      // Serialize WebCrypto and native writes so packet sequence matches wire order.
+      void (async () => {
+        const packet = await encryptPacket(key, this.seqOut++, Date.now(), room, payload, kind)
+        if (generation !== this.outgoingGeneration || this.ws !== ws || ws.readyState !== 1 || this.closing || Date.now() - createdAt > (control ? 250 : kind === CAMERA_KIND ? 100 : 80)) return
+        if ((kind === KIND_PCM || kind === KIND_OPUS2) && (this.muted || !this.getMediaDemand().voice)) return
+        if (kind === CAMERA_KIND && !this.getMediaDemand().camera) return
+        await ws.send(packet)
+        this.txPackets++
+      })().catch(() => {
+        if (this.ws === ws) ws.close()
+      }).finally(() => {
+        if (this.sending === flight) this.sending = null
+        this.outgoing.drain()
+      })
+      return true
+    }}
   }
 
   private async sendProbe() {
+    if(this.ws?.readyState===1&&performance.now()-this.lastHelloAt>=5000){this.lastHelloAt=performance.now();this.ws.send(bytesOf(`HELLO2 ${this.mediaToken} opus2 camera1 mix3 demand2`))}
+    await this.sendMediaPreferences()
     const exp = this.rxLoss.expected
     const lossPct = exp > 0 ? (Math.max(0, exp - this.rxLoss.received) * 100) / exp : 0
     this.rxLoss = { expected: 0, received: 0, highest: this.rxLoss.highest }
@@ -437,6 +518,10 @@ export class WebVoiceEngine {
     this.rxPackets += 1
     if (packet.roomId !== this.roomId && packet.kind === CAMERA_KIND) return
     if (packet.kind === CAMERA_KIND) { this.onCameraPacket?.(packet.payload); return }
+    if(packet.kind===KIND_MEDIA_STATE){
+      if(this.demandSupported&&packet.roomId===this.roomId&&packet.payload.length===2&&packet.payload[0]===1){this.demandUntil=performance.now()+3000;this.notifyMediaDemand({voice:(packet.payload[1]&1)!==0,camera:(packet.payload[1]&2)!==0})}
+      return
+    }
     if (packet.kind === KIND_PROBE_ACK) {
       const ack = decodeProbe(packet.payload)
       if (!ack) return
@@ -448,9 +533,25 @@ export class WebVoiceEngine {
       this.adaptUplink(ack.report.lossPermille / 10)
       return
     }
-    if (packet.kind !== KIND_OPUS2) return
-    const opus = decodeOpus2(packet.payload)
-    if (!opus) return
+    if(packet.kind!==KIND_OPUS2&&packet.kind!==KIND_MIX3)return
+    if(packet.roomId!==this.roomId)return
+    const shared=packet.kind===KIND_MIX3?decodeMix3(packet.payload):null
+    let opus=shared??(packet.kind===KIND_OPUS2?decodeOpus2(packet.payload):null)
+    if(!opus)return
+    const epoch=shared?.epoch??0,primaryFrame=opus.frames[0].frameNo
+    if(epoch!==this.mixEpoch){
+      if(primaryFrame<=this.mixSwitchFrame)return
+      this.resetDecoder();this.resetDownlink()
+      const decoder=this.getDecoder()
+      try {
+        if(decoder)for(const frame of opus.frames.slice(1).reverse()){
+          this.slots.push("p")
+          decoder.decode(new EncodedAudioChunk({type:"key",timestamp:frame.frameNo*FRAME_MS*1000,data:frame.data}))
+        }
+      } catch { this.resetDecoder();return }
+      this.mixEpoch=epoch;this.mixSwitchFrame=primaryFrame
+      opus={flags:opus.flags|OPUS2_FLAG_TALKSPURT,frames:[opus.frames[0]]}
+    }
     const now = performance.now()
     const primary = opus.frames[0].frameNo
     const loss = this.rxLoss
@@ -590,8 +691,9 @@ export class WebVoiceEngine {
     if (this.decoder && this.decoder.state !== "closed") return this.decoder
     try {
       const dec = new AudioDecoder({
-        output: (audio) => this.onDecoded(audio),
+        output: (audio) => { if(this.decoder!==dec)audio.close();else this.onDecoded(audio) },
         error: () => {
+          if(this.decoder!==dec)return
           // A broken decoder loses its queued frames: drop their slots and start a fresh one.
           this.decoder = null
           this.slots = this.slots.filter((s) => s === "g")
@@ -607,6 +709,7 @@ export class WebVoiceEngine {
   }
 
   private onDecoded(audio: AudioData) {
+    if(this.slots[0]==="p"){this.slots.shift();audio.close();this.flushGaps();return}
     const f32 = new Float32Array(audio.numberOfFrames)
     try {
       audio.copyTo(f32, { planeIndex: 0, format: "f32-planar" })
@@ -639,6 +742,12 @@ export class WebVoiceEngine {
 
   private emit(pcm: Int16Array) {
     if (!this.deafened) this.onPcm?.(pcm)
+  }
+
+  private resetDecoder(){
+    const decoder=this.decoder;this.decoder=null
+    if(decoder&&decoder.state!=="closed")decoder.close()
+    this.slots=[]
   }
 
   private resetDownlink() {

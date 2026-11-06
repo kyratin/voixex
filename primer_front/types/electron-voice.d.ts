@@ -80,6 +80,9 @@ declare global {
       ) => Promise<{ ref: string; publicKey: string; certificate: VoixexServerCertificate; server: VoixexIdentityServerInfo }>
     }
     electronVoice?: {
+      setMediaState?: (state: { voice?: boolean; camera?: boolean; sfuCamera?: boolean; publishingCamera?: boolean; sfuPublishingCamera?: boolean }) => void
+      getMediaDemand?: () => Promise<{ voice: boolean; camera: boolean }>
+      onMediaDemand?: (listener: (state: { voice: boolean; camera: boolean }) => void) => () => void
       /** macOS 10.15+: triggers system mic permission dialog from the main process (required alongside Info.plist). */
       requestMicrophoneAccess?: () => Promise<{ granted: boolean }>
       /** apiBase: used by the Android app, whose voice goes over WebSocket to the API host. */

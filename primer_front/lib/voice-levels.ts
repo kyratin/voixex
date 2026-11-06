@@ -9,11 +9,15 @@ import { useSyncExternalStore } from "react"
  */
 const byRoom = new Map<string, Record<string, number>>()
 const levels = new Map<string, number>()
+const sfuByRoom = new Map<string, Record<string, number>>()
+const sfuTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const listeners = new Set<() => void>()
 
 function rebuild() {
   levels.clear()
   for (const room of byRoom.values()) for (const [id, level] of Object.entries(room)) levels.set(id, level)
+  // SFU values override server zeros while compatibility audio is intentionally suspended.
+  for (const room of sfuByRoom.values()) for (const [id, level] of Object.entries(room)) levels.set(id, level)
   for (const l of listeners) l()
 }
 
@@ -32,6 +36,18 @@ export function setRoomVoiceLevels(roomId: string, next: Record<string, number>)
 export function clearVoiceLevels() {
   if (byRoom.size === 0) return
   byRoom.clear()
+  rebuild()
+}
+
+/** Independent short lease: SFU activity must not erase legacy levels or freeze after a disconnect. */
+export function setSfuVoiceLevels(roomId: string, next: Record<string, number>) {
+  const timer = sfuTimers.get(roomId)
+  if (timer) clearTimeout(timer)
+  sfuTimers.delete(roomId)
+  if (Object.keys(next).length) {
+    sfuByRoom.set(roomId, Object.fromEntries(Object.entries(next).map(([id, level]) => [id, Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 0])))
+    sfuTimers.set(roomId, setTimeout(() => { sfuByRoom.delete(roomId); sfuTimers.delete(roomId); rebuild() }, 500))
+  } else sfuByRoom.delete(roomId)
   rebuild()
 }
 

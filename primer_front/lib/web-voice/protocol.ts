@@ -8,6 +8,8 @@ export const KIND_PCM = 0
 export const KIND_OPUS2 = 3
 export const KIND_PROBE = 4
 export const KIND_PROBE_ACK = 5
+export const KIND_MIX3 = 7
+export const KIND_MEDIA_STATE = 8
 
 export const FRAME_MS = 20
 export const SAMPLE_RATE = 48_000
@@ -104,12 +106,12 @@ export function encodeOpus2(frameNo: number, flags: number, frames: Uint8Array[]
   return out
 }
 
-export function decodeOpus2(payload: Uint8Array): { flags: number; frames: Array<{ frameNo: number; data: Uint8Array }> } | null {
+export function decodeOpus2(payload: Uint8Array, maxFrames = 4): { flags: number; frames: Array<{ frameNo: number; data: Uint8Array }> } | null {
   if (payload.length < 6) return null
   const v = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
   const frameNo = v.getUint32(0)
   const count = payload[5]
-  if (count === 0 || count > 4) return null
+  if (count === 0 || count > maxFrames) return null
   const frames: Array<{ frameNo: number; data: Uint8Array }> = []
   let off = 6
   for (let i = 0; i < count; i += 1) {
@@ -145,3 +147,9 @@ export function decodeProbe(payload: Uint8Array): { clientMs: number; report: Li
 
 export const textOf = (data: Uint8Array) => decoder.decode(data)
 export const bytesOf = (text: string) => encoder.encode(text)
+
+export function decodeMix3(payload: Uint8Array) {
+  if(payload.length<4)return null
+  const packet=decodeOpus2(payload.subarray(4),5)
+  return packet?{epoch:new DataView(payload.buffer,payload.byteOffset,4).getUint32(0),...packet}:null
+}

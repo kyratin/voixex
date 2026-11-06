@@ -1,4 +1,8 @@
-import { CAMERA_KIND } from "./camera-protocol.js"
+import { defaultMediaPreferences, mediaPreferenceFlags, type MediaPreferences, type MediaDemand } from "./media-state.js"
+export type { MediaPreferences, MediaDemand } from "./media-state.js"
+import { SilenceGate } from "./silence-gate.js"
+import { CAMERA_KIND, CameraAssembler, fragmentCamera, parseCameraFragment } from "./camera-protocol.js"
+import { MediaSendQueue, type SendWork } from "./media-send-queue.js"
 import dgram from "node:dgram"
 import net from "node:net"
 import { OpusCodec as OpusScript } from "./opus-codec.js"
@@ -8,6 +12,9 @@ import {
   FRAME_SAMPLES,
   KIND_OPUS,
   KIND_OPUS2,
+  KIND_MIX3,
+  KIND_MEDIA_STATE,
+  decodeMix3,
   KIND_PCM,
   KIND_PROBE,
   KIND_PROBE_ACK,
@@ -62,7 +69,7 @@ const BITRATE_BAD = 16_000
 const SEND_GAP_MS = 80
 /** How long to wait for an "opus2" HELLO_ACK before falling back to the original protocol. */
 const HELLO2_WAIT_MS = 1200
-const TCP_MAX_BACKLOG_BYTES = 16 * 1024
+const TCP_MAX_BACKLOG_BYTES = 4 * 1024
 /** In a row of packets that all look like replays: the server started a new session (restart, new endpoint). */
 const STALE_RUN_RESET = 25
 
@@ -81,6 +88,8 @@ export class VoiceEngine {
   private tcpSocket: net.Socket | null = null
   private tcpReadBuf: Buffer = Buffer.alloc(0)
   private readonly key: Buffer
+  private outgoing = new MediaSendQueue()
+  private readonly outgoingCamera = new CameraAssembler(100)
   private seqOut = 1
   private connected = false
   private closing = false
@@ -109,6 +118,7 @@ export class VoiceEngine {
   private readonly replay = new ReplayWindow()
 
   // Uplink
+  private readonly silence = new SilenceGate()
   private encoder: OpusCodec | null = null
   private bitrate = BITRATE_GOOD
   private redundancy = 1
@@ -120,6 +130,8 @@ export class VoiceEngine {
   // Downlink
   private decoder: OpusCodec | null = null
   private readonly stream = new SpeakerStream(() => this.getDecoder())
+  private mixEpoch = 0
+  private mixSwitchFrame = -1
   private rxLoss = { expected: 0, received: 0, highest: -1 }
   private lastLegacyArrivalMs = 0
 
@@ -141,6 +153,12 @@ export class VoiceEngine {
   private onPcm16Frame: ((frame: Buffer) => void) | null = null
   private onCameraPacket: ((packet: Buffer) => void) | null = null
   private cameraSupported = false
+  private demandSupported=false
+  private mediaPreferences=defaultMediaPreferences()
+  private mediaDemand:MediaDemand={voice:true,camera:true}
+  private demandUntil=0
+  private onDemand:((state:MediaDemand)=>void)|null=null
+  private serverBoot=""
   private onScreenChunk: ((chunk: Buffer) => void) | null = null
 
   constructor(opts: VoiceClientOptions) {
@@ -152,9 +170,27 @@ export class VoiceEngine {
     this.transport = opts.transport ?? "udp"
   }
 
+  setMediaState(state: Partial<MediaPreferences>) {
+    this.mediaPreferences={...this.mediaPreferences,...state}
+    this.sendMediaPreferences()
+  }
+  setOnMediaDemand(listener:((state:MediaDemand)=>void)|null){this.onDemand=listener;listener?.(this.getMediaDemand())}
+  getMediaDemand():MediaDemand{return Date.now()<this.demandUntil?this.mediaDemand:{voice:true,camera:true}}
+  private notifyMediaDemand(state:MediaDemand){
+    const changed=state.voice!==this.mediaDemand.voice||state.camera!==this.mediaDemand.camera
+    this.mediaDemand=state
+    if(changed)this.onDemand?.(state)
+  }
+  private sendMediaPreferences(){
+    if(this.demandUntil&&Date.now()>=this.demandUntil){this.demandUntil=0;this.notifyMediaDemand({voice:true,camera:true})}
+    if(this.demandSupported&&this.connected&&this.roomId)this.sendMedia(KIND_MEDIA_STATE,Buffer.from([1,mediaPreferenceFlags(this.mediaPreferences)]),true)
+  }
+
   async connect() {
     if (this.connected) return
     this.closing = false
+    this.outgoing.close()
+    this.outgoing = new MediaSendQueue()
     this.helloConfirmed = false
     if (this.transport === "udp") {
       const socket = dgram.createSocket({ type: "udp4", recvBufferSize: 1 << 20, sendBufferSize: 1 << 20 })
@@ -208,11 +244,13 @@ export class VoiceEngine {
   sendPcm16Frame(frame: Buffer) {
     if (!this.connected || !this.roomId || this.muted) return
     this.keepHelloFresh()
+    if(!this.getMediaDemand().voice)return
     if (!this.opus2) {
-      this.sendPacket(this.encrypt(this.roomId, frame, KIND_PCM))
+      this.sendMedia(KIND_PCM,frame)
       return
     }
     const now = Date.now()
+    if (!this.silence.admit(frame.byteOffset%2 ? Int16Array.from({length:Math.floor(frame.length/2)},(_,i)=>frame.readInt16LE(i*2)) : new Int16Array(frame.buffer, frame.byteOffset, Math.floor(frame.length / 2)), now)) return
     let flags = 0
     if (this.lastSendMs === 0 || now - this.lastSendMs > SEND_GAP_MS) {
       // Keep frame numbers in step with time across a pause, so the server's buffer sizing
@@ -231,27 +269,33 @@ export class VoiceEngine {
     const frameNo = this.txFrameNo++
     const payload = encodeOpus2(frameNo, flags, [encoded, ...this.recentEncoded.slice(0, this.transport !== "udp" ? 0 : this.redundancy)])
     this.recentEncoded = [encoded, ...this.recentEncoded].slice(0, 3)
-    this.sendPacket(this.encrypt(this.roomId, payload, KIND_OPUS2))
+    this.sendMedia(KIND_OPUS2,payload,false,now)
   }
 
   /** Pre-encoded Opus from the renderer (old path). With opus2 servers the engine encodes itself. */
   sendOpusFrame(packetPayload: Buffer) {
     if (!this.connected || !this.roomId || this.muted) return
     this.keepHelloFresh()
-    this.sendPacket(this.encrypt(this.roomId, packetPayload, KIND_OPUS))
+    this.sendMedia(KIND_OPUS,packetPayload)
   }
 
   setOnCameraPacket(listener: ((packet: Buffer) => void) | null) { this.onCameraPacket = listener }
 
   sendCameraPacket(packet: Buffer) {
+    if(!this.getMediaDemand().camera)return
     if (!this.connected || !this.roomId || !this.cameraSupported || packet.length > 924) return
-    this.sendPacket(this.encrypt(this.roomId, packet, CAMERA_KIND))
+    const metadata = parseCameraFragment(packet)
+    const frame = this.outgoingCamera.push("self", packet, Date.now())
+    if (!metadata || !frame) return
+    const room = this.roomId
+    this.outgoing.pushVideo("self", fragmentCamera(frame, metadata.stream, metadata.frame, metadata.timestamp)
+      .map(fragment => this.mediaWork(room, CAMERA_KIND, Buffer.from(fragment))))
   }
 
   sendScreenChunk(chunk: Buffer) {
     if (!this.connected || !this.roomId) return
     this.keepHelloFresh()
-    this.sendPacket(this.encrypt(this.roomId, chunk, KIND_SCREEN))
+    this.outgoing.pushVideo("screen", [this.mediaWork(this.roomId, KIND_SCREEN, Buffer.from(chunk))])
   }
 
   /** A fresh token from the server (same key); used for HELLO from now on. */
@@ -261,6 +305,8 @@ export class VoiceEngine {
 
   close() {
     this.closing = true
+    this.outgoing.close()
+    this.outgoingCamera.clear()
     this.stopSelfTestTone()
     for (const t of [this.probeTimer, this.playoutTimer, this.tcpReconnectTimer]) if (t) clearTimeout(t)
     this.probeTimer = null
@@ -384,6 +430,10 @@ export class VoiceEngine {
   }
 
   private resetStreams() {
+    this.outgoing.close();this.outgoing=new MediaSendQueue();this.outgoingCamera.clear()
+    this.resetMixDecoder();this.mixEpoch=0;this.mixSwitchFrame=-1
+    this.demandUntil=0;this.notifyMediaDemand({voice:true,camera:true})
+    this.silence.reset()
     this.lastSendMs = 0
     this.recentEncoded = []
     this.rxLoss = { expected: 0, received: 0, highest: -1 }
@@ -391,6 +441,7 @@ export class VoiceEngine {
 
   /** The server's side starts over: forget its packet and frame numbers. */
   private restartDownlink() {
+    this.resetMixDecoder();this.mixEpoch=0;this.mixSwitchFrame=-1
     this.replay.reset()
     this.staleRun = 0
     this.lastSeqIn = 0
@@ -460,6 +511,7 @@ export class VoiceEngine {
     if (this.probeTimer) return
     const tick = () => {
       this.probeTimer = setTimeout(tick, 1000)
+      this.sendMediaPreferences()
       if (!this.connected) return
       this.keepHelloFresh()
       if (this.opus2) {
@@ -469,12 +521,12 @@ export class VoiceEngine {
           jitterMs: this.stream.jitter,
           bufferMs: this.stream.targetFrames * FRAME_MS
         })
-        this.sendPacket(this.encrypt(this.roomId ?? "", probe, KIND_PROBE), true)
+        this.sendMedia(KIND_PROBE,probe,true)
         // Loss is reported per second; start a fresh window.
         this.rxLoss = { expected: 0, received: 0, highest: this.rxLoss.highest }
       } else if (this.roomId) {
         // Original keepalive: the server answers with an empty frame echoing our timestamp.
-        this.sendPacket(this.encrypt(this.roomId, Buffer.alloc(FRAME_SAMPLES * 2), KIND_PCM))
+        this.sendMedia(KIND_PCM,Buffer.alloc(FRAME_SAMPLES * 2))
       }
     }
     this.probeTimer = setTimeout(tick, 200)
@@ -485,7 +537,7 @@ export class VoiceEngine {
   }
 
   private helloText() {
-    return this.offerOpus2 ? `HELLO2 ${this.mediaToken} opus2 camera1` : `HELLO ${this.mediaToken}`
+    return this.offerOpus2 ? `HELLO2 ${this.mediaToken} opus2 camera1 mix3 demand2` : `HELLO ${this.mediaToken}`
   }
 
   private sendHello() {
@@ -511,6 +563,10 @@ export class VoiceEngine {
       const text = buf.toString()
       if (text.startsWith("HELLO_ACK")) {
         this.cameraSupported = text.split(" ").includes("camera1")
+        this.demandSupported=text.split(" ").includes("demand2")
+        const boot=text.split(" ").find(part=>part.startsWith("boot:"))??""
+        if(boot&&boot!==this.serverBoot){this.restartDownlink();this.serverBoot=boot}
+        this.sendMediaPreferences()
         this.opus2 = text.includes("opus2")
         this.markHelloConfirmed()
         return
@@ -546,6 +602,14 @@ export class VoiceEngine {
         return this.onProbeAck(frame)
       case KIND_OPUS2:
         return this.onOpus2(frame)
+      case KIND_MIX3:
+        return this.onMix3(frame)
+      case KIND_MEDIA_STATE:
+        if(this.demandSupported&&frame.roomId===this.roomId&&frame.payload.length===2&&frame.payload[0]===1){
+          this.demandUntil=Date.now()+3000
+          this.notifyMediaDemand({voice:(frame.payload[1]&1)!==0,camera:(frame.payload[1]&2)!==0})
+        }
+        return
       case KIND_PCM:
         if (frame.payload.length === 0) {
           // Old servers echo our timestamp in an empty frame: that is a real round trip.
@@ -569,8 +633,36 @@ export class VoiceEngine {
   }
 
   private onOpus2(frame: DecryptedPacket) {
+    if (frame.roomId !== this.roomId) return
     const packet = decodeOpus2(frame.payload)
     if (!packet) return
+    if(this.mixEpoch){
+      if(packet.frames[0].frameNo<=this.mixSwitchFrame)return
+      this.resetMixDecoder();this.mixEpoch=0;this.mixSwitchFrame=packet.frames[0].frameNo
+    }
+    this.acceptNumbered(packet)
+  }
+
+  private resetMixDecoder() {
+    this.stream.reset()
+    this.decoder?.delete();this.decoder=null
+  }
+
+  private onMix3(frame: DecryptedPacket) {
+    if(frame.roomId!==this.roomId)return
+    const packet=decodeMix3(frame.payload)
+    if(!packet)return
+    const primary=packet.frames[0].frameNo
+    if(packet.epoch!==this.mixEpoch){
+      if(primary<=this.mixSwitchFrame)return
+      this.resetMixDecoder()
+      try { for(const f of packet.frames.slice(1).reverse())this.getDecoder().decode(f.data) } catch { this.resetMixDecoder();return }
+      this.mixEpoch=packet.epoch;this.mixSwitchFrame=primary
+      this.acceptNumbered({flags:packet.flags|OPUS2_FLAG_TALKSPURT,frames:[packet.frames[0]]})
+    }else this.acceptNumbered(packet)
+  }
+
+  private acceptNumbered(packet: NonNullable<ReturnType<typeof decodeOpus2>>) {
     const now = Date.now()
     const primary = packet.frames[0].frameNo
     const loss = this.rxLoss
@@ -659,20 +751,32 @@ export class VoiceEngine {
     })
   }
 
-  private sendPacket(packet: Buffer, control = false) {
-    if (this.transport === "udp") {
-      this.udp?.send(packet, this.port, this.host)
-    } else if (this.transport === "ws") {
-      if (this.ws?.readyState !== 1 || (!control && this.ws.bufferedAmount > TCP_MAX_BACKLOG_BYTES)) return
-      this.ws.send(packet)
-    } else {
-      const sock = this.tcpSocket
-      if (!sock || sock.destroyed) return
-      // A congested TCP link: skip audio rather than build up seconds of delay.
-      if (!control && sock.writableLength > TCP_MAX_BACKLOG_BYTES) return
-      sock.write(frameTcp(packet))
-    }
-    this.txPackets += 1
+  private sendMedia(kind: number, payload: Buffer, control = false, createdAt = Date.now()) {
+    this.outgoing.push(this.mediaWork(this.roomId ?? "", kind, Buffer.from(payload), control, createdAt), control)
+  }
+
+  private mediaWork(room: string, kind: number, payload: Buffer, control = false, createdAt = Date.now()): SendWork {
+    return { bytes: payload.length + 80, createdAt, send: () => {
+      // Allocate the encrypted sequence only after admission, in actual transport order.
+      if ((this.roomId ?? "") !== room || this.closing) return true
+      if ((kind === KIND_PCM || kind === KIND_OPUS || kind === KIND_OPUS2) && (this.muted || !this.getMediaDemand().voice)) return true
+      if (kind === CAMERA_KIND && !this.getMediaDemand().camera) return true
+      const limit = control ? 64 * 1024 : (kind === CAMERA_KIND || kind === KIND_SCREEN) ? 2 * 1024 : TCP_MAX_BACKLOG_BYTES
+      if (this.transport === "udp") {
+        if (!this.udp) return false
+        if (this.udp.getSendQueueSize() > (control ? 128 : 64) * 1024) return false
+        this.udp.send(this.encrypt(room, payload, kind), this.port, this.host, () => {})
+      } else if (this.transport === "ws") {
+        if (this.ws?.readyState !== 1 || this.ws.bufferedAmount > limit) return false
+        this.ws.send(this.encrypt(room, payload, kind))
+      } else {
+        const socket = this.tcpSocket
+        if (!socket || socket.destroyed || socket.writableLength > limit) return false
+        socket.write(frameTcp(this.encrypt(room, payload, kind)))
+      }
+      this.txPackets += 1
+      return true
+    }}
   }
 
   private async connectWebSocket() {
