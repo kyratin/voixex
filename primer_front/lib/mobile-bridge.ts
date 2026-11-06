@@ -54,12 +54,13 @@ function installShell() {
 
 /** Native screen capture published to LiveKit (the WebView has no getDisplayMedia). */
 const VoixexScreenShare = registerPlugin<{
-  start(options: NativeScreenShareOptions): Promise<{ started: boolean; reason?: string }>
+  start(options: NativeScreenShareOptions): Promise<{ started: boolean; reason?: string; audioStarted?: boolean; audioReason?: string }>
   stop(): Promise<void>
-  addListener(event: "stopped", listener: () => void): Promise<{ remove: () => Promise<void> }>
+  addListener(event: "stopped" | "audioStopped", listener: () => void): Promise<{ remove: () => Promise<void> }>
 }>("VoixexScreenShare")
 
 type NativeScreenShareOptions = {
+  withAudio?: boolean
   url: string
   token: string
   /** Short side of the picture (1080 = 1080p, upright or sideways). */
@@ -83,6 +84,12 @@ export function onNativeScreenShareStopped(listener: () => void) {
   return () => {
     void handle.then((h) => h.remove())
   }
+}
+
+/** Android stopped only its playback capture; the screen video can continue. */
+export function onNativeScreenShareAudioStopped(listener: () => void) {
+  const handle = VoixexScreenShare.addListener("audioStopped", listener)
+  return () => { void handle.then(h => h.remove()) }
 }
 
 /** Android app: turn the screen sideways for a maximized stream, or give rotation back. */

@@ -56,3 +56,9 @@ const electronVoice = {
 }
 
 contextBridge.exposeInMainWorld("electronVoice", electronVoice)
+
+contextBridge.exposeInMainWorld("voixexWindow", {
+  platform: process.platform,
+  customTitleBar: true,
+  systemAudioExclusionSupported: process.argv.includes("--voixex-system-audio-exclusion=supported")
+})

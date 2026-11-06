@@ -4,6 +4,8 @@ import android.app.PictureInPictureParams;
 import android.app.RemoteAction;
 import android.content.res.Configuration;
 import android.graphics.drawable.Icon;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Rational;
@@ -20,6 +22,12 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(VoixexMediaPlugin.class);
         registerPlugin(VoixexScreenSharePlugin.class);
         super.onCreate(savedInstanceState);
+        // Calls and received screen audio must never be captured into another screen share.
+        // This policy only covers our UID; other apps keep their own capture permissions.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            AudioManager audioManager = getSystemService(AudioManager.class);
+            if (audioManager != null) audioManager.setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_NONE);
+        }
     }
 
     @Override

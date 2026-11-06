@@ -1,10 +1,11 @@
 "use client"
 
 // Android app: installs the voice/identity bridges before anything reads them.
-import { onNativeScreenShareStopped, setScreenOrientation, startNativeScreenShare, stopNativeScreenShare } from "@/lib/mobile-bridge"
+import { onNativeScreenShareAudioStopped, onNativeScreenShareStopped, setScreenOrientation, startNativeScreenShare, stopNativeScreenShare } from "@/lib/mobile-bridge"
 import { VoiceActivityDetector, setLocalVoiceActivity, resetLocalVoiceActivity } from "@/lib/voice-activity"
 import { useCamera } from "@/lib/camera/use-camera"
 import { setSfuVoiceLevels } from "@/lib/voice-levels"
+import { captureScreenWithIsolatedAudio } from "@/lib/screen-capture"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useExitSnapshot } from "@/lib/use-exit-snapshot"
@@ -3246,10 +3247,14 @@ export default function VoIPApp() {
   // Android ended the capture (notification, quick settings): stop sharing here too.
   useEffect(() => {
     if (!isMobileApp) return
-    return onNativeScreenShareStopped(() => {
+    const stop = onNativeScreenShareStopped(() => {
       if (isScreenSharingRef.current) void stopScreenShareRef.current()
     })
-  }, [isMobileApp])
+    const audioStop = onNativeScreenShareAudioStopped(() => {
+      if (isScreenSharingRef.current) toast.warning(t("notices.screenAudioUnavailable"))
+    })
+    return () => { stop(); audioStop() }
+  }, [isMobileApp, t])
 
   /** Phone: capture natively and publish as "<clientId>:screen" in the same LiveKit room. */
   const startMobileScreenShare = async () => {
@@ -3266,12 +3271,14 @@ export default function VoIPApp() {
       maxHeight: Number.isFinite(heightRaw) ? heightRaw : 1080,
       fps: screenFps,
       bitrateKbps: screenBitrateKbps,
-      content: screenContent
+      content: screenContent,
+      withAudio: screenShareWithAudioRef.current
     })
     if (!result.started) {
       if (result.reason === "denied") return
       throw new Error(result.reason || t("notices.toggleScreenShareFailed"))
     }
+    if (screenShareWithAudioRef.current && !result.audioStarted) toast.warning(t("notices.screenAudioUnavailable"))
     setIsScreenSharing(true)
     isScreenSharingRef.current = true
     getVoiceWsClientRef.current().setScreenShare(true)
@@ -3309,14 +3316,7 @@ export default function VoIPApp() {
       width: { ideal: targetWidth, max: targetWidth },
       height: { ideal: targetHeight, max: targetHeight }
     }
-    let stream: MediaStream
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: wantAudio })
-    } catch (e) {
-      // System audio capture is not available everywhere: share the picture without it.
-      if (!wantAudio) throw e
-      stream = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: false })
-    }
+    const stream = await captureScreenWithIsolatedAudio(videoConstraints, wantAudio)
     if (wantAudio && stream.getAudioTracks().length === 0) toast.warning(t("notices.screenAudioUnavailable"))
     if (!wantAudio) {
       for (const track of stream.getAudioTracks()) {

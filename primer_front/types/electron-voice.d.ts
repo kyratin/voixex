@@ -56,7 +56,7 @@ export type VoixexShell = {
 declare global {
   interface Window {
     /** Desktop window info; customTitleBar = the system title bar is hidden and the UI draws one. */
-    voixexWindow?: { platform: string; customTitleBar: boolean }
+    voixexWindow?: { platform: string; customTitleBar: boolean; systemAudioExclusionSupported?: boolean }
     /**
      * The app around the UI: tray / call notification and the minimized call view.
      * Desktop: tray icon + a small always-on-top window. Android: call notification + picture-in-picture.

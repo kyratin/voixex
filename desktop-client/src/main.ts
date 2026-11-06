@@ -6,8 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { IdentityStore, type IdentityMeta, type IdentityServerInfo, type ServerCertificate } from "./identity-store.js"
 import { VoiceService } from "./voice-service.js"
 import { createShell } from "./shell.js"
+import { supportsSystemAudioExclusion } from "./screen-capture-policy.js"
 
 const voice = new VoiceService()
+const audioExclusionArgument = supportsSystemAudioExclusion(process.platform, release(), process.versions.electron)
+  ? "--voixex-system-audio-exclusion=supported" : "--voixex-system-audio-exclusion=unsupported"
 let preferredScreenSourceId: string | null = null
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
 const BUNDLED_UI_SCHEME = "app"
@@ -184,6 +187,7 @@ function createWindow() {
     webPreferences: {
       preload: join(__dirname, "../preload.cjs"),
       contextIsolation: true,
+      additionalArguments: [audioExclusionArgument],
       nodeIntegration: false,
       backgroundThrottling: false
     }
@@ -202,6 +206,7 @@ function createWindow() {
       ...customTitleBar,
       webPreferences: {
         contextIsolation: true,
+        additionalArguments: [audioExclusionArgument],
         nodeIntegration: false,
         backgroundThrottling: false
       }
@@ -247,7 +252,7 @@ function miniWindowOptions(): Electron.BrowserWindowConstructorOptions {
     minimizable: false,
     fullscreenable: false,
     backgroundColor: "#0f0f14",
-    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false }
+    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, additionalArguments: [audioExclusionArgument] }
   }
 }
 

@@ -69,7 +69,7 @@ const voixexIdentity = {
 
 contextBridge.exposeInMainWorld("electronVoice", electronVoice)
 /** Lets the UI draw its own title bar where the system one is hidden (Windows/Linux). */
-contextBridge.exposeInMainWorld("voixexWindow", { platform: process.platform, customTitleBar: true })
+contextBridge.exposeInMainWorld("voixexWindow", { platform: process.platform, customTitleBar: true, systemAudioExclusionSupported: process.argv.includes("--voixex-system-audio-exclusion=supported") })
 
 /** Tray, close-to-tray and the mini call window (see src/shell.ts). */
 contextBridge.exposeInMainWorld("voixexShell", {

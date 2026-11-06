@@ -375,7 +375,7 @@ export const ru: TranslationDict = {
     serverTooOldForChannelRules: "Правилам каналов нужен сервер новее (0.6.4+)",
     aiNoiseFailed: "ИИ-шумоподавление не запустилось, используются обычные настройки.",
     screenAudioPublishFailed: "Звук трансляции не удалось отправить в LiveKit ({error}): зрители с телефонов его не услышат.",
-    screenAudioUnavailable: "Системный звук на этом компьютере захватить не удалось: зрители увидят экран без звука.",
+    screenAudioUnavailable: "Системный звук на этом устройстве захватить не удалось: зрители увидят экран без звука.",
     serverTooOldForPhoneShare: "Для демонстрации экрана с телефона нужен сервер новее (0.6.2 или выше).",
     channelBannerSaved: "Баннер канала сохранён",
     fileUploaded: "Файл загружен",
