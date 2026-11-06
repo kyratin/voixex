@@ -51,6 +51,7 @@ jobs:
           node .camera-server/backend/test/camera-transports.mjs
           node .camera-server/backend/test/voice-transports.mjs
           node .camera-server/backend/test/demand-transports.mjs
+          node .camera-server/backend/test/voice-turntaking.mjs
       - name: Frontend types and browser tests
         env:
           CAMERA_SERVER_ROOT: ${{ github.workspace }}/.camera-server
@@ -62,6 +63,8 @@ jobs:
           npx playwright install --with-deps chromium
           node scripts/voice-worklet-check.mjs
           node scripts/media-send-queue-check.mjs
+          node scripts/webcodecs-queue-recovery-check.mjs
+          node scripts/browser-uplink-check.mjs
           node scripts/voice-browser-check.mjs
           node scripts/camera-browser-check.mjs
           node scripts/voice-stage-layout-check.mjs
