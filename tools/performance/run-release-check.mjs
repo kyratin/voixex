@@ -9,9 +9,9 @@ await mkdir(out,{recursive:true})
 await command('docker',['network','create',network])
 try{
  await command('docker',['run','--rm','-d','--name',server,'--network',network,'--cpus','1','--memory','1536m','--entrypoint','node','-e','TOKEN_SECRET=isolated-release-check-only','-e','UDP_PORT=50000','-e','UDP_HOST=0.0.0.0','--mount',`type=bind,src=${root}/tools/performance,dst=/bench,readonly`,image,'/bench/media-server.mjs'])
- const cases=[['compat-open100-s4',100,4,true,'opus2 camera1',false,20],['mix3-open100-s4',100,4,true,'opus2 camera1 mix3',false,20],['mix3-open100-silent',100,0,true,'opus2 camera1 mix3',false,20],['mix3-soak20-s4',20,4,true,'opus2 camera1 mix3',true,120]]
- for(const [name,users,speakers,openMicSilent,clientCaps,observer,seconds] of cases){
-  const c={name,users,speakers,rooms:1,transport:'udp',cameras:0,seconds,warmupSec:5,openMicSilent,clientCaps,observer,clientRoot:'/client',api:`http://${server}:18080`,port:50000,backend:'/app',output:`/results/${name}.raw.json`}
+ const cases=[['compat-open100-s4',100,4,true,'opus2 camera1',false,20],['mix3-open100-s4',100,4,true,'opus2 camera1 mix3',false,20],['mix3-open100-silent',100,0,true,'opus2 camera1 mix3',false,20],['mix3-gated100-s4',100,4,true,'opus2 camera1 mix3',false,20,true],['mix3-gated100-silent',100,0,true,'opus2 camera1 mix3',false,20,true],['mix3-soak20-s4',20,4,true,'opus2 camera1 mix3',true,120]]
+ for(const [name,users,speakers,openMicSilent,clientCaps,observer,seconds,clientSilenceGate=false] of cases.filter(row=>!process.env.RELEASE_CASE_FILTER||new RegExp(process.env.RELEASE_CASE_FILTER).test(row[0]))){
+  const c={name,users,speakers,rooms:1,transport:'udp',cameras:0,seconds,warmupSec:5,openMicSilent,clientCaps,clientSilenceGate,observer,clientRoot:'/client',api:`http://${server}:18080`,port:50000,backend:'/app',output:`/results/${name}.raw.json`}
   await writeFile(`${out}/case.json`,JSON.stringify(c))
   const result=await command('docker',['run','--rm','--name','voixex-release-perf-generator','--network',network,'--cpus','4','--memory','2048m','--entrypoint','node','--mount',`type=bind,src=${root}/tools/performance,dst=/bench,readonly`,'--mount',`type=bind,src=${root}/voice-client,dst=/client,readonly`,'--mount',`type=bind,src=${out},dst=/results`,image,'/bench/media-clients.mjs','/results/case.json'])
   await appendFile(`${out}/matrix.jsonl`,result+'\n')

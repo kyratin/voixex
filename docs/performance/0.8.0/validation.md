@@ -27,3 +27,32 @@ Raw results: `core-baseline.json`, `core-optimized.json`. Reproduce with `tools/
 ## Remaining boundaries
 
 One media worker still owns all rooms; CPU allocation alone does not shard a room. Visible camera mode subscribes to all camera publications, even when the UI pages them 12 at a time. Physical Android audio devices, cellular links and congested Wi-Fi require device testing. Complete loss of all initial shared-stream warm-up packets can cause a brief Opus predictor convergence artifact before later packets restore context.
+
+## Real-time one-CPU Docker bridge checks
+
+The final 0.8.0 server image was limited to one CPU / 1536MiB on the same M4 host. Generated AES/Opus UDP peers ran in a separate container; no macOS UDP port-forwarding path or production cluster traffic was used. Each 20-second measurement followed 5 seconds warm-up. The 120-second soak included the actual built desktop VoiceEngine as the last participant.
+
+| Scenario | CPU average | Median received fps | Probe RTT p95 | Marker arrival p95 |
+| --- | ---: | ---: | ---: | ---: |
+| compat-open100-s4 | 94.2% | 45.2 | 219 ms | 460 ms |
+| mix3-open100-s4 | 43.2% | 50 | 3 ms | 158 ms |
+| mix3-open100-silent | 35.4% | 8.05 | 7 ms | — |
+| mix3-soak20-s4 | 26.5% | 50 | 7 ms | 53 ms |
+| mix3-gated100-s4 | 26.2% | 50 | 4 ms | 92 ms |
+| mix3-gated100-silent | 3.3% | 0 | 9 ms | — |
+
+`compat-open100-s4` and `mix3-open100-s4` both deliberately transmit encoded silence from 96 unmuted peers: they isolate negotiated downlink sharing under identical input load. The new client's silence admission saves additional uplink/decoder work. The ungated silence fixture loops pre-encoded Opus banks and may produce short predictor transients, so it is an adversarial traffic check, not a microphone-noise or audible-silence certification.
+
+The 20-participant soak observer received 6000 PCM frames (50fps), zero estimated loss and zero concealed frames. Its 500Hz synthetic marker remained 500Hz in every measured frame; marker latency p95 was 90ms before UI playback/hardware/WAN. Aggregate server decode/encode/worker errors were zero. This measures pitch preservation for the synthetic signal; physical Android capture/playback is still unverified.
+
+The 100-peer compatibility case remained CPU saturated with 45.2fps and 219ms probe p95: updating the server alone does not remove old-client encoder work. Negotiated sharing restored 50fps and 3ms probe p95 in the same ungated fixture, but this M4 measurement does not certify 100 users on the production Xeon.
+
+
+With the actual client `SilenceGate` applied to generated speech/zero RMS (`mix3-gated100-s4`), the 100 unmuted-peer fixture used 26.17% CPU, delivered 50fps to every listener and had 92ms marker p95. The all-silent gated case used 3.34% CPU and sent no audio packets, as intended. These apply the real gate class to known synthetic RMS before Opus submission; they are not full microphone/capture pipeline tests. Both cases acknowledged all 100 sessions and had no codec/worker errors or generator skipped ticks.
+
+## Published artifacts and rollout
+
+- Client tag: `v0.8.0`, source `6f62ceff3b15a60f730db6d7d0f633083ab73eef`; Android APK, macOS ARM64 DMG, Windows x64 EXE. GitHub release workflow and Camera validation passed.
+- Server source: `5b7ef7f`, dual-architecture runtime tests and actual API smoke passed.
+- Docker Hub `kyratinkokko/voixex:0.8.0` and `latest` share index `sha256:a67c325e3e53214372bd229ffd6485dc66b995f3361875326b18429ddab3676c`, containing Linux AMD64 and ARM64 (plus build attestations).
+- Existing `voixex` deployment updated to 0.8.0 with its original PVC and configuration; rollout completed and public `/health` returned `{"ok":true}`.

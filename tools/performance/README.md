@@ -64,6 +64,10 @@ node primer_front/scripts/voice-worklet-check.mjs
 
 The generated archive excludes exploratory pilots. `build-report.py` describes this specific audit; update its narrative as well as its tables for a new study. Never reuse its numbers as a new measurement.
 
+## Focused 0.8.0 check
+
+`node tools/performance/run-release-check.mjs` runs the bounded release matrix against local multiarch image `voixex-server:0.8.0-arm64`. It creates and removes its own private Docker network/target, uses no production data, and records results under `/tmp/voixex-performance/0.8.0`. `RELEASE_BENCH_IMAGE`, `RELEASE_BENCH_OUTPUT`, and `RELEASE_CASE_FILTER` override the image, output and selected cases. The gated cases import the actual client SilenceGate and supply known synthetic speech/zero RMS. Compile `voice-client` first. The 120-second observer case uses its real VoiceEngine.
+
 ## Cleanup
 
 Only remove resources owned by this suite, after generators have finished:

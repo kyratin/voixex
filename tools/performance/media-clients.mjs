@@ -41,6 +41,7 @@ if(isMainThread){
  const {WebSocket}=await import(pathToFileURL(`${c.backend}/node_modules/ws/wrapper.mjs`)), {fragmentCamera}=await import(pathToFileURL(`${c.backend}/dist/media/camera-protocol.js`))
  const {address:mediaHost}=await lookup(new URL(c.api).hostname)
  const loop=monitorEventLoopDelay({resolution:5});loop.enable()
+ const Gate=c.clientSilenceGate?(await import(pathToFileURL(`${c.clientRoot}/dist/silence-gate.js`))).SilenceGate:null
  const peers=[],rtts=[],gaps=[],latencies=[]
  let frame=0,skipped=0,cameraFrame=0
  const frames=[]
@@ -62,7 +63,7 @@ if(isMainThread){
  const power=pcm=>{let re=0,im=0;for(let i=0;i<960;i++){const v=pcm.readInt16LE(i*2);re+=v*Math.cos(i*2*Math.PI*500/48000);im+=v*Math.sin(i*2*Math.PI*500/48000)}return Math.hypot(re,im)/960}
  for(let j=0;j<c.peers.length;j++){
   const source=c.peers[j],index=c.offset+j,key=protocol.deriveMediaKey(source.seed)
-  const p={...source,publishCamera:source.camera,index,key,seq:1,audio:0,camera:0,bytes:0,lastAudio:0,seenMarker:-1,hello:false,probeSent:0,audioSent:0,cameraFramesSent:0,decoder:(j===0&&index!==0)||index===1||index===c.users-1?new Opus(48000,1,Opus.Application.VOIP):null}
+  const p={...source,gate:Gate?new Gate():null,publishCamera:source.camera,index,key,seq:1,audio:0,camera:0,bytes:0,lastAudio:0,seenMarker:-1,hello:false,probeSent:0,audioSent:0,cameraFramesSent:0,decoder:(j===0&&index!==0)||index===1||index===c.users-1?new Opus(48000,1,Opus.Application.VOIP):null}
   const receive=packet=>{
    if(packet.subarray(0,9).toString()==='HELLO_ACK'){p.hello=true;return}
    const decoded=protocol.decryptPacket(key,packet);if(!decoded)return
@@ -112,7 +113,14 @@ if(isMainThread){
   if(now-next>20){const missed=Math.floor((now-next)/20);if(now>=c.measure)skipped+=missed;frame+=missed;next+=missed*20}
   for(const p of peers){
    if(!p.hello)p.send(Buffer.from(`HELLO2 ${p.token} ${c.clientCaps || "opus2 camera1"}`))
-   if(p.active||c.openMicSilent){if(now>=c.measure)p.audioSent++;const bank=!p.active?9:p.index===0?0:1+p.index%8;send(p,protocol.encodeOpus2(frame,frame===0?1:0,[frames[bank][frame%75]]),protocol.KIND_OPUS2)}
+   if(p.active||c.openMicSilent){
+    const bank=!p.active?9:p.index===0?0:1+p.index%8
+    const rms=bank===9||(bank===0&&frame%75>=5)?0:0.02
+    if(!p.gate||p.gate.admitRms(rms,now)){
+     if(now>=c.measure)p.audioSent++
+     send(p,protocol.encodeOpus2(frame,frame===0?1:0,[frames[bank][frame%75]]),protocol.KIND_OPUS2)
+    }
+   }
    if(now>=probeAt){if(now>=c.measure)p.probeSent++;send(p,protocol.encodeProbe(now,{lossPermille:0,jitterMs:0,bufferMs:60}),protocol.KIND_PROBE)}
   }
   if(now>=helloAt){for(const p of peers)p.send(Buffer.from(`HELLO2 ${p.token} ${c.clientCaps || "opus2 camera1"}`));helloAt=now+10000}
