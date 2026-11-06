@@ -1,3 +1,5 @@
+import { attachWindowsScreenAudio } from "./windows-screen-audio"
+
 /** Request OS capture with explicit exclusion of the calling application, never plain loopback. */
 type AudioIsolationConstraints = MediaTrackConstraints & { restrictOwnAudio: boolean; suppressLocalAudioPlayback: boolean }
 type AudioIsolationSettings = MediaTrackSettings & { restrictOwnAudio?: boolean }
@@ -10,6 +12,18 @@ export function isolatedScreenCaptureOptions(video: MediaTrackConstraints, withA
 
 export async function captureScreenWithIsolatedAudio(video: MediaTrackConstraints, withAudio: boolean): Promise<MediaStream> {
   const devices = navigator.mediaDevices
+  if (typeof window !== "undefined" && window.voixexWindow?.platform === "win32" && window.electronVoice?.startScreenAudio) {
+    // Windows PCM is captured by WASAPI in a dedicated helper, bypassing
+    // Chromium's loopback implementation and its restrictOwnAudio support gate.
+    const stream = await devices.getDisplayMedia(isolatedScreenCaptureOptions(video, false))
+    // Never accept an unexpected Electron loopback track alongside native audio.
+    for (const track of stream.getAudioTracks()) { track.stop(); stream.removeTrack(track) }
+    if (withAudio) {
+      try { await attachWindowsScreenAudio(stream) }
+      catch (error) { console.warn("Native Windows screen audio unavailable", error) }
+    }
+    return stream
+  }
   const supported = devices.getSupportedConstraints() as MediaTrackSupportedConstraints & { restrictOwnAudio?: boolean }
   // Older runtimes silently ignore unknown constraints and would recapture call audio.
   const platformSupported = typeof window === "undefined" || window.voixexWindow?.systemAudioExclusionSupported !== false

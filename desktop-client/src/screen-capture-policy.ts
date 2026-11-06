@@ -1,4 +1,7 @@
-/** Preflight eligibility only: the capture result must still confirm native exclusion. */
+/** Chromium capture eligibility (macOS and older Windows bridges).
+ * Current Windows builds use the dedicated WASAPI helper, which probes activation.
+ * The Chromium capture result must still confirm native exclusion.
+ */
 export function supportsSystemAudioExclusion(platform: string, osRelease: string, electronVersion: string): boolean {
   const [electronMajor, electronMinor] = electronVersion.split(".").map(Number)
   // Electron 43.4.0 first forwards restrictOwnAudio to the native loopback device.

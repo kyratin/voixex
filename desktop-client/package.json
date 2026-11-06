@@ -1,6 +1,6 @@
 {
   "name": "voip-desktop-client",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "Desktop VoIP client shell",
   "author": {
     "name": "kyratin",
@@ -11,6 +11,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
+    "build:screen-audio": "node ./scripts/build-screen-audio.cjs",
     "build": "tsc -p tsconfig.json",
     "prepare:ui": "node ./scripts/sync-ui.mjs",
     "start": "electron ./dist/main.js",
@@ -36,6 +37,7 @@
     "typescript": "^5.9.2"
   },
   "build": {
+    "beforePack": "./scripts/build-screen-audio.cjs",
     "appId": "com.voixex.desktop",
     "productName": "Voixex",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
@@ -75,6 +77,12 @@
       "category": "Network"
     },
     "win": {
+      "extraResources": [
+        {
+          "from": "native/screen-audio/bin/voixex-screen-audio.exe",
+          "to": "screen-audio/voixex-screen-audio.exe"
+        }
+      ],
       "icon": "build/icons/icon.ico",
       "target": [
         "nsis"

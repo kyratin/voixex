@@ -84,6 +84,12 @@ cd desktop-client && npm ci && npm run build && npm start
 
 ### Desktop — installers
 
+Windows screen sound uses a native WASAPI helper that excludes the entire Voixex process tree, including Electron's audio service. It sends 48 kHz stereo PCM to a renderer AudioWorklet and the existing screen-share audio track. It captures other applications' system playback regardless of which visual source is selected. Windows 10 2004+ is eligible for a native activation attempt; success depends on the installed OS, and activation failures leave video sharing available without switching to unrestricted audio. Physical Windows 10 21H2 capture and exclusion still require verification on that OS.
+
+On Windows, install Visual Studio C++ build tools, a recent Windows SDK (with `audioclientactivationparams.h`), and CMake. `npm run build:screen-audio` in `desktop-client` builds the x64 helper for development; Windows installer builds compile and package it automatically. For cross-packaging from macOS/Linux/Docker, first build the helper on Windows (or download the `windows-screen-audio-helper` CI artifact) and put `voixex-screen-audio.exe` in `desktop-client/native/screen-audio/bin/`. Packaging fails if the helper is missing or has the wrong architecture.
+
+macOS keeps the existing ScreenCaptureKit/Core Audio capture with `restrictOwnAudio`; it does not use the Windows helper. The recorded native macOS isolation measurement is in [screen audio validation](docs/performance/0.8.3/screen-audio-isolation.md#actual-macos-result).
+
 Run in [`desktop-client/`](desktop-client); output goes to `desktop-client/release/`.
 
 | Command | Result | Build on |

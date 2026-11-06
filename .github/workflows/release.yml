@@ -14,6 +14,20 @@ permissions:
   contents: write
 
 jobs:
+  windows-screen-audio:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compile native WASAPI helper
+        working-directory: desktop-client
+        run: npm run build:screen-audio
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-screen-audio-helper
+          path: desktop-client/native/screen-audio/bin/voixex-screen-audio.exe
   android:
     runs-on: ubuntu-latest
     steps:
@@ -99,6 +113,7 @@ jobs:
           npm run build
           node scripts/screen-capture-policy-check.mjs
           node scripts/screen-picker-audio-check.mjs
+          node scripts/windows-screen-audio-check.mjs
       - name: Build installer
         working-directory: desktop-client
         run: npm run ${{ matrix.script }}
@@ -121,6 +136,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: dist/Voixex-*
           body_path: docs/releases/${{ github.ref_name }}.md
           name: Voixex ${{ github.ref_name }}

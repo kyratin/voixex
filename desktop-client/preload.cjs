@@ -36,6 +36,18 @@ const electronVoice = {
   sendScreenChunk: (chunkBase64) => ipcRenderer.invoke("voice:sendScreenChunk", chunkBase64),
   listScreenSources: () => ipcRenderer.invoke("screenShare:listSources"),
   setScreenSource: (sourceId) => ipcRenderer.invoke("screenShare:setSource", sourceId),
+  startScreenAudio: (id) => ipcRenderer.invoke("screenAudio:start", id),
+  stopScreenAudio: (id) => ipcRenderer.invoke("screenAudio:stop", id),
+  onScreenAudio: (listener) => {
+    const handler = (_event, payload) => listener(payload)
+    ipcRenderer.on("screenAudio:pcm", handler)
+    return () => ipcRenderer.removeListener("screenAudio:pcm", handler)
+  },
+  onScreenAudioEnded: (listener) => {
+    const handler = (_event, payload) => listener(payload)
+    ipcRenderer.on("screenAudio:ended", handler)
+    return () => ipcRenderer.removeListener("screenAudio:ended", handler)
+  },
   onPcm16Frame: (listener) => {
     const handler = (_event, payload) => listener(payload)
     ipcRenderer.on("voice:pcm16Frame", handler)

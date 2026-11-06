@@ -7,12 +7,17 @@ import { IdentityStore, type IdentityMeta, type IdentityServerInfo, type ServerC
 import { VoiceService } from "./voice-service.js"
 import { createShell } from "./shell.js"
 import { supportsSystemAudioExclusion } from "./screen-capture-policy.js"
+import { WindowsScreenAudio } from "./windows-screen-audio.js"
 
 const voice = new VoiceService()
 const audioExclusionArgument = supportsSystemAudioExclusion(process.platform, release(), process.versions.electron)
   ? "--voixex-system-audio-exclusion=supported" : "--voixex-system-audio-exclusion=unsupported"
 let preferredScreenSourceId: string | null = null
 const __dirname = fileURLToPath(new URL(".", import.meta.url))
+const windowsScreenAudio = new WindowsScreenAudio(app.isPackaged
+  ? join(process.resourcesPath, "screen-audio", "voixex-screen-audio.exe")
+  : join(__dirname, "..", "native", "screen-audio", "bin", "voixex-screen-audio.exe"))
+app.on("before-quit", () => windowsScreenAudio.stopAll())
 const BUNDLED_UI_SCHEME = "app"
 const BUNDLED_UI_HOST = "bundle"
 
@@ -450,6 +455,13 @@ app.whenReady().then(async () => {
   ipcMain.handle("screenShare:listSources", async () => {
     const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } })
     return sources.map((s) => ({ id: s.id, name: s.name }))
+  })
+  ipcMain.handle("screenAudio:start", async (event, id: string) => {
+    if (process.platform !== "win32") throw new Error("Native screen audio is Windows-only")
+    await windowsScreenAudio.start(event.sender, id)
+  })
+  ipcMain.handle("screenAudio:stop", (event, id: string) => {
+    windowsScreenAudio.stop(event.sender, id)
   })
   ipcMain.handle("screenShare:setSource", (_event, sourceId: string | null) => {
     preferredScreenSourceId = sourceId

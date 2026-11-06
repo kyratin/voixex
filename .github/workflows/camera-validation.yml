@@ -44,6 +44,11 @@ jobs:
           npm ci --prefix .camera-server/backend
           npm run build --prefix .camera-server/backend
           npm test --prefix .camera-server/backend
+      - name: Desktop native audio bridge checks
+        run: |
+          npm ci --prefix desktop-client
+          npm run build --prefix desktop-client
+          node desktop-client/scripts/windows-screen-audio-check.mjs
       - name: Camera across UDP, TCP and WebSocket
         env:
           CAMERA_CLIENT_ROOT: ${{ github.workspace }}
@@ -64,6 +69,7 @@ jobs:
           node scripts/voice-worklet-check.mjs
           node scripts/media-send-queue-check.mjs
           node scripts/screen-capture-isolation-check.mjs
+          node scripts/windows-screen-audio-check.mjs
           node scripts/stream-popup-continuity-check.mjs
           node scripts/webcodecs-queue-recovery-check.mjs
           node scripts/browser-uplink-check.mjs

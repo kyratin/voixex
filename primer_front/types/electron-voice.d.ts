@@ -111,6 +111,10 @@ declare global {
       sendScreenChunk: (chunkBase64: string) => void
       listScreenSources: () => Promise<Array<{ id: string; name: string }>>
       setScreenSource: (sourceId: string | null) => Promise<unknown>
+      startScreenAudio?: (id: string) => Promise<void>
+      stopScreenAudio?: (id: string) => Promise<void>
+      onScreenAudio?: (listener: (packet: { id: string; pcm: Uint8Array }) => void) => () => void
+      onScreenAudioEnded?: (listener: (packet: { id: string; error: string }) => void) => () => void
       onPcm16Frame: (listener: (pcm16Base64: string) => void) => () => void
       onScreenChunk: (listener: (chunkBase64: string) => void) => () => void
       onHotkeyAction: (listener: (payload: { action: "toggle_mute" | "toggle_deafen" | "push_to_talk" }) => void) => () => void
