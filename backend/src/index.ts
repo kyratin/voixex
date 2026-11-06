@@ -1264,7 +1264,8 @@ app.post("/v1/auth/register", async (req, rep) => {
   const clientId = randomUUID()
   try {
     await storeCredentials(server.serverId, clientId, nick, body.authMode, body.password)
-  } catch {
+  } catch (error) {
+    if ((error as { code?: string }).code === "AUTH_BUSY") throw error
     return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
   }
   return rep.code(201).send(protectionResult(server.serverId, clientId, nick, body.authMode, body.publicKey))

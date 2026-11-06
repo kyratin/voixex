@@ -34,7 +34,7 @@ const server = http.createServer(async (request, response) => {
     response.end(JSON.stringify(browserPeers?.[1].frames.filter(f => f.sender === "browser-camera").map(f => Buffer.from(f.frame).toString("base64")) ?? [])); return
   }
   if (request.url === "/test/send") {
-    for (const packet of fragmentCamera(jpeg(9000), 300, 1, 3000)) { browserPeers[1].engine.sendCameraPacket(Buffer.from(packet)); await pause(2) }
+    for (const packet of fragmentCamera(jpeg(9000), 300, 1, 6000)) { browserPeers[1].engine.sendCameraPacket(Buffer.from(packet)); await pause(2) }
     response.end("{}"); return
   }
   response.statusCode = 404; response.end("{}")
