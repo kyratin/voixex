@@ -1302,7 +1302,8 @@ app.post("/v1/auth/claim", async (req, rep) => {
   }
   try {
     await storeCredentials(server.serverId, body.clientId, nick, body.authMode, body.password)
-  } catch {
+  } catch (error) {
+    if ((error as { code?: string }).code === "AUTH_BUSY") throw error
     return rep.code(409).send({ message: "nick is taken", code: "nick_taken" })
   }
   db.prepare("UPDATE server_members SET display_name = ?, updated_at = datetime('now') WHERE server_id = ? AND client_id = ?").run(
