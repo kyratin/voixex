@@ -1,0 +1,42 @@
+[
+  {
+    "name": "audio25-subs25",
+    "audioPublishers": 25,
+    "videoPublishers": 0,
+    "subscribers": 25,
+    "cpuSteadyAvgPct": 61.72304347826086,
+    "cpuSteadyMaxPct": 70.06,
+    "totalRow": "\u2502 Total  \u2502 625/625 \u2502 12.1mbps (484.1kbps avg) \u2502 0 (0%)          \u2502 0     \u2502",
+    "exitCode": 0
+  },
+  {
+    "name": "audio4-subs50",
+    "audioPublishers": 4,
+    "videoPublishers": 0,
+    "subscribers": 50,
+    "cpuSteadyAvgPct": 37.44826086956522,
+    "cpuSteadyMaxPct": 40.73,
+    "totalRow": "\u2502 Total  \u2502 200/200 \u2502 3.8mbps (75.6kbps avg) \u2502 0 (0%)          \u2502 0     \u2502",
+    "exitCode": 0
+  },
+  {
+    "name": "video1-audio4-subs50",
+    "audioPublishers": 4,
+    "videoPublishers": 1,
+    "subscribers": 50,
+    "cpuSteadyAvgPct": 42.02586956521739,
+    "cpuSteadyMaxPct": 45.43,
+    "totalRow": "\u2502 Total  \u2502 250/250 \u2502 102.8mbps (2.1mbps avg) \u2502 0 (0%)          \u2502 0     \u2502",
+    "exitCode": 0
+  },
+  {
+    "name": "video12-audio4-subs12",
+    "audioPublishers": 4,
+    "videoPublishers": 12,
+    "subscribers": 12,
+    "cpuSteadyAvgPct": 37.14521739130435,
+    "cpuSteadyMaxPct": 40.43,
+    "totalRow": "\u2502 Total  \u2502 192/192 \u2502 283.7mbps (23.6mbps avg) \u2502 0 (0%)          \u2502 0     \u2502",
+    "exitCode": 0
+  }
+]

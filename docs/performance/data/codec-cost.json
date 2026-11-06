@@ -1,0 +1,34 @@
+[
+  {
+    "complexity": 3,
+    "encodeAvgMs": 0.17088097266666666,
+    "encodeP99Ms": 0.17558400000001484,
+    "encodeCpuMs": 178.191,
+    "decodeAvgMs": 0.035488278,
+    "packetBytesAvg": 97.90466666666667
+  },
+  {
+    "complexity": 5,
+    "encodeAvgMs": 0.13136825,
+    "encodeP99Ms": 0.1294589999999971,
+    "encodeCpuMs": 173.216,
+    "decodeAvgMs": 0.02359361066666664,
+    "packetBytesAvg": 98.74666666666667
+  },
+  {
+    "complexity": 8,
+    "encodeAvgMs": 0.20071411133333336,
+    "encodeP99Ms": 0.21704199999999219,
+    "encodeCpuMs": 296.839,
+    "decodeAvgMs": 0.023585194,
+    "packetBytesAvg": 98.726
+  },
+  {
+    "complexity": 10,
+    "encodeAvgMs": 0.20214619399999992,
+    "encodeP99Ms": 0.22199999999998,
+    "encodeCpuMs": 303.786,
+    "decodeAvgMs": 0.024048111333333358,
+    "packetBytesAvg": 98.726
+  }
+]

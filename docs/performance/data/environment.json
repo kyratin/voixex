@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-06",
+  "clientRevision": "b9a64072dd14bea93e68e0bef53c96321bfe202b",
+  "serverRevision": "ef4883342919376b7888b0d0481afc1f497b9223",
+  "serverImage": "kyratinkokko/voixex:0.7.3",
+  "serverImageIndexDigest": "sha256:cd37a983383ca786e8bb4e71f9343f680f4c3d69a9843cec53db4b421f1a9aaa",
+  "localHost": "Apple M4; 16 GiB host RAM; Docker Desktop Linux ARM64 VM with 10 CPUs and 7.65 GiB RAM",
+  "mediaLimit": "1 CPU and 1536 MiB (except explicit 2 CPU trials)",
+  "generatorLimit": "4 CPUs and 2 GiB; separate Linux bridge container",
+  "production": {
+    "nodeCPU": "Intel Xeon Gold 6254 @ 3.10 GHz",
+    "visibleCPUs": 1,
+    "nodeMemoryGiB": 2.84,
+    "podCPURequestMilli": 400,
+    "podCPULimit": null,
+    "podMemoryLimitMiB": 1536,
+    "replicas": 1,
+    "strategy": "Recreate"
+  },
+  "cpuCalibration": {
+    "secondNode": "Intel Xeon E-2278G @ 3.40 GHz, 600m quota",
+    "productionNode": "Intel Xeon Gold 6254 @ 3.10 GHz, 200m quota",
+    "meaning": "process CPU time per 20ms tick; throttled wall time is NOT production latency"
+  },
+  "excludedPilots": [
+    "macOS-to-Docker published UDP port runs",
+    "initial generator with incorrectly scheduled probes/cameras",
+    "LiveKit pilot with 4x4 layout limiting the 25-source case to 16 tracks",
+    "LiveKit pilot without usable CPU samples due to terminal escape sequences"
+  ],
+  "limitations": [
+    "synthetic Opus signals, not a perceptual speech quality study",
+    "camera relay payloads test fragmentation and encryption, not JPEG decode/render",
+    "no production client traffic or production database was used",
+    "short scenario windows plus a 120-second soak; not a 24-hour stability test",
+    "no physical Android/Windows multi-device Wi-Fi test",
+    "custom media harness uses the real worker and transports but excludes full HTTP auth, SQLite hooks and embedded LiveKit from that same CPU quota",
+    "cluster calibration is synchronous computation, not an end-to-end network load test"
+  ]
+}
