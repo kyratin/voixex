@@ -45,10 +45,43 @@ try {
     }
   }
   await checkRing('self',false);await checkRing('remote',false)
-  await page.evaluate(()=>window.fixture.localRms(0.1,100))
+  await page.evaluate(async()=>{
+    const {loadVoiceCaptureWorklet}=await import('/bundle.js')
+    const context=new AudioContext({sampleRate:48000}),capture=await loadVoiceCaptureWorklet(context)
+    const oscillator=context.createOscillator(),gain=context.createGain(),sink=context.createGain()
+    oscillator.frequency.value=700;gain.gain.value=0.006*Math.sqrt(2);sink.gain.value=0
+    oscillator.connect(gain);gain.connect(capture);capture.connect(sink);sink.connect(context.destination)
+    window.quietCaptureRms=0
+    capture.port.onmessage=event=>{
+      let sum=0
+      for(const sample of event.data.data){const pcm=Math.round(sample*32768)/32768;sum+=pcm*pcm}
+      const rms=Math.sqrt(sum/event.data.data.length)
+      window.quietCaptureRms=rms
+      window.fixture.localRms(rms,performance.now())
+    }
+    window.quietCapture={context,capture,oscillator,gain}
+    oscillator.start();await context.resume()
+  })
+  await page.waitForFunction(()=>window.quietCaptureRms>0.005&&window.quietCaptureRms<0.007)
   await checkRing('self',true)
-  await page.evaluate(()=>window.fixture.localRms(0,400))
+  await page.evaluate(()=>window.fixture.update({selfMuted:true}))
   await checkRing('self',false)
+  await page.evaluate(()=>window.fixture.update({selfMuted:false}))
+  await checkRing('self',true)
+  await page.evaluate(()=>{window.quietCapture.gain.gain.value=0})
+  await checkRing('self',false)
+  await page.evaluate(async()=>{
+    window.quietCapture.oscillator.stop();window.quietCapture.capture.disconnect();await window.quietCapture.context.close()
+  })
+  console.log('PASS actual quiet microphone worklet RMS0.006 activates self camera in main and mini; mute and silence clear it')
+  await page.evaluate(()=>window.fixture.selfLegacy(0.6))
+  await checkRing('self',true)
+  await page.evaluate(()=>window.fixture.update({selfMuted:true}))
+  await checkRing('self',false)
+  await page.evaluate(()=>{window.fixture.selfLegacy(0);window.fixture.update({selfMuted:false});window.fixture.selfSfu(0.6)})
+  await checkRing('self',true)
+  await checkRing('self',false)
+  console.log('PASS own legacy and SFU levels preserve self indication when local capture-meter callbacks pause')
   await page.evaluate(()=>window.fixture.legacy(0.7))
   await checkRing('remote',true)
   await page.evaluate(()=>window.fixture.legacy(0))

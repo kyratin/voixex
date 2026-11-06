@@ -1677,12 +1677,12 @@ export default function VoIPApp() {
     getVoiceWsClientRef.current().sendScreenVideoChunk(encodeBytesBase64(bytes))
   }
 
-  const stopPopupMirrorTracks = useCallback(() => {
+  const stopPopupMirrorTracks = useCallback((releaseRemote = true) => {
     if (popupMirrorRetryRef.current) {
       clearInterval(popupMirrorRetryRef.current)
       popupMirrorRetryRef.current = null
     }
-    webRtcSessionRef.current?.unbindPopupScreenVideo()
+    if (releaseRemote) webRtcSessionRef.current?.unbindPopupScreenVideo()
     const s = popupMirrorStreamRef.current
     if (s) {
       s.getTracks().forEach((t) => t.stop())
@@ -3111,7 +3111,7 @@ export default function VoIPApp() {
         imageEl.style.display = "block"
         placeholderEl.style.display = "none"
       } else if (hasRemoteWebRtcVideo && webRtcSessionRef.current) {
-        stopPopupMirrorTracks()
+        stopPopupMirrorTracks(false)
         imageEl.muted = true
         webRtcSessionRef.current.bindPopupScreenVideo(imageEl)
         void imageEl.play().catch(() => {})
@@ -3726,7 +3726,10 @@ export default function VoIPApp() {
         ? miniCallEnabled && !miniCallDismissed && miniCallDisplay === "cameras"
         : !voiceActivitiesHidden && (!document.hidden || hasShell))
       session?.setCameraViewing(cameraVisible)
-      setSfuVoiceLevels(currentVoiceChannel, playsLiveKitVoiceRef.current() ? session?.remoteVoiceLevels ?? {} : {})
+      setSfuVoiceLevels(currentVoiceChannel, {
+        ...(playsLiveKitVoiceRef.current() ? session?.remoteVoiceLevels ?? {} : {}),
+        ...(isInVoiceRef.current && !mutedRef.current ? session?.localVoiceLevels ?? {} : {})
+      })
       const preferences = {
         voice: !deafenedRef.current && !playsLiveKitVoiceRef.current(),
         camera: cameraVisible,

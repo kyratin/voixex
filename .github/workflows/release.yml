@@ -98,6 +98,7 @@ jobs:
         run: |
           npm run build
           node scripts/screen-capture-policy-check.mjs
+          node scripts/screen-picker-audio-check.mjs
       - name: Build installer
         working-directory: desktop-client
         run: npm run ${{ matrix.script }}

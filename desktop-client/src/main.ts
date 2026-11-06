@@ -289,7 +289,9 @@ app.whenReady().then(async () => {
         callback({ video: preferred })
       }
     },
-    { useSystemPicker: true }
+    // The native picker shortcut returns video only and bypasses the audio callback.
+    // Use the existing source selector so isolated loopback audio is requested too.
+    { useSystemPicker: false }
   )
   registerHotkeys()
   voice.setOnIncomingPcm16((pcm16Base64) => {

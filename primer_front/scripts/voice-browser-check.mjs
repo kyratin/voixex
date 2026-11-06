@@ -45,6 +45,15 @@ try{
   await page.waitForFunction(()=>{const data=new Float32Array(2048);window.receivedAnalyser.getFloatTimeDomainData(data);return Math.sqrt(data.reduce((sum,value)=>sum+value*value,0)/data.length)>0.02})
  }
  console.log('PASS three LiveKit participants: two playable microphone tracks and decoded audible audio per listener')
+ for(const page of pages){
+  await page.waitForFunction(()=>Object.values(window.media.localVoiceLevels).some(level=>level>0.02))
+  assert.equal(await page.evaluate(()=>Object.keys(window.media.localVoiceLevels)[0]),await page.evaluate(()=>window.media.room.localParticipant.identity))
+ }
+ await pages[1].evaluate(()=>window.media.setMuted(true))
+ assert.deepEqual(await pages[1].evaluate(()=>window.media.localVoiceLevels),{})
+ await pages[1].evaluate(()=>window.media.setMuted(false))
+ await pages[1].waitForFunction(()=>Object.values(window.media.localVoiceLevels).some(level=>level>0.02))
+ console.log('PASS published local microphones expose actual SFU speaking levels; mute clears and unmute restores self activity')
  const listener=pages[0]
  await listener.evaluate(()=>window.media.setPlayRemoteVoice(true,['voice-1','voice-2','voice-missing']))
  assert.equal(await listener.evaluate(()=>window.media.playingRemoteVoice),false)
@@ -57,9 +66,11 @@ try{
  assert.equal(await listener.locator('audio[data-voixex-audio-source="microphone"]').count(),2)
  console.log('PASS repeated legacy/WebRTC playback switches do not duplicate or lose audio elements')
  await pages[1].evaluate(()=>window.media.unpublishMic())
+ assert.deepEqual(await pages[1].evaluate(()=>window.media.localVoiceLevels),{})
  await listener.waitForFunction(()=>!window.media.playingRemoteVoice)
  assert.equal(await pages[1].evaluate(()=>window.originalMic.readyState),'live')
  await pages[1].evaluate(()=>window.media.publishMicTrack(window.originalMic))
+ await pages[1].waitForFunction(()=>Object.values(window.media.localVoiceLevels).some(level=>level>0.02))
  await listener.waitForFunction(()=>window.media.playingRemoteVoice)
  console.log('PASS unpublishing uses fallback and preserves the original processed microphone for republishing')
  await pages[1].evaluate(async()=>{await Promise.all([window.media.publishMicTrack(window.originalMic),window.media.publishMicTrack(window.originalMic),window.media.unpublishMic()]);await window.media.publishMicTrack(window.originalMic)})
@@ -73,6 +84,7 @@ try{
  await listener.waitForFunction(()=>window.media.playingRemoteVoice)
  console.log('PASS paused/blocked voice falls back and resumes after a user gesture')
  await pages[2].evaluate(()=>window.media.disconnect())
+ assert.deepEqual(await pages[2].evaluate(()=>window.media.localVoiceLevels),{})
  await listener.waitForFunction(()=>!window.media.playingRemoteVoice)
  await listener.evaluate(()=>window.media.setPlayRemoteVoice(true,['voice-1']))
  await listener.waitForFunction(()=>window.media.playingRemoteVoice)

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { supportsSystemAudioExclusion as supported } from '../dist/screen-capture-policy.js'
 
 const cases = [
-  ['win32', '10.0.19045', '43.8.7', false],
+  ['win32', '10.0.19040', '43.8.7', false],
+  ['win32', '10.0.19041', '43.8.7', true],
+  ['win32', '10.0.19045', '43.8.7', true],
   ['win32', '10.0.20348', '43.8.7', true],
   ['win32', '10.0.22631', '43.8.7', true],
   ['darwin', '21.6.0', '43.8.7', false],

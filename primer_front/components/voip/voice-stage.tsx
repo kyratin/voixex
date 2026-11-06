@@ -189,9 +189,11 @@ export function ParticipantTile({
   volume?: { pct: number; onChange: (pct: number) => void }
 }) {
   const { t } = useI18n()
-  const remoteLevel = useVoiceLevel(isSelf ? "" : user.id)
+  const remoteLevel = useVoiceLevel(user.id)
   const localActivity = useLocalVoiceActivity(isSelf)
-  const measured = isSelf ? (localActivity.speaking ? localActivity.level : 0) : remoteLevel
+  // Keep the local microphone responsive, with the participant's actual received
+  // level as a fallback when a platform delays its capture-meter callbacks.
+  const measured = isSelf ? Math.max(localActivity.speaking ? localActivity.level : 0, remoteLevel) : remoteLevel
   const effective = muted ? 0 : Math.max(0, Math.min(1, measured > 0 ? measured : !isSelf && user.isSpeaking ? 0.35 : 0))
   const speaking = effective > 0.02
   const tile = (

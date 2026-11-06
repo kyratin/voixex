@@ -73,6 +73,9 @@ export class WebRtcMediaSession {
   private screenViewQuality: ScreenViewQuality = "high"
   private remoteScreenVideoEl: HTMLVideoElement | null = null
   private remoteScreenPopupEl: HTMLVideoElement | null = null
+  private popupSourceTrack: MediaStreamTrack | null = null
+  private popupClone: MediaStreamTrack | null = null
+  private popupStream: MediaStream | null = null
   private screenAudioContainer: HTMLElement | null = null
   private playRemoteVoice: boolean
   private deafened = false
@@ -147,6 +150,13 @@ export class WebRtcMediaSession {
       .map(participant => [participant.identity, participant.audioLevel]))
   }
 
+  get localVoiceLevels(): Record<string, number> {
+    const room = this.room
+    if (room?.state !== ConnectionState.Connected || !this.micTrack || this.muted || this.micTrack.isMuted || this.micTrack.mediaStreamTrack.readyState !== "live") return {}
+    const level = room.localParticipant.audioLevel
+    return level > 0 ? { [room.localParticipant.identity]: level } : {}
+  }
+
   setPlayRemoteVoice(play: boolean, expectedPeers?: string[]) {
     this.playRemoteVoice = play
     if (expectedPeers) this.expectedVoicePeers = expectedPeers
@@ -211,10 +221,11 @@ export class WebRtcMediaSession {
     const target = this.remoteScreenVideoEl
     if (!target) return
     if (this.remoteScreenTrack) {
-      this.remoteScreenTrack.detach(target)
-      this.remoteScreenTrack.attach(target)
+      const source = this.remoteScreenTrack.mediaStreamTrack
+      const attached = target.srcObject instanceof MediaStream && target.srcObject.getVideoTracks().includes(source)
+      if (!attached) this.remoteScreenTrack.attach(target)
       target.muted = true
-      void target.play().catch(() => {})
+      if (target.paused) void target.play().catch(() => {})
       this.syncPopupScreenVideo()
       return
     }
@@ -222,40 +233,44 @@ export class WebRtcMediaSession {
   }
 
   bindPopupScreenVideo(el: HTMLVideoElement | null) {
+    if (el !== this.remoteScreenPopupEl) this.unbindPopupScreenVideo()
     this.remoteScreenPopupEl = el
     this.syncPopupScreenVideo()
   }
 
+  private releasePopupClone() {
+    if (this.remoteScreenPopupEl?.srcObject === this.popupStream) this.remoteScreenPopupEl.srcObject = null
+    this.popupClone?.stop()
+    this.popupSourceTrack = null
+    this.popupClone = null
+    this.popupStream = null
+  }
+
   unbindPopupScreenVideo() {
-    const el = this.remoteScreenPopupEl
-    if (el) {
-      const stream = el.srcObject
-      if (stream instanceof MediaStream) {
-        for (const track of stream.getTracks()) track.stop()
-      }
-      el.srcObject = null
-    }
+    this.releasePopupClone()
     this.remoteScreenPopupEl = null
   }
 
   private syncPopupScreenVideo() {
     const el = this.remoteScreenPopupEl
     if (!el) return
-    if (!this.remoteScreenTrack) {
-      el.srcObject = null
+    const source = this.remoteScreenTrack?.mediaStreamTrack
+    if (!source || source.readyState === "ended") {
+      this.releasePopupClone()
       return
     }
-    const mt = this.remoteScreenTrack.mediaStreamTrack
-    if (!mt || mt.readyState === "ended") {
-      el.srcObject = null
+    // Keep a live source across UI updates, otherwise replacing srcObject can
+    // reset presentation and expose a black frame.
+    if (this.popupSourceTrack === source && this.popupClone?.readyState === "live" && el.srcObject === this.popupStream) {
+      el.muted = true
+      if (el.paused) void el.play().catch(() => {})
       return
     }
-    const prev = el.srcObject
-    if (prev instanceof MediaStream) {
-      for (const track of prev.getTracks()) track.stop()
-    }
-    const cloned = mt.clone()
-    el.srcObject = new MediaStream([cloned])
+    this.releasePopupClone()
+    this.popupSourceTrack = source
+    this.popupClone = source.clone()
+    this.popupStream = new MediaStream([this.popupClone])
+    el.srcObject = this.popupStream
     el.muted = true
     void el.play().catch(() => {})
   }

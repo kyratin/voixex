@@ -19,10 +19,12 @@ export class VoiceActivityDetector {
       this.lastLevel = 0
       return silence
     }
-    const threshold = now < this.until ? 0.008 : 0.012
+    // Match the remote speaking display's -50..-12 dBFS range. A -44 dBFS
+    // microphone is audible and lights its remote tile; it must light self too.
+    const threshold = now < this.until ? 0.0028 : 0.0036
     if (rms >= threshold) {
       this.until = now + 180
-      this.lastLevel = Math.min(1, rms * 5)
+      this.lastLevel = Math.max(0.03, Math.min(1, (20 * Math.log10(rms) + 50) / 38))
     }
     if (now >= this.until) return silence
     return { speaking: true, level: this.lastLevel }

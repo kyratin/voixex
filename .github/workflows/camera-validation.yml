@@ -64,6 +64,7 @@ jobs:
           node scripts/voice-worklet-check.mjs
           node scripts/media-send-queue-check.mjs
           node scripts/screen-capture-isolation-check.mjs
+          node scripts/stream-popup-continuity-check.mjs
           node scripts/webcodecs-queue-recovery-check.mjs
           node scripts/browser-uplink-check.mjs
           node scripts/voice-browser-check.mjs

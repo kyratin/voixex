@@ -51,8 +51,12 @@ export function mountCameraSpeakingHarness() {
   return {
     update: (patch: Partial<State>) => update(patch),
     localRms: (rms: number, now = performance.now()) => setLocalVoiceActivity(detector.sample(rms, now, true)),
+    selfLegacy: (level: number) => setRoomVoiceLevels("speaking-room", level ? { self: level } : {}),
+    selfSfu: (level: number) => setSfuVoiceLevels("speaking-room", level ? { self: level } : {}),
     legacy: (level: number) => setRoomVoiceLevels("speaking-room", level ? { remote: level } : {}),
     sfu: (level: number) => setSfuVoiceLevels("speaking-room", level ? { remote: level } : {}),
     unmount: () => { resetLocalVoiceActivity(); clearVoiceLevels(); setSfuVoiceLevels("speaking-room", {}); root.unmount(); clearInterval(drawTimer); capture.getTracks().forEach(track => track.stop()); container.remove() }
   }
 }
+
+export { loadVoiceCaptureWorklet } from "../lib/voice-playout"
