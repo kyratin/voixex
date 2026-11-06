@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-06",
+  "runtime": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "electron": "43.8.7",
+    "chromium": "150.0.7871.250",
+    "node": "24.22.1",
+    "macOS": "26.6.2"
+  },
+  "method": {
+    "ownSource": "440 Hz Web Audio oscillator, gain 0.012",
+    "externalSource": "1000 Hz generated WAV played by sibling afplay process, volume 0.02",
+    "capture": "Electron setDisplayMediaRequestHandler audio:loopback, getDisplayMedia audio.restrictOwnAudio; transient16px1fps video required by API; no captured recordings saved",
+    "permission": "Screen capture preflight and Electron status granted",
+    "suppressedLocalPlayback": false
+  },
+  "cases": [
+    {
+      "name": "A own audio present before capture",
+      "restrictOwnAudioSetting": true,
+      "suppressLocalAudioPlaybackSetting": false,
+      "own440Amplitude": 3.1957906677721724e-05,
+      "external1000Amplitude": 0.0073294889734495505,
+      "ownToExternalRatio": 0.004360182107304687
+    },
+    {
+      "name": "B initially no own AudioContext, own audio starts one second after capture",
+      "restrictOwnAudioSetting": true,
+      "suppressLocalAudioPlaybackSetting": false,
+      "own440Amplitude": 2.8160814040448684e-05,
+      "external1000Amplitude": 0.007329880701425264,
+      "ownToExternalRatio": 0.0038419198330162363
+    },
+    {
+      "name": "Positive control, own audio present and exclusion disabled",
+      "restrictOwnAudioSetting": false,
+      "suppressLocalAudioPlaybackSetting": false,
+      "own440Amplitude": 0.01203242585823764,
+      "external1000Amplitude": 0.007358020065793573,
+      "ownToExternalRatio": 1.635280381223033
+    }
+  ],
+  "result": "PASS: external application audio retained, own application tone suppressed both before and after capture start; positive control recaptures own tone",
+  "limitations": [
+    "Physical Windows capture was not tested on this Mac",
+    "This is a focused native audio filtering check, not a full multiuser call test"
+  ]
+}

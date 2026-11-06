@@ -91,6 +91,12 @@ try{
     await assert.rejects(()=>captureScreenWithIsolatedAudio(video,true),error=>error===denied)
     assert.equal(calls.length,1)
   }
+  for(const name of ['NotAllowedError','AbortError','InvalidStateError']){
+    const cancelled=new DOMException('capture cancelled',name)
+    calls=install({restrictOwnAudio:true},()=>{throw cancelled})
+    await assert.rejects(()=>captureScreenWithIsolatedAudio(video,true),error=>error===cancelled)
+    assert.equal(calls.length,1,'Cancellation must not open a second picker')
+  }
   console.log('PASS audio-disabled requests stay video only; video permission failures propagate without repeated prompts')
 }finally{
   if(originalNavigator)Object.defineProperty(globalThis,'navigator',originalNavigator);else delete globalThis.navigator

@@ -93,6 +93,11 @@ jobs:
           (cd primer_front && npm ci)
           (cd voice-client && npm ci && npm run build)
           (cd desktop-client && npm ci)
+      - name: Desktop screen audio policy
+        working-directory: desktop-client
+        run: |
+          npm run build
+          node scripts/screen-capture-policy-check.mjs
       - name: Build installer
         working-directory: desktop-client
         run: npm run ${{ matrix.script }}
