@@ -44,6 +44,9 @@ function subscribe(listener: () => void) {
   return () => { listeners.delete(listener) }
 }
 
-export function useLocalVoiceActivity() {
-  return useSyncExternalStore(subscribe, () => current, () => silence)
+const noSubscription = () => () => {}
+
+/** Remote tiles do not subscribe to every local microphone sample. */
+export function useLocalVoiceActivity(enabled = true) {
+  return useSyncExternalStore(enabled ? subscribe : noSubscription, () => enabled ? current : silence, () => silence)
 }

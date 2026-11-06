@@ -101,7 +101,7 @@ export function MiniCallView({
       </div>
 
       {showCameras ? <div data-mini-camera-grid onDoubleClick={onOpen} className="grid min-h-0 flex-1 gap-1 overflow-auto p-1" style={{ gridTemplateColumns: `repeat(${columns}, minmax(calc(clamp(2rem, 7vh, 5rem) + 1rem), 1fr))`, gridTemplateRows: `repeat(${Math.max(1, Math.ceil(visible.length / columns))}, minmax(calc(clamp(2rem, 7vh, 5rem) + 2rem), 1fr))` }}>
-        {visible.map(user => <ParticipantTile key={user.id} user={user} picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]} mirror={user.id === selfClientId} />)}
+        {visible.map(user => <ParticipantTile key={user.id} user={user} picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]} mirror={user.id === selfClientId} isSelf={user.id === selfClientId} muted={user.id === selfClientId ? isMuted : user.isMuted} />)}
       </div> : <button
         type="button"
         onDoubleClick={onOpen}

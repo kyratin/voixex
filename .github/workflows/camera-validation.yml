@@ -68,3 +68,4 @@ jobs:
           node scripts/voice-browser-check.mjs
           node scripts/camera-browser-check.mjs
           node scripts/voice-stage-layout-check.mjs
+          node scripts/camera-speaking-check.mjs

@@ -34,6 +34,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { StreamVolumeControl } from "@/components/voip/stream-volume-control"
 import type { VoiceUser } from "@/components/voip/channel-sidebar"
 import { SpeakingAvatar } from "@/components/voip/speaking-avatar"
+import { useVoiceLevel } from "@/lib/voice-levels"
+import { useLocalVoiceActivity } from "@/lib/voice-activity"
 import { cn } from "@/lib/utils"
 import { useI18n } from "@/lib/i18n/provider"
 
@@ -175,17 +177,27 @@ export function ParticipantTile({
   user,
   picture,
   mirror = false,
+  isSelf = false,
+  muted = user.isMuted,
   volume
 }: {
   user: VoiceUser
   picture?: CameraPicture
   mirror?: boolean
+  isSelf?: boolean
+  muted?: boolean
   volume?: { pct: number; onChange: (pct: number) => void }
 }) {
   const { t } = useI18n()
+  const remoteLevel = useVoiceLevel(isSelf ? "" : user.id)
+  const localActivity = useLocalVoiceActivity(isSelf)
+  const measured = isSelf ? (localActivity.speaking ? localActivity.level : 0) : remoteLevel
+  const effective = muted ? 0 : Math.max(0, Math.min(1, measured > 0 ? measured : !isSelf && user.isSpeaking ? 0.35 : 0))
+  const speaking = effective > 0.02
   const tile = (
     <div
       data-participant-id={user.id}
+      data-speaking={speaking ? "true" : "false"}
       style={{ minHeight: "calc(clamp(2rem, 7vh, 5rem) + 2rem)", minWidth: "calc(clamp(2rem, 7vh, 5rem) + 1rem)" }}
       className={cn(
         "relative flex h-full min-h-0 w-full min-w-0 flex-col items-center justify-center gap-2 overflow-hidden rounded-xl bg-card/80 transition-colors animate-in fade-in zoom-in-90 duration-300",
@@ -193,21 +205,29 @@ export function ParticipantTile({
       )}
     >
       {picture ? <CameraVideo picture={picture} mirror={mirror} /> : null}
+      <span
+        data-speaking-tile-ring
+        aria-hidden
+        className="pointer-events-none absolute inset-0 z-20 rounded-xl transition-[opacity,box-shadow] duration-150 ease-out"
+        style={{ opacity: speaking ? 1 : 0, boxShadow: `inset 0 0 0 3px rgb(35 165 90 / ${0.75 + effective * 0.25}), inset 0 0 ${8 + effective * 16}px rgb(35 165 90 / ${0.12 + effective * 0.2})` }}
+      />
       {user.isScreenSharing ? (
         <span className="absolute left-2 top-2 rounded bg-destructive px-1.5 py-0.5 text-[9px] font-bold uppercase text-white">Live</span>
       ) : null}
       <div className={picture ? "invisible" : "contents"}><SpeakingAvatar
         id={user.id}
         label={user.name}
-        isSpeaking={user.isSpeaking}
+        isSpeaking={speaking}
+        level={effective}
+        active={!muted}
         className="size-[clamp(2rem,7vh,5rem)] shrink-0 text-xl"
       >
         {user.avatar.slice(0, 1).toUpperCase()}
       </SpeakingAvatar></div>
       <div className={cn("z-10 flex max-w-[90%] items-center gap-1 text-xs font-medium text-foreground", picture && "absolute bottom-2 rounded bg-black/65 px-2 py-1 text-white")}>
         <span className="truncate">{user.name}</span>
-        {user.isSpeaking ? <span className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
-        {user.isMuted ? <MicOff className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t("userPanel.mute")} /> : null}
+        {speaking ? <span className="size-1.5 shrink-0 rounded-full bg-accent" /> : null}
+        {muted ? <MicOff className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t("userPanel.mute")} /> : null}
         {user.isDeafened ? <HeadphoneOff className="h-3 w-3 shrink-0 text-destructive/80" aria-label={t("userPanel.deafen")} /> : null}
       </div>
     </div>
@@ -450,6 +470,8 @@ export function VoiceStage({
               user={user}
               picture={user.id === selfClientId && camera?.local ? { stream: camera.local } : camera?.pictures[user.id]}
               mirror={user.id === selfClientId}
+              isSelf={user.id === selfClientId}
+              muted={user.id === selfClientId ? isMuted : user.isMuted}
               volume={canAdjust ? {
                 pct: peerVolumePct[`${roomId}:${user.id}`] ?? 100,
                 onChange: pct => onPeerVolumeChange(roomId, user.id, user.name, pct)
